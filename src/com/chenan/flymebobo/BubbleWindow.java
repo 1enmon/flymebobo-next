@@ -1,0 +1,5164 @@
+package com.chenan.flymebobo;
+
+import android.content.Context;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Random;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Comparator;
+import java.util.List;
+
+/**
+ * flymebobo 2.0 — 气泡窗口 (BubbleWindow).
+ *
+ * Owns the overlay window and the free-layout dock. Capsules and the
+ * pile are positioned by coordinates in the dock (no vertical
+ * LinearLayout), so the pile and a pinned capsule can share a row.
+ *
+ * Capsule stack rule (user 2026-11-18 "不同胶囊根据时间向下排列"):
+ * different capsules are arranged DOWNWARD by time — newest at the
+ * top, older ones below, in notification-time order. A new capsule
+ * never sinks the ones already out; it takes its time-ordered slot.
+ *
+ * Fresh code for 2.0 (not copied from 1.x).
+ */
+public class BubbleWindow {
+    private static final BubbleWindow INSTANCE = new BubbleWindow();
+
+    // v176 (method 1): true once the NotifCollection hook installed
+    // successfully in SystemUI. While true, the ACTION_NOTIFY
+    // broadcast path is a fallback only — XposedEntry drops its
+    // deliveries so a notification popped by the hook is not popped
+    // again by the broadcast. False (hook missing on this ROM) means
+    // the broadcast path is the live one.
+    private static volatile boolean notifCollectionHookActive = false;
+
+    public static void setNotifCollectionHookActive(boolean active) {
+        notifCollectionHookActive = active;
+    }
+
+    /** v194: true when any active or docked group already holds
+     * this notification key. Used by XposedEntry to drop a
+     * broadcast delivery the hook already popped, so restoring
+     * the broadcast fallback (v190) cannot double-pop. The KEY
+     * is the same on both paths even when their title/text
+     * parsing differs, so a key check is reliable where the
+     * content fingerprints are not. */
+    public boolean hasNotificationKey(String key) {
+        if (key == null) {
+            return false;
+        }
+        for (NotifGroup g : groups) {
+            if (g != null && g.hasKey(key)) {
+                return true;
+            }
+        }
+        for (NotifGroup g : dockedGroups.values()) {
+            if (g != null && g.hasKey(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isNotifCollectionHookActive() {
+        return notifCollectionHookActive;
+    }
+
+    /** One uniform gap: between apps, after a stack, and between
+     * expanded items — all the same (user 2026-11-18 "不同应用通知间隔一致"). */
+    private static final int CAPSULE_GAP_DP = 6;
+    /** Pin badge overhang: the badge stands this far left of the capsule. */
+    private static final int PIN_OVERHANG_DP = 28;
+    private static final int STACK_EDGE_DP = 6;
+    private static final int DOCK_EDGE_DP = 0;
+
+    private Context app;
+    private WindowManager wm;
+    private FrameLayout root;
+    private FrameLayout dock;
+    private WindowManager.LayoutParams params;
+    private boolean windowAdded;
+    private boolean dockLeft = true;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    /** 1.x pop throttle: same app only pops once per 30s, and any
+     * notification within 5s of the last pop only refreshes (the
+     * notification still joins its group/stack, it just does not
+     * replay the pop-in animation). */
+    private static final long SAME_APP_POP_WINDOW_MS = 30_000L;
+    private static final long REPOP_GUARD_MS = 5_000L;
+    private final Map<String, Long> lastPopByPkg = new HashMap<>();
+    private long lastPopAt;
+
+    /** Groups currently out, newest first (by latest notification time). */
+    private final List<NotifGroup> groups = new ArrayList<>();
+    /** Docked groups by package, so tapping a pile icon can expand
+     * that app's notifications back out. */
+    private final Map<String, NotifGroup> dockedGroups = new HashMap<>();
+    private DockedPile pile;
+    // The pile (docked fan) lives in its OWN window, separate from the
+    // capsule window, so the blank gap between the capsules and the
+    // fan is outside both windows and taps fall through to the app
+    // below (user 2026-11-19 "贴合图标和胶囊之间的空白无法点击" /
+    // "胶囊不在都是正常点击的" / "胶囊出现了之后就不行了"). One
+    // rectangular window can never have a hole in it: anything inside
+    // its bounds swallows touches even when no view handles them.
+    private FrameLayout pileRoot;
+    private WindowManager.LayoutParams pileParams;
+    private boolean pileWindowAdded;
+    /** Target screen Y for the pile window; set in rebuildDock. */
+    private int pileTargetY;
+    /** True while the pile window Y is being animated. */
+    private boolean pileYAnimating;
+    /** v161: hold the dock window tall while survivors slide up.
+     * rebuildDock shrinks the window to the new (smaller) height
+     * immediately, but the survivors animate from their OLD
+     * (lower) positions — the last one (longest stagger) starts
+     * after the window already shrank, so its slide is clipped
+     * (user 2026-11-19 "最后一个的窗口设置的太快了，会把最后
+     * 一个通知向上靠拢的动画截掉"). While true, updateWindowSize
+     * never shrinks the height; slideSurvivorsUp releases it
+     * once the slide finishes. */
+    private boolean holdWindowHeight;
+    // Re-entry guard for dissipateAllOneByOne (v93): the tap-outside
+    // handler can fire twice for one tap, and without this guard the
+    // whole particle sequence runs twice.
+    private boolean isDissipatingAll;
+    // Card (v143): the capsule grown into a card. The card is the
+    // SAME CapsuleView, grown — not a new window. cardKey is the
+    // NotifData key whose card is open (null = none); cardHeightPx
+    // is the snapped card height (k*50-6dp). rebuildDock() restores
+    // the card from these two fields, so a rebuild (new notification,
+    // pin change) never loses an open card.
+    private String cardKey;
+    /** v236: keys of items pinned as CARDS (expanded). A pinned
+     * card stays expanded even after another card opens; only
+     * unpinning reverts it to a capsule. Pinning a plain capsule
+     * does not add its key here. */
+    private final java.util.Set<String> pinnedCardKeys =
+            new java.util.HashSet<>();
+    /** v238: unpinned cards stay in place — key to the pin time
+     * they had when unpinned. Phase 1 keeps such an item at
+     * that pin-time row as a capsule instead of jumping back
+     * to its group position. Only pinned cards get this. */
+    private final java.util.Map<String, Long> stayPutPinTime =
+            new java.util.HashMap<>();
+    /** v237: an open card was just pinned — rebuildDock pops its
+     * group's newly-visible capsules in with the cascade
+     * animation instead of letting them appear instantly. */
+    private boolean popInAfterRebuild = false;
+    private NotifGroup popInGroup = null;
+    private int cardHeightPx;
+    /** v174: whether the module's lyric listener is currently on. */
+    private boolean lyricListenOn;
+    /** Top (px) of the open card in the dock; -1 when no card. */
+    private int cardTopY = -1;
+    /** v235: frozen top (px) of the open card, and its key.
+     * While the same card stays open, rebuildDock reuses this
+     * instead of recomputing the row from the current group
+     * order, so a new notification arriving above the card
+     * cannot shift it down. */
+    private int frozenCardTopY = -1;
+    private String frozenCardKey = null;
+    /** True while the card grow/shrink animation is running. */
+    private boolean cardAnimating;
+    /** v151: the card's transparent trailing tail (the gradient strip
+     * that stretches from the screen's left edge to the card while
+     * it right-swipes away). Null when no close is running. */
+    private View cardTail;
+    /** v156: the open card's left edge sits this far in from the
+     * screen's left edge (its pop-out from the left lands here).
+     * v150–v155 used 20dp; user 2026-11-19 "让他贴合左边屏幕啊" —
+     * the card is an enlarged capsule and capsules hug the left
+     * edge with no gap, so the card lands flush at 0. */
+    private static final int CARD_LEFT_OFFSET_DP = 0;
+    // Incoming / ongoing call (v103). One call at a time; the call
+    // capsule is a green NotifData (isCall) in its own group.
+    private static final String CALL_PKG = "com.android.incallui";
+    private static final String CALL_KEY = "flymebobo-call";
+    // Call state machine (v117, ported whole from 1.x CallBubble):
+    // "idle" / "ringing" / "offhook". The single source of truth,
+    // driven by the PhoneStateListener (telephony ground truth)
+    // and the call broadcasts. A duplicate RINGING or a stray IDLE
+    // can never wipe the answered state, because the state only
+    // moves on real telephony transitions.
+    // v125 (Flyme Island): SystemUI -> module, fire one of the
+    // incallui notification's own actions. extra "command" is one
+    // of answer / reject / hangup / speaker_on / speaker_off.
+    private static final String ACTION_CALL_CONTROL =
+            "com.chenan.flymebobo.CALL_CONTROL";
+
+    // v129 (Flyme Island sendCallAction): the broadcast that
+    // fires a call action must carry the sender's identity and
+    // target the module package explicitly, and it must carry
+    // the notification key so the module fires the action of
+    // THIS call, not just any incallui notification. Without
+    // setShareIdentityEnabled(true) the module cannot verify
+    // the sender, and without the key it cannot pick the right
+    // notification — that is why the tap did nothing.
+    private void sendCallControl(String command) {
+        try {
+            android.content.Intent intent =
+                    new android.content.Intent(ACTION_CALL_CONTROL);
+            intent.setPackage("com.chenan.flymebobo");
+            intent.putExtra("command", command);
+            intent.putExtra("call_key",
+                    callKey != null ? callKey : "");
+            intent.putExtra("sent_at",
+                    android.os.SystemClock.elapsedRealtime());
+            try {
+                android.os.Bundle opts =
+                        android.app.BroadcastOptions.makeBasic()
+                                .setShareIdentityEnabled(true).toBundle();
+                app.sendBroadcast(intent, null, opts);
+            } catch (Throwable t) {
+                app.sendBroadcast(intent);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String callState = "idle";
+    private long callStartTime;
+    // Current call's number, for the duplicate-RINGING guard (v112).
+    private String callNumber;
+    private String callKey;
+    // v130: the speaker PendingIntents handed to SystemUI by the
+    // module (from the ongoing call notification). Fired directly
+    // at tap time — no round-trip broadcast to the module.
+    private android.app.PendingIntent callSpeakerOnIntent;
+    private android.app.PendingIntent callSpeakerOffIntent;
+    /** Speakerphone on for the ongoing call (v108). */
+    private boolean callSpeaker;
+    private android.os.Handler callTickHandler;
+    private Runnable callTickRunnable;
+    // Phone-state listener (v111, ported from 1.x CallBubble): 1.x
+    // applies the speakerphone when the real OFFHOOK state is
+    // observed, not just at answer time. 2.0 set it immediately
+    // after acceptRingingCall(), before the call connects, so the
+    // audio mode wasn't MODE_IN_CALL yet and the set was ignored.
+    private android.telephony.TelephonyManager callTelephonyManager;
+    private android.telephony.PhoneStateListener callPhoneListener;
+    // Second-line dedup (v100): pkg + title + text, 15s window.
+    // Catches duplicates that slip through NotificationService's
+    // source dedup (different key, missed fingerprint) before they
+    // can pop a second capsule or build a second fan group.
+    private final java.util.Map<String, Long> popFingerprints =
+            new java.util.HashMap<>();
+    // Long-lived key+content backstop (v146): the same message must
+    // never pop twice, even if the module's dedup missed it — the
+    // listener reconnects (boot, or a restart after long use) and
+    // re-delivers active notifications, and the module's in-memory
+    // cache was reset. Same key + same content within 1h = duplicate.
+    // Same key + new content = an update, allowed. Music/downloads
+    // are exempt (their re-posts are legitimate updates).
+    private static final long POP_KEY_TTL_MS = 3600_000L;
+    private final java.util.Map<String, String> poppedKeys =
+            new java.util.HashMap<>();
+    private final java.util.Map<String, Long> poppedKeysTime =
+            new java.util.HashMap<>();
+    // v197: synchronous duplicate-delivery guard. The v194 smart
+    // guard (XposedEntry drops the broadcast when the hook already
+    // popped the key) has a race: onNotification posts popCapsule
+    // to a handler, so the key is not in any group yet when the
+    // broadcast arrives a few ms later, and BOTH deliveries pop.
+    // This map is written SYNCHRONOUSLY in onNotification (before
+    // the handler.post), so whichever path arrives second sees the
+    // key and is dropped on the spot, in either order. Only for
+    // regular notifications: music/downloads have their own
+    // update logic in popCapsule (same key = an update) and must
+    // not be dropped here. 2s window: a duplicate delivery
+    // arrives within milliseconds; a legitimate re-post is
+    // seconds later. Entries older than 60s are pruned.
+    private final java.util.Map<String, Long> seenNotifKeys =
+            new java.util.HashMap<>();
+    private static final long SEEN_KEY_WINDOW_MS = 2000L;
+    private static final long SEEN_KEY_TTL_MS = 60_000L;
+    private static final long POP_FINGERPRINT_WINDOW_MS = 15000;
+    /** Groups currently being docked/dissipated (their animation
+     * is running). Manual and automatic paths both check this so they
+     * never fight over one group (user 2026-11-19 "手动的和自动的抢
+     * 动画了"). */
+    private final java.util.Set<NotifGroup> dockingGroups =
+            new java.util.HashSet<>();
+
+    public static BubbleWindow getInstance() {
+        return INSTANCE;
+    }
+
+    public void init(Context app) {
+        if (windowAdded || this.app != null) {
+            return;
+        }
+        this.app = app.getApplicationContext();
+        wm = (WindowManager) this.app.getSystemService(Context.WINDOW_SERVICE);
+        root = new FrameLayout(this.app);
+        root.setClipChildren(false);
+        dock = new FrameLayout(this.app);
+        dock.setClipChildren(false);
+        int grav = Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END);
+        dock.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, grav));
+        root.addView(dock);
+        // Tap on empty screen docks everything to the edge (user
+        // 2026-11-19 "点击屏幕自动缩小贴边"). FLAG_WATCH_OUTSIDE_TOUCH
+        // delivers ACTION_OUTSIDE for taps outside this window; the
+        // tap still reaches the app below (we never consume it).
+        root.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, android.view.MotionEvent event) {
+                // v174: a tap on empty window area also closes an open
+                // card. ACTION_OUTSIDE only fires outside the window;
+                // the window is widened while a card is open (auto
+                // swipe), so a tap just right of the card is INSIDE
+                // the window and never produced ACTION_OUTSIDE - a
+                // pinned card could then only be removed by a manual
+                // right swipe. ACTION_DOWN here only fires when no
+                // child (capsule/card) consumed the tap.
+                if (event.getAction()
+                        == android.view.MotionEvent.ACTION_DOWN
+                        && cardKey != null) {
+                    // v180: a pinned card does not auto-disappear —
+                    // tap outside leaves it open; only a manual
+                    // right-swipe (or unpin) removes it.
+                    // v192 (user "钉住以后…也正常触发点击屏幕空白
+                    // 位置"): a pinned card is a big capsule — the
+                    // tap still triggers the normal auto-dissipate
+                    // for the OTHER notifications below it.
+                    if (!isCardPinned()) {
+                        closeCard();
+                    } else {
+                        dissipateAllOneByOne();
+                    }
+                    return false;
+                }
+                if (event.getAction()
+                        != android.view.MotionEvent.ACTION_OUTSIDE) {
+                    return false;
+                }
+                // A tap on the fan window is not an empty-screen tap.
+                if (pile != null && pile.getIconCount() > 0
+                        && pileWindowAdded && pileParams != null) {
+                    float rawX = event.getRawX();
+                    float rawY = event.getRawY();
+                    int px = pileParams.x;
+                    int py = pileParams.y;
+                    if (rawX >= px && rawX < px + pileParams.width
+                            && rawY >= py
+                            && rawY < py + pileParams.height) {
+                        return false;
+                    }
+                }
+                // A card is open: tap outside closes the card
+                // instead of dissipating everything — unless the
+                // card is pinned (v180: a pinned card stays open).
+                // v192: a pinned card is a big capsule — the tap
+                // still dissipates the OTHER notifications below it.
+                if (cardKey != null) {
+                    if (!isCardPinned()) {
+                        closeCard();
+                    } else {
+                        dissipateAllOneByOne();
+                    }
+                    return false;
+                }
+                // v150: a card open/close animation is running — a
+                // tap outside mid-animation must not start a
+                // dissipate on top of it.
+                if (cardAnimating) {
+                    return false;
+                }
+                dissipateAllOneByOne();
+                return false;
+            }
+        });
+        pile = new DockedPile(this.app, dockLeft);
+        // Pile window: the fan lives here, not in the dock.
+        pileRoot = new FrameLayout(this.app);
+        pileRoot.setClipChildren(false);
+        pileRoot.addView(pile, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END)));
+        pileParams = new WindowManager.LayoutParams(1, 1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        pileParams.gravity = grav;
+        pileParams.y = dp(DOCK_EDGE_DP);
+        pileParams.setTitle("flymebobo-pile");
+        params = new WindowManager.LayoutParams(1, 1,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT);
+        params.gravity = grav;
+        params.y = dp(DOCK_EDGE_DP);
+        params.setTitle("flymebobo");
+        try {
+            wm.addView(root, params);
+            windowAdded = true;
+        } catch (Throwable ignored) {
+        }
+        try {
+            wm.addView(pileRoot, pileParams);
+            pileWindowAdded = true;
+        } catch (Throwable ignored) {
+        }
+        // Phone-state listener (v117, ported whole from 1.x
+        // CallBubble): the listener is the source of truth for the
+        // call state. It posts to the handler and handlePhoneState
+        // moves the state machine — RINGING only from IDLE,
+        // OFFHOOK runs enterOffhook (applies the speaker, starts
+        // the tick), IDLE ends the call UI. Registered once for the
+        // module's lifetime.
+        try {
+            callTelephonyManager = (android.telephony.TelephonyManager)
+                    app.getSystemService(
+                            android.content.Context.TELEPHONY_SERVICE);
+            if (callTelephonyManager != null) {
+                callPhoneListener =
+                        new android.telephony.PhoneStateListener() {
+                    @Override
+                    public void onCallStateChanged(final int state,
+                            final String number) {
+                        try {
+                            if (handler != null) {
+                                handler.post(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        handlePhoneState(state, number);
+                                    }
+                                });
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                };
+                callTelephonyManager.listen(callPhoneListener,
+                        android.telephony.PhoneStateListener
+                                .LISTEN_CALL_STATE);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // v124 (v122 CallBubble.dropStaleCallState / resetCallState,
+    // copied as-is, adapted only for 2.0's String callState):
+    // a stale OFFHOOK/RINGING left by a previous call (e.g. a test
+    // call) must be cleared when a new RINGING arrives, otherwise
+    // the state machine thinks it is already in a call and the
+    // speaker/timer never engage. Uses TelephonyManager.getCallState
+    // as the ground truth (2 = OFFHOOK, 0 = IDLE).
+    private boolean dropStaleCallState() {
+        try {
+            int phoneState = callTelephonyManager == null ? 0
+                    : callTelephonyManager.getCallState();
+            if ("offhook".equals(callState) && phoneState != 2) {
+                resetCallState();
+                return true;
+            }
+            if ("ringing".equals(callState) && phoneState == 0) {
+                resetCallState();
+                return true;
+            }
+            return false;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void resetCallState() {
+        callState = "idle";
+        callNumber = null;
+        callSpeaker = false;
+        callStartTime = 0;
+    }
+
+    /** A notification was read — pop its capsule. */
+    public void onNotification(final NotifData data) {
+        if (data == null || app == null) {
+            return;
+        }
+        // v197: synchronous duplicate-delivery guard (see
+        // seenNotifKeys). Both the hook and the broadcast funnel
+        // here; the second delivery of the same key within 2s is
+        // the same notification arriving twice, not an update.
+        // This runs BEFORE the handler.post, so there is no race
+        // with the async popCapsule. Music/downloads are exempt
+        // (same key = a legitimate update in popCapsule). Live
+        // activities are exempt too (v222: the timer re-posts the
+        // same key every second; double delivery is still stopped
+        // by the v194 hook-popped guard in XposedEntry).
+        if (!data.isMusic && !data.isDownload && !data.isLive && data.key != null) {
+            long now = System.currentTimeMillis();
+            synchronized (seenNotifKeys) {
+                Long at = seenNotifKeys.get(data.key);
+                if (at != null && now - at < SEEN_KEY_WINDOW_MS) {
+                    return;
+                }
+                seenNotifKeys.put(data.key, now);
+                if (seenNotifKeys.size() > 256) {
+                    java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                            seenNotifKeys.entrySet().iterator();
+                    while (it.hasNext()) {
+                        if (now - it.next().getValue() > SEEN_KEY_TTL_MS) {
+                            it.remove();
+                        }
+                    }
+                }
+            }
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                popCapsule(data);
+            }
+        });
+    }
+
+    // v176 (method 1): the system removed a notification (user
+    // swiped it away in the shade, the app cancelled it). Drop its
+    // capsule from the bubble groups so the bubble stays in sync
+    // with the shade. Runs on the main handler like onNotification.
+    public void onNotificationRemoved(final String key) {
+        if (key == null || app == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey(key);
+                rebuildDock();
+            }
+        });
+    }
+
+    /** v244: verification-code keywords (auto-copy). */
+    private static final String[] VERIFY_KEYWORDS =
+            new String[]{"验证码", "校验码", "动态码"};
+    /** v244: pickup-code keywords (auto-pin). Meituan
+     * self-pickup is 取餐码 / 自提码; couriers and lockers use
+     * 取件码 / 取货码 / 提货码. */
+    private static final String[] PICKUP_KEYWORDS = new String[]{
+            "取货码", "取件码", "提货码", "取餐码", "自提码",
+            "寄存码", "领取码"};
+
+    /** v244: find a code near one of the keywords. Returns
+     * {code, matchedKeyword} or null. A code is 4-8 digits
+     * within ~12 chars after the keyword ("验证码是 123456")
+     * or before it ("123456是您的验证码"); pickup codes may
+     * also be alphanumeric as long as they contain a digit
+     * ("取件码 A1234"). Pickup keywords are tried first —
+     * they are more specific than the generic verify words. */
+    private static String[] extractCode(String title, String text) {
+        String s = (title != null ? title : "")
+                + "\n" + (text != null ? text : "");
+        if (s.trim().isEmpty()) {
+            return null;
+        }
+        String[] r = findCodeNear(s, PICKUP_KEYWORDS, true);
+        if (r != null) {
+            return r;
+        }
+        r = findCodeNear(s, VERIFY_KEYWORDS, false);
+        if (r != null) {
+            return r;
+        }
+        // v245: locker / courier phrasing with no code keyword —
+        // "请凭173351...取件" (百为智能) and "凭10-18-0413取件"
+        // (菜鸟驿站). The code sits right after 凭: plain 4-8
+        // digits, or hyphenated groups (10-18-0413). A time
+        // like 19:00 is safe — it sits BEFORE 凭, and the
+        // pattern only reads what follows it.
+        java.util.regex.Matcher pm = java.util.regex.Pattern.compile(
+                "凭\\s*([0-9]{4,8}|[0-9]{2,4}(?:-[0-9]{2,4}){1,2})")
+                .matcher(s);
+        if (pm.find()) {
+            return new String[]{pm.group(1), "取件码"};
+        }
+        // v248: English (WeChat verifying / Meta confirmation
+        // code / two-factor authentication). Tried last, after
+        // all Chinese patterns.
+        return findEnglishCode(s);
+    }
+
+    /** v245: smart-locker cabinet/box number. "第17箱" (百为智能),
+     * "2-01智能柜" (韵达), "1号快递柜". Returns the cabinet
+     * string (e.g. "第17箱", "2-01柜", "1号柜") or null.
+     * The hyphenated cabinet (2-01) is only matched when 柜
+     * follows it, so a hyphenated pickup code (10-18-0413)
+     * is never mistaken for a cabinet. */
+    private static String extractCabinet(String title, String text) {
+        String s = (title != null ? title : "")
+                + "\n" + (text != null ? text : "");
+        if (s.trim().isEmpty()) {
+            return null;
+        }
+        java.util.regex.Matcher m1 = java.util.regex.Pattern.compile(
+                "第([0-9]+)箱").matcher(s);
+        if (m1.find()) {
+            return "第" + m1.group(1) + "箱";
+        }
+        java.util.regex.Matcher m2 = java.util.regex.Pattern.compile(
+                "([0-9]+-[0-9]+)[智能]*柜").matcher(s);
+        if (m2.find()) {
+            return m2.group(1) + "柜";
+        }
+        java.util.regex.Matcher m3 = java.util.regex.Pattern.compile(
+                "([0-9]+)号快递柜").matcher(s);
+        if (m3.find()) {
+            return m3.group(1) + "号柜";
+        }
+        return null;
+    }
+
+    private static String[] findCodeNear(String s, String[] keywords,
+            boolean allowAlpha) {
+        for (String kw : keywords) {
+            int idx = s.indexOf(kw);
+            if (idx < 0) {
+                continue;
+            }
+            // Code after the keyword: "验证码是 123456".
+            String after = s.substring(idx + kw.length());
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern.compile("[0-9]{4,8}")
+                            .matcher(after);
+            if (m.find() && m.start() < 12) {
+                return new String[]{m.group(), kw};
+            }
+            // Code before the keyword: "123456是您的验证码".
+            String before = s.substring(0, idx);
+            java.util.regex.Matcher m2 =
+                    java.util.regex.Pattern.compile("[0-9]{4,8}")
+                            .matcher(before);
+            String last = null;
+            int lastStart = -1;
+            while (m2.find()) {
+                last = m2.group();
+                lastStart = m2.start();
+            }
+            if (last != null && before.length() - lastStart < 16) {
+                return new String[]{last, kw};
+            }
+            // Alphanumeric pickup code: "取件码 A1234".
+            if (allowAlpha) {
+                java.util.regex.Matcher m3 = java.util.regex.Pattern
+                        .compile("[A-Za-z0-9]{4,8}").matcher(after);
+                while (m3.find() && m3.start() < 12) {
+                    String c = m3.group();
+                    if (c.matches(".*[0-9].*")) {
+                        return new String[]{c, kw};
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** v248: English code recognition. Keywords are matched
+     * case-insensitively; the window is 25 non-digit chars
+     * because English puts words between the keyword and the
+     * code ("verifying mobile number (335403)"). Both orders
+     * are covered: code after the keyword ("Your OTP is
+     * 482915") and code before it ("332641 is your Meta
+     * confirmation code.", "Use 838516 for two-factor
+     * authentication"). Returns {code, "验证码"} or {code,
+     * "取件码"} (Chinese labels, so the rest of the pipeline
+     * works unchanged), or null. */
+    private static String[] findEnglishCode(String s) {
+        String verify = "(?:verif\\w*|otp|one[\\s-]time code|"
+                + "authentication code|two-factor authentication|"
+                + "two-factor|2fa|security code|confirmation code|"
+                + "confirm code|passcode)";
+        String pickup = "(?:pickup code|pick[\\s-]up code|"
+                + "collection code|parcel code|delivery code)";
+        java.util.regex.Matcher m;
+        // Code after the keyword (pickup first — more specific).
+        m = java.util.regex.Pattern.compile(
+                "(?i)" + pickup + "[^0-9]{0,25}([0-9]{4,8})")
+                .matcher(s);
+        if (m.find()) {
+            return new String[]{m.group(1), "取件码"};
+        }
+        m = java.util.regex.Pattern.compile(
+                "(?i)" + verify + "[^0-9]{0,25}([0-9]{4,8})")
+                .matcher(s);
+        if (m.find()) {
+            return new String[]{m.group(1), "验证码"};
+        }
+        // Code before the keyword.
+        m = java.util.regex.Pattern.compile(
+                "(?i)([0-9]{4,8})[^0-9]{0,25}" + pickup)
+                .matcher(s);
+        if (m.find()) {
+            return new String[]{m.group(1), "取件码"};
+        }
+        m = java.util.regex.Pattern.compile(
+                "(?i)([0-9]{4,8})[^0-9]{0,25}" + verify)
+                .matcher(s);
+        if (m.find()) {
+            return new String[]{m.group(1), "验证码"};
+        }
+        return null;
+    }
+
+    /** v244: is this keyword a pickup keyword? (Decides
+     * auto-copy: verification codes copy, pickup codes do not.) */
+    private static boolean isPickupKeyword(String kw) {
+        if (kw == null) {
+            return false;
+        }
+        for (String k : PICKUP_KEYWORDS) {
+            if (k.equals(kw)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** v244: copy a verification code to the clipboard and
+     * confirm with a short Toast. Runs in SystemUI, which may
+     * write the clipboard. */
+    private void autoCopyVerifyCode(String code) {
+        if (code == null || app == null) {
+            return;
+        }
+        try {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager)
+                    app.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText(
+                                "验证码", code));
+                android.widget.Toast.makeText(app,
+                        "验证码 " + code + " 已复制",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void popCapsule(NotifData data) {
+        if (dock == null) {
+            return;
+        }
+        // v259: APP feature switches (real-time, no restart).
+        // Master switch off = no capsule at all; the others gate
+        // only their own kind. Switches on = exactly the old path.
+        if (!FeatureFlags.notif) {
+            return;
+        }
+        if (data != null && data.isMusic && !FeatureFlags.music) {
+            return;
+        }
+        if (data != null && data.isDownload && !FeatureFlags.dl) {
+            return;
+        }
+        if (data != null && data.isCall && !FeatureFlags.live) {
+            return;
+        }
+        // v244: recognize a verification / pickup code in the
+        // title/text before anything else, so the code is set
+        // for dedup, display, auto-pin and auto-copy.
+        // v259: code switch off = skip recognition entirely, the
+        // notification still pops as a regular capsule.
+        if (FeatureFlags.code && data != null && data.code == null) {
+            String[] found = extractCode(data.title, data.text);
+            if (found != null) {
+                data.code = found[0];
+                data.codeLabel = found[1];
+                data.isPickupCode = isPickupKeyword(found[1]);
+                // v245: a pickup code may come with a locker
+                // number — show it too (user 2026-11-21
+                // "如果有柜号肯定也要显示啊").
+                if (data.isPickupCode) {
+                    data.cabinet =
+                            extractCabinet(data.title, data.text);
+                }
+            }
+        }
+        // Second-line dedup (v100): same app, same title + text
+        // within 15s — drop it here even if the source dedup let it
+        // through. Music and downloads are exempt (their re-posts
+        // are legitimate updates).
+        if (data != null && !data.isMusic && !data.isDownload
+                && data.pkg != null) {
+            String fp = data.pkg + "\u0001"
+                    + (data.title == null ? "" : data.title) + "\u0001"
+                    + (data.text == null ? "" : data.text);
+            long now = System.currentTimeMillis();
+            Long at = popFingerprints.get(fp);
+            if (at != null && now - at < POP_FINGERPRINT_WINDOW_MS) {
+                return;
+            }
+            popFingerprints.put(fp, now);
+            if (popFingerprints.size() > 64) {
+                java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                        popFingerprints.entrySet().iterator();
+                while (it.hasNext()) {
+                    if (now - it.next().getValue()
+                            > POP_FINGERPRINT_WINDOW_MS) {
+                        it.remove();
+                    }
+                }
+            }
+        }
+        // v175: music double-delivery backstop. Music is exempt
+        // from the v100/v146 dedup (a same-key re-post is a
+        // legitimate song change), but a double DELIVERY - the same
+        // song change arriving twice within milliseconds because the
+        // broadcast was received twice - pops the same capsule
+        // twice. A real song change has different title/text; the
+        // same key + same content within 2s can only be a duplicate
+        // delivery. (v174's static receiver guard did not stop it,
+        // so the dedup has to catch it here.)
+        // v203 (1.0.5): music bypasses this 2s dedup entirely.
+        // 1.0.5's music branch returns before any dedup, and a
+        // same-key music re-post is an UPDATE (song change), not a
+        // duplicate. The v197 sync seen-guard already stops a dual
+        // delivery before it reaches here, so this guard only ever
+        // swallowed legitimate song changes whose parsed title had
+        // not (yet) changed.
+        // Long-lived key+content backstop (v146): same key + same
+        // title/text within 1h = the same message, drop it even if
+        // the module let it through (reconnect re-delivery). Same key
+        // + new content = an update, let it through.
+        if (data != null && !data.isMusic && !data.isDownload
+                && data.key != null) {
+            String digest = (data.title == null ? "" : data.title)
+                    + "\u0001" + (data.text == null ? "" : data.text);
+            long now = System.currentTimeMillis();
+            Long at = poppedKeysTime.get(data.key);
+            String prev = poppedKeys.get(data.key);
+            if (at != null && now - at < POP_KEY_TTL_MS
+                    && digest.equals(prev)) {
+                return;
+            }
+            poppedKeys.put(data.key, digest);
+            poppedKeysTime.put(data.key, now);
+            if (poppedKeys.size() > 256) {
+                java.util.Iterator<java.util.Map.Entry<String, Long>> it =
+                        poppedKeysTime.entrySet().iterator();
+                while (it.hasNext()) {
+                    java.util.Map.Entry<String, Long> e = it.next();
+                    if (now - e.getValue() > POP_KEY_TTL_MS) {
+                        it.remove();
+                        poppedKeys.remove(e.getKey());
+                    }
+                }
+            }
+        }
+        // Dedup by key: the same notification never pops twice.
+        // EXCEPT music: a music notification keeps the SAME key across
+        // song changes (one notification, updated — the player is a
+        // singleton, one current song), so a same-key music re-post is
+        // an UPDATE, not a duplicate. Remove the old item so the new
+        // song takes its place (user 2026-11-19 "是不是切歌也不会变"
+        // — it didn't change, because this dedup dropped the new
+        // song). Non-music keeps the drop.
+        // A music same-key update must NEVER pop again (user 2026-11-19
+        // "双通知就是又弹出两次通知了"): the music app re-posts the
+        // same key on lyric lines / updates, and the old code still
+        // ran the pop-in animation whenever the 5s/30s throttle had
+        // passed — the same notification popping twice.
+        boolean isMusicUpdate = false;
+        boolean isLiveUpdate = false;
+        for (NotifGroup g : groups) {
+            if (g.hasKey(data.key)) {
+                if (data.isMusic) {
+                    g.removeByKey(data.key);
+                    isMusicUpdate = true;
+                } else if (data.isLive) {
+                    // v222: a live activity re-posts the same key
+                    // with new content (timer tick, delivery
+                    // status) — that is an UPDATE, not a duplicate.
+                    g.removeByKey(data.key);
+                    isLiveUpdate = true;
+                } else {
+                    return;
+                }
+                break;
+            }
+        }
+        // Non-music: also drop when the key is already docked (in the
+        // fan). A re-post of a docked notification (same key, updated
+        // content) otherwise pops again as a brand-new capsule, and
+        // every app re-posts — that is the "all apps pop twice"
+        // regression.
+        if (!data.isMusic && !data.isLive) {
+            for (NotifGroup g : dockedGroups.values()) {
+                if (g.hasKey(data.key)) {
+                    return;
+                }
+            }
+        }
+        if (data.isLive) {
+            // v222: a docked live activity that updates pops back
+            // out (like music) instead of staying in the fan.
+            for (NotifGroup g : dockedGroups.values()) {
+                if (g.hasKey(data.key)) {
+                    g.removeByKey(data.key);
+                    isLiveUpdate = true;
+                    break;
+                }
+            }
+        }
+        if (data.isMusic) {
+            for (NotifGroup g : dockedGroups.values()) {
+                if (g.hasKey(data.key)) {
+                    g.removeByKey(data.key);
+                    isMusicUpdate = true;
+                    break;
+                }
+            }
+            // Some players re-post the media notification with a NEW
+            // key on every update, so the same-key dedup above never
+            // fires and a second music capsule pops (user 2026-11-19
+            // "又开始双通知了"). Dedup music by PACKAGE: one app has
+            // at most one music capsule. Remove any existing music
+            // item for this app first, and treat this as an update.
+            if (!isMusicUpdate) {
+                for (NotifGroup g : groups) {
+                    if (g.pkg != null && g.pkg.equals(data.pkg)) {
+                        for (int i = g.items.size() - 1; i >= 0; i--) {
+                            if (g.items.get(i).isMusic) {
+                                g.items.remove(i);
+                                isMusicUpdate = true;
+                            }
+                        }
+                    }
+                }
+                for (NotifGroup g : dockedGroups.values()) {
+                    if (g.pkg != null && g.pkg.equals(data.pkg)) {
+                        for (int i = g.items.size() - 1; i >= 0; i--) {
+                            if (g.items.get(i).isMusic) {
+                                g.items.remove(i);
+                                isMusicUpdate = true;
+                            }
+                        }
+                    }
+                }
+                // Drop groups left empty by the removal above, so an
+                // empty group does not linger in the dock.
+                for (int gi = groups.size() - 1; gi >= 0; gi--) {
+                    if (groups.get(gi).items.isEmpty()) {
+                        groups.remove(gi);
+                    }
+                }
+                java.util.Iterator<java.util.Map.Entry<String, NotifGroup>> it =
+                        dockedGroups.entrySet().iterator();
+                while (it.hasNext()) {
+                    if (it.next().getValue().items.isEmpty()) {
+                        it.remove();
+                    }
+                }
+            }
+        }
+        // Same app stacks into one group (newest first inside it).
+        NotifGroup group = null;
+        for (NotifGroup g : groups) {
+            if (g.pkg != null && g.pkg.equals(data.pkg)) {
+                group = g;
+                break;
+            }
+        }
+        // v160: discard any DOCKED group for this app (notifications
+        // the user already dissipated). The old code reclaimed it when
+        // there was no active group — the old items came back as
+        // capsules together with the new one — and left it lingering
+        // when an active group existed (stale pile icon overlapping
+        // the capsules, the "second layer", and tapping the icon
+        // resurrected the dismissed capsules). Dismissed = gone:
+        // only the new notification appears.
+        NotifGroup docked = dockedGroups.remove(data.pkg);
+        if (docked != null && pile != null) {
+            pile.removeIconForPkg(data.pkg);
+        }
+        if (group == null) {
+            group = new NotifGroup(data.pkg);
+            groups.add(group);
+        }
+        // Downloads auto-pin on pop (user 2026-11-19 "这个弹出会
+        // 自动钉住"): the capsule stays out showing live progress
+        // instead of docking after 3s. Same pin bookkeeping as
+        // togglePin's pin branch.
+        if (data.isDownload && data.key != null
+                && !group.pinnedAtByKey.containsKey(data.key)) {
+            boolean firstPin = group.pinnedAtByKey.isEmpty();
+            group.pinnedAtByKey.put(data.key, System.currentTimeMillis());
+            group.sortItems();
+            if (firstPin) {
+                group.pinned = true;
+                group.pinnedAt = System.currentTimeMillis();
+            }
+        }
+        // v244: a recognized code auto-pins too (user
+        // 2026-11-21 "识别了就放大钉住") — verification and
+        // pickup alike — so it stays out instead of docking.
+        if (data.code != null && data.key != null
+                && !group.pinnedAtByKey.containsKey(data.key)) {
+            boolean firstPin = group.pinnedAtByKey.isEmpty();
+            group.pinnedAtByKey.put(data.key, System.currentTimeMillis());
+            group.sortItems();
+            if (firstPin) {
+                group.pinned = true;
+                group.pinnedAt = System.currentTimeMillis();
+            }
+        }
+        // Is any group expanded (before adding this notification)?
+        boolean anyExpanded = false;
+        for (NotifGroup g : groups) {
+            if (g.expanded) {
+                anyExpanded = true;
+                break;
+            }
+        }
+        if (anyExpanded && group.expanded) {
+            // The new notification belongs to an expanded group: append
+            // it to the END of that group's items, so it appears AFTER
+            // all the already-expanded notifications in the group (not
+            // at the top). The group stays where it is.
+            group.items.add(data);
+        } else {
+            // Newest-first insert (sorted by postTime).
+            group.add(data);
+        }
+        if (anyExpanded) {
+            // The new notification appears AFTER all the already-
+            // expanded notifications — i.e., just after the last
+            // expanded group. If its app is the expanded group itself,
+            // it stays there (the item was appended above). Otherwise,
+            // move its group to just after the last expanded group.
+            // The fan (docked icons) is pushed down after it, since
+            // rebuildDock always places the pile after all groups. Do
+            // not re-sort by time, so the expanded view is not
+            // disturbed.
+            if (!group.expanded) {
+                int lastExpandedIdx = -1;
+                for (int i = 0; i < groups.size(); i++) {
+                    if (groups.get(i).expanded) {
+                        lastExpandedIdx = i;
+                    }
+                }
+                groups.remove(group);
+                groups.add(lastExpandedIdx + 1, group);
+            }
+        } else {
+            // Groups order by their latest notification time, newest first
+            // — but pinned groups always stay on top (user 2026-11-19
+            // "有钉住通知时，新通知也要在顶住通知下面弹出"): a new
+            // notification pops in just under the pinned ones, never
+            // above them.
+            Collections.sort(groups, new Comparator<NotifGroup>() {
+                @Override
+                public int compare(NotifGroup a, NotifGroup b) {
+                    if (a.pinned != b.pinned) {
+                        return a.pinned ? -1 : 1;
+                    }
+                    if (a.pinned) {
+                        return Long.compare(a.pinnedAt, b.pinnedAt);
+                    }
+                    return Long.compare(b.latestTime(), a.latestTime());
+                }
+            });
+        }
+        rebuildDock();
+        // A music same-key update refreshes the capsule in place and
+        // never pops again (see above) — skip the pop-in animation
+        // and the throttle bookkeeping entirely.
+        if (isMusicUpdate) {
+            // v217 (user 2026-11-20 "QQ音乐，网易云音乐，汽水音乐
+            // 的刷新有问题" / "胶囊切歌不刷新"): GENERIC - the
+            // force-update below was Flyme-only (v211, user then
+            // said "单flyme版QQ音乐这样读取，其他不改"), but the
+            // same staleness hits every music app: rebuildDock()
+            // recreates the views, yet the visible capsule was
+            // observed staying on the old song after a song change
+            // (manual switch does not change it, and neither does
+            // auto-switch; only dismiss-then-switch works, because
+            // that takes the fresh-pop path, and only opening the
+            // card refreshes it). Force the title/artist/lyric
+            // onto the visible capsule for ALL music, so any song
+            // change shows the new song at once, whether or not
+            // the card is open. updateMusicCard also re-reads
+            // data.largeIcon, so late album art follows the
+            // refresh too.
+            CapsuleView cap = findCapsuleByKey(data.key);
+            if (cap != null) {
+                if (data.title != null) {
+                    cap.updateTitle(data.title);
+                }
+                if (data.text != null) {
+                    cap.updateText(data.text);
+                }
+                // v213 (user 2026-11-20 "这里才变正确歌词"):
+                // the capsule lyric line must follow the new
+                // song too. The title/artist were forced above,
+                // but the lyric stayed on the old song until the
+                // user expanded the card and shrank it back.
+                // Force the lyric as well so the capsule shows
+                // the new song's lyric immediately.
+                if (data.lyrics != null) {
+                    cap.updateLyrics(data.lyrics);
+                }
+                cap.updateMusicCard();
+            }
+            return;
+        }
+        // v222: a live-activity same-key update refreshes the
+        // capsule in place — rebuildDock already rebound it with
+        // the new text, so skip the pop-in animation (like a music
+        // update).
+        if (isLiveUpdate) {
+            return;
+        }
+        // v244: a verification code auto-copies on pop (user
+        // 2026-11-21 "验证码这种就自动复制"). Pickup codes do
+        // not copy — they are for showing at the counter. This
+        // runs only for a real pop (dedup above already dropped
+        // duplicates), so one notification copies exactly once.
+        if (data.code != null && !data.isPickupCode) {
+            autoCopyVerifyCode(data.code);
+        }
+        // Pop-in on the group's top capsule (newest, on top of the
+        // stack) — unless the 1.x pop throttle says to only refresh:
+        // same app within 30s, or any notification within 5s of the
+        // last pop. The notification still joins its group/stack.
+        long now = System.currentTimeMillis();
+        Long lastPkgPop = lastPopByPkg.get(data.pkg);
+        boolean throttled = (lastPkgPop != null
+                && now - lastPkgPop < SAME_APP_POP_WINDOW_MS)
+                || (lastPopAt != 0 && now - lastPopAt < REPOP_GUARD_MS);
+        if (!throttled) {
+            lastPopByPkg.put(data.pkg, now);
+            lastPopAt = now;
+            // New notifications pop out from the docked direction too
+            // (user 2026-11-19 "新通知也是这么弹出来"): the capsule
+            // slides in from the left edge, not scaling in place.
+            CapsuleView cap = topCapsule(group);
+            if (cap != null) {
+                cap.setTranslationX(-dp(200));
+                cap.setAlpha(0f);
+                cap.animate().translationX(0f).alpha(1f)
+                        .setDuration(240).withLayer().start();
+            }
+        }
+        // v193 (user 2026-11-20 "新通知3s自动消失取消掉"): the
+        // 3s auto-dock is REMOVED. A new notification stays out
+        // until the user deals with it — tap outside to dissipate,
+        // left-swipe to dock, right-swipe to dismiss. Nothing
+        // auto-disappears any more.
+    }
+
+    /**
+     * Live lyric update (v76). Called from XposedEntry when the
+     * module process's MediaSession listener reports a new lyric
+     * line for a pinned music capsule. Updates the stored lyric (so
+     * a rebuild keeps it) and the visible capsule's lyric line.
+     * Runs on the UI thread via handler.
+     */
+    /** Incoming / ongoing call (v103). Called from XposedEntry on
+     * ACTION_CALL. RINGING pops the green call capsule (auto-pinned,
+     * no pin icon); OFFHOOK starts the timer; IDLE removes it. */
+    // v129: the fourth argument is the REAL system notification
+    // key of this call (from NotificationService), not CALL_KEY.
+    // v130: the last two are the speaker PendingIntents handed
+    // over by the module (may be null until the ongoing
+    // notification arrives).
+    public void onCall(final String state, final String name,
+            final String number, final String notifKey,
+            final android.app.PendingIntent spkOn,
+            final android.app.PendingIntent spkOff) {
+        if (state == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                // v132: store the speaker intents FIRST, before
+                // any early return. The system re-posts the call
+                // notification after answering; its EXTRA_TEXT is
+                // the call duration, not the number, so the module
+                // falls through to the "new call" branch and
+                // re-sends RINGING — and the v113 guard below
+                // returns early on RINGING while offhook,
+                // discarding the intents that RINGING carried.
+                // Storing them here means the toggle always has
+                // the refreshed notification's speaker action,
+                // whichever state the broadcast claims.
+                if (spkOn != null) {
+                    callSpeakerOnIntent = spkOn;
+                }
+                if (spkOff != null) {
+                    callSpeakerOffIntent = spkOff;
+                }
+                if ("ringing".equals(state)) {
+                    // v124 (v122 onCallBroadcast): first drop a
+                    // stale call state left by a previous call,
+                    // then only ring when not already in a call.
+                    // If the state machine says OFFHOOK, this is
+                    // the system re-posting the call notification
+                    // after answering — a duplicate that must not
+                    // wipe the answered state (speaker, timer,
+                    // button).
+                    dropStaleCallState();
+                    if ("offhook".equals(callState)) {
+                        return;
+                    }
+                    callState = "ringing";
+                    callSpeaker = false;
+                    callNumber = number;
+                    callKey = notifKey;
+                    stopCallTick();
+                    String title = name != null && !name.isEmpty()
+                            ? name : number;
+                    String text = number != null ? number : "";
+                    NotifData d = new NotifData(CALL_KEY, CALL_PKG,
+                            title, text, System.currentTimeMillis(),
+                            null, null, false, null, false, true);
+                    popCallCapsule(d);
+                } else if ("offhook".equals(state)) {
+                    // v129: the notification refreshes once after
+                    // answering (incoming -> ongoing) and can carry
+                    // a new key. Take the fresh key here so the
+                    // speaker toggle fires the refreshed
+                    // notification's action.
+                    if (notifKey != null && !notifKey.isEmpty()) {
+                        callKey = notifKey;
+                    }
+                    if ("ringing".equals(callState)) {
+                        enterOffhook();
+                    } else if ("offhook".equals(callState)) {
+                        updateCallTimer();
+                    }
+                } else if ("idle".equals(state)) {
+                    if (!"idle".equals(callState)) {
+                        endCallUi();
+                    }
+                }
+            }
+        });
+    }
+
+    /** Pop the call capsule: its own group, auto-pinned (no pin icon),
+     * no 3s auto-dock, no pop throttle. */
+    private void popCallCapsule(NotifData d) {
+        if (dock == null) {
+            return;
+        }
+        removeCallCapsule();
+        NotifGroup group = new NotifGroup(CALL_PKG);
+        group.items.add(d);
+        group.pinned = true;
+        group.pinnedAt = System.currentTimeMillis();
+        group.pinnedAtByKey.put(d.key, System.currentTimeMillis());
+        groups.add(0, group);
+        rebuildDock();
+    }
+
+    private void removeCallCapsule() {
+        boolean changed = false;
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            NotifGroup g = groups.get(i);
+            if (g != null && CALL_PKG.equals(g.pkg)) {
+                groups.remove(i);
+                changed = true;
+            }
+        }
+        if (changed) {
+            rebuildDock();
+        }
+    }
+
+    /** Apply the desired speaker state to the AudioManager (v111,
+     * 1.x CallBubble.applySpeaker). Called at answer time, from the
+     * phone-state listener when the call really connects, and from
+     * the timer toggle. */
+    // v123: the AudioManager calls from SystemUI have no effect
+    // (v122 "无效"). Set the route from the incallui process too —
+    // the process that owns the call. Send a broadcast; InCallUiHide
+    // applies it there with the incallui Application context. Keep
+    // the local SystemUI calls as well.
+    /** v127: apply the speaker for the toggle. Primary: send
+     * the route to the incallui process (which owns the call)
+     * via ACTION_CALL_AUDIO — InCallUiHide applies it there with
+     * setCommunicationDevice + setSpeakerphoneOn. Backup: also
+     * fire the notification's own "打开扬声器" / "关闭扬声器"
+     * action via the module (v125). The direct SystemUI
+     * setSpeakerphoneOn never worked (1.x is also wrong). */
+    private void applyCallSpeaker() {
+        // v139/v140: one tap = one toggle, via the fresh lookup
+        // only. The pre-extracted PendingIntent (v130) goes stale
+        // (tap 3 fired a dead intent), so v139 dropped it. The
+        // ACTION_CALL_AUDIO broadcast (v127) ALSO toggled the
+        // speaker a second time per tap — one sets, one toggles —
+        // so a tap could flip twice and land back where it started
+        // ("好像一直再点"). The diagnostic fires the notification
+        // action exactly once per tap; do the same: only
+        // sendCallControl, and let the module (fireCallAction,
+        // v138) fire the live action once.
+        sendCallControl(callSpeaker ? "speaker_on" : "speaker_off");
+    }
+
+    /** v117 (1.x CallBubble.handlePhoneState): the telephony
+     * listener moves the state machine. RINGING only from IDLE;
+     * OFFHOOK from RINGING runs enterOffhook; OFFHOOK while
+     * already offhook re-applies the speaker; IDLE ends the UI. */
+    private void handlePhoneState(int state, String number) {
+        try {
+            switch (state) {
+                case android.telephony.TelephonyManager.CALL_STATE_IDLE:
+                    if (!"idle".equals(callState)) {
+                        endCallUi();
+                    }
+                    break;
+                case android.telephony.TelephonyManager.CALL_STATE_RINGING:
+                    dropStaleCallState();
+                    if ("idle".equals(callState)) {
+                        callState = "ringing";
+                    }
+                    break;
+                case android.telephony.TelephonyManager.CALL_STATE_OFFHOOK:
+                    if ("ringing".equals(callState)) {
+                        enterOffhook();
+                    } else if ("offhook".equals(callState)) {
+                        // v141: no speaker touch here. applyCallSpeaker
+                        // now fires the TOGGLE action, so re-applying
+                        // on every OFFHOOK event would flip it again.
+                        updateCallTimer();
+                    }
+                    break;
+                default:
+                    break;
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v117 (1.x CallBubble.enterOffhook): the single transition
+     * into the ongoing call. Sets the state machine to OFFHOOK,
+     * records the start time once, applies the speaker if the
+     * user answered with speaker, starts the tick and switches
+     * the button to the timer. Called from answerCall AND from
+     * handlePhoneState when the real OFFHOOK is observed. */
+    private void enterOffhook() {
+        try {
+            boolean wasNotOffhook = !"offhook".equals(callState);
+            callState = "offhook";
+            if (wasNotOffhook) {
+                callStartTime = android.os.SystemClock.elapsedRealtime();
+            }
+            // v141: no speaker touch here either. The user answers
+            // with the earpiece (callSpeaker is false at answer,
+            // v126) and taps the timer to switch; firing the toggle
+            // here would flip it once more.
+            startCallTick();
+            updateCallTimer();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v117 (1.x endCallUi path): clear the state machine, stop
+     * the tick and remove the capsule. */
+    private void endCallUi() {
+        callState = "idle";
+        callSpeaker = false;
+        callNumber = null;
+        stopCallTick();
+        removeCallCapsule();
+    }
+
+    /** Answer via TelecomManager (1.x CallBubble.answerCall). Runs in
+     * SystemUI, which holds the permission. */
+    /** v126 (user: one tap = normal answer): answer with the
+     * direct TelecomManager.acceptRingingCall() and force the
+     * speaker off — a normal earpiece answer. The v125
+     * notification-action answer does not fire on this Flyme
+     * (button does nothing), so the direct call is back for
+     * answering. enterOffhook starts the timer; since
+     * callSpeaker is false it does not touch the speaker. */
+    public void answerCall(final boolean speaker) {
+        try {
+            android.telecom.TelecomManager tm =
+                    (android.telecom.TelecomManager) app.getSystemService(
+                            android.content.Context.TELECOM_SERVICE);
+            if (tm != null) {
+                tm.acceptRingingCall();
+            }
+        } catch (Throwable ignored) {
+        }
+        callSpeaker = false;
+        enterOffhook();
+    }
+
+    /** Bind the call actions on a call capsule (v117): the answer
+     * button, hangup and speaker toggle. Used in Phase 1 AND
+     * Phase 2, so the button works even after the call capsule
+     * is unpinned (it then renders in Phase 2, which previously
+     * never bound these callbacks). */
+    private void bindCallCapsule(final CapsuleView cap) {
+        cap.setOnAnswer(new Runnable() {
+            @Override
+            public void run() {
+                // v126: one tap = normal (earpiece) answer.
+                answerCall(false);
+            }
+        });
+        cap.setOnHangup(new Runnable() {
+            @Override
+            public void run() {
+                hangupCallWithParticles();
+            }
+        });
+        cap.setOnToggleSpeaker(new Runnable() {
+            @Override
+            public void run() {
+                toggleCallSpeaker();
+            }
+        });
+    }
+
+    /** Toggle speakerphone mid-call (v108): tapping the timer
+     * switches between the handset and speaker timer states. */
+    public void toggleCallSpeaker() {
+        callSpeaker = !callSpeaker;
+        applyCallSpeaker();
+        // v116: 1.x toggles the speaker icon in place
+        // (toggleSpeaker -> refreshLevelContent); no dissipate.
+        if (dock == null) {
+            return;
+        }
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView cap = (CapsuleView) v;
+                NotifData d = cap.getData();
+                if (d != null && d.isCall) {
+                    cap.setCallSpeaker(callSpeaker);
+                }
+            }
+        }
+    }
+
+    public void endCall() {
+        // v128: hang up with the direct TelecomManager.endCall()
+        // again. The v125 notification-action hangup never fires
+        // on this Flyme, so the swipe/button did nothing.
+        try {
+            android.telecom.TelecomManager tm =
+                    (android.telecom.TelecomManager) app.getSystemService(
+                            android.content.Context.TELECOM_SERVICE);
+            if (tm != null) {
+                tm.endCall();
+            }
+        } catch (Throwable ignored) {
+        }
+        endCallUi();
+    }
+
+    /** Hang up from a right swipe, with the particle burst (v111,
+     * user "右滑挂断也没有粒子特效"). The phone call ends at once;
+     * the capsule bursts into particles and is removed 300ms later,
+     * after the burst plays — rebuildDock() clears dock, which
+     * would kill the particles instantly if we removed now (same
+     * delay as dissipateOne). */
+    public void hangupCallWithParticles() {
+        // v128: hang up with the direct TelecomManager.endCall()
+        // again (see endCall). The right swipe still calls this
+        // via onHangup — the gesture was never deleted, only its
+        // mechanism was swapped to the notification action in
+        // v125, which never fires here.
+        try {
+            android.telecom.TelecomManager tm =
+                    (android.telecom.TelecomManager) app.getSystemService(
+                            android.content.Context.TELECOM_SERVICE);
+            if (tm != null) {
+                tm.endCall();
+            }
+        } catch (Throwable ignored) {
+        }
+        callState = "idle";
+        callSpeaker = false;
+        callNumber = null;
+        stopCallTick();
+        if (dock != null) {
+            for (int i = 0; i < dock.getChildCount(); i++) {
+                View v = dock.getChildAt(i);
+                if (v instanceof CapsuleView) {
+                    CapsuleView cap = (CapsuleView) v;
+                    NotifData d = cap.getData();
+                    if (d != null && d.isCall) {
+                        burstParticles(v);
+                        break;
+                    }
+                }
+            }
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                removeCallCapsule();
+            }
+        }, 300);
+    }
+
+    private void startCallTick() {
+        try {
+            // v118: do NOT call stopCallTick() here — it resets
+            // callStartTime to 0, wiping the start time that
+            // enterOffhook() had just set. Clear only the old
+            // callbacks so the new tick keeps the live start time.
+            try {
+                if (callTickHandler != null && callTickRunnable != null) {
+                    callTickHandler.removeCallbacks(callTickRunnable);
+                }
+            } catch (Throwable ignored) {
+            }
+            callTickRunnable = null;
+            if (callTickHandler == null) {
+                callTickHandler = new android.os.Handler(
+                        android.os.Looper.getMainLooper());
+            }
+            callTickRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // v141: the tick only updates the timer. It
+                        // used to re-apply the speaker every second
+                        // (v112, when applyCallSpeaker SET the
+                        // speaker and was idempotent). Now
+                        // applyCallSpeaker fires the TOGGLE action,
+                        // so the tick was toggling the speaker once
+                        // a second — "一直再自动点击扬声器". Only
+                        // the user's tap (toggleCallSpeaker) fires
+                        // the toggle now.
+                        updateCallTimer();
+                    } catch (Throwable ignored) {
+                    } finally {
+                        try {
+                            if (callTickHandler != null
+                                    && callTickRunnable != null
+                                    && callStartTime > 0) {
+                                callTickHandler.postDelayed(
+                                        callTickRunnable, 1000);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            };
+            callTickHandler.postDelayed(callTickRunnable, 1000);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void stopCallTick() {
+        callStartTime = 0;
+        try {
+            if (callTickHandler != null && callTickRunnable != null) {
+                callTickHandler.removeCallbacks(callTickRunnable);
+            }
+        } catch (Throwable ignored) {
+        }
+        callTickRunnable = null;
+    }
+
+    private void updateCallTimer() {
+        if (dock == null || callStartTime <= 0) {
+            return;
+        }
+        long secs = (android.os.SystemClock.elapsedRealtime()
+                - callStartTime) / 1000;
+        String timer = (secs / 60) + ":"
+                + String.format("%02d", secs % 60);
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView cap = (CapsuleView) v;
+                NotifData d = cap.getData();
+                if (d != null && d.isCall) {
+                    cap.setCallTimer(timer, callSpeaker);
+                }
+            }
+        }
+    }
+
+    /** Live download progress (v95, v98, v99): update the capsule's
+     * lines in place (same key), so the percent ticks up in real time.
+     * Title is "正在下载 45%", text is the content. */
+    public void updateDownloadProgress(final String key,
+            final String title, final String text, final int pct,
+            final boolean completed) {
+        if (key == null || title == null || dock == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < dock.getChildCount(); i++) {
+                    View v = dock.getChildAt(i);
+                    if (v instanceof CapsuleView) {
+                        CapsuleView cap = (CapsuleView) v;
+                        NotifData d = cap.getData();
+                        if (d != null && key.equals(d.key)) {
+                            cap.updateTitle(title);
+                            if (text != null) {
+                                cap.updateText(text);
+                            }
+                            // v239: capsule bottom progress bar.
+                            cap.updateDownloadBar(pct);
+                        }
+                    }
+                }
+                // v242: completed — show "下载完成" / "安装完成"
+                // for 3s, then drop the capsule. Guarded: only
+                // remove if it still shows the completed text,
+                // so a new download reusing the key is safe.
+                if (completed) {
+                    final String ckey = key;
+                    handler.postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (dock == null) {
+                                return;
+                            }
+                            for (int j = 0;
+                                    j < dock.getChildCount(); j++) {
+                                View cv = dock.getChildAt(j);
+                                if (cv instanceof CapsuleView) {
+                                    CapsuleView cap =
+                                            (CapsuleView) cv;
+                                    NotifData dd = cap.getData();
+                                    if (dd != null
+                                            && ckey.equals(dd.key)
+                                            && ("下载完成".equals(dd.text)
+                                                    || "安装完成"
+                                                            .equals(dd.text))) {
+                                        onNotificationRemoved(ckey);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }, 3000);
+                }
+            }
+        });
+    }
+
+    public void updateMusicLyric(final String key, final String lyric) {
+        if (key == null || lyric == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (dock == null) {
+                    return;
+                }
+                for (NotifGroup g : groups) {
+                    for (NotifData d : g.items) {
+                        if (d != null && key.equals(d.key)) {
+                            d.lyrics = lyric;
+                        }
+                    }
+                }
+                for (int i = 0; i < dock.getChildCount(); i++) {
+                    android.view.View v = dock.getChildAt(i);
+                    if (v instanceof CapsuleView) {
+                        CapsuleView cap = (CapsuleView) v;
+                        NotifData d = cap.getData();
+                        if (d != null && key.equals(d.key)) {
+                            cap.updateLyrics(lyric);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /** The top capsule of a group (newest, drawn on top of the stack). */
+    private CapsuleView topCapsule(NotifGroup group) {
+        if (dock == null || group.latest() == null) {
+            return null;
+        }
+        String key = group.latest().key;
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == group && c.getData() != null
+                        && key != null && key.equals(c.getData().key)) {
+                    return c;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Rebuild the dock from the groups. Same-app notifications use the
+     * v1 shrink CASCADE stack: the capsules overlap, each one 6dp below
+     * the previous, newest on top, so each older capsule shows a 6dp
+     * edge (user 2026-11-18 "不是这种叠加，是版本1收缩那种叠加").
+     * Tapping a stack peels it out DOWNWARD: each notification becomes
+     * its own capsule below, newest first. Different apps are regular
+     * parallel rows, one per group, newest group on top.
+     */
+    private void rebuildDock() {
+        if (dock == null) {
+            return;
+        }
+        dock.removeAllViews();
+        // v155: removeAllViews also drops the card tail view — the
+        // cardTail reference would go stale (detached view) and
+        // ensureCardTail would then refuse to create a new one, so
+        // the tail went missing entirely (user "拖尾和卡片有缝隙").
+        cardTail = null;
+        NotifGroup fanAnchor = fanAnchorGroup();
+        int fanAnchorBottom = 0;
+        // v235: clear the frozen card top when no card is open
+        // or a different card opens, so the new card takes its
+        // own row top. While the same card stays open, the
+        // frozen top is kept and reused below.
+        if (cardKey == null || !cardKey.equals(frozenCardKey)) {
+            frozenCardTopY = -1;
+            frozenCardKey = null;
+        }
+        cardTopY = -1;
+        int y = 0;
+
+        // Phase 1 — pinned notifications, in pin-time order, each its
+        // own row. Pinned notifications do NOT participate in group
+        // arrangement (user 2026-11-19 "钉住的不参与分组排列" / "第一
+        // 钉住就排到第一去，第二钉住就排到第二去"): the first pinned
+        // goes to 1st place, the second pinned to 2nd place, by pin
+        // time, regardless of app. Only after unpinning ("钉住回复")
+        // do they rejoin the normal group arrangement.
+        final java.util.List<NotifData> pinnedList =
+                new java.util.ArrayList<>();
+        final java.util.Map<NotifData, NotifGroup> pinnedGroup =
+                new java.util.HashMap<>();
+        final java.util.Map<NotifData, Long> pinnedTime =
+                new java.util.HashMap<>();
+        for (NotifGroup g : groups) {
+            if (g == null) {
+                continue;
+            }
+            for (NotifData d : g.items) {
+                if (d != null && d.key != null
+                        && g.pinnedAtByKey.containsKey(d.key)) {
+                    pinnedList.add(d);
+                    pinnedGroup.put(d, g);
+                    pinnedTime.put(d, g.pinnedAtByKey.get(d.key));
+                } else if (d != null && d.key != null
+                        && stayPutPinTime.containsKey(d.key)) {
+                    // v238: an unpinned card stays in place at
+                    // its old pin-time row, as a capsule.
+                    pinnedList.add(d);
+                    pinnedGroup.put(d, g);
+                    pinnedTime.put(d, stayPutPinTime.get(d.key));
+                }
+            }
+        }
+        java.util.Collections.sort(pinnedList,
+                new java.util.Comparator<NotifData>() {
+                    @Override
+                    public int compare(NotifData a, NotifData b) {
+                        Long ta = pinnedTime.get(a);
+                        Long tb = pinnedTime.get(b);
+                        long x = ta == null ? 0 : ta;
+                        long z = tb == null ? 0 : tb;
+                        return Long.compare(x, z);
+                    }
+                });
+        // v180 (user 2026-11-20 "钉住卡片也立即排到第一位"): a
+        // pinned card goes to FIRST position (row 0) immediately.
+        // v152's fall-down (card below the pinned section) is gone.
+        // The card is rendered first at y=0; the other pinned
+        // capsules follow below it, in pin-time order, starting
+        // under the card's height. Build a reordered list: card
+        // first, then the rest in pin-time order.
+        final java.util.List<NotifData> pinnedOrdered =
+                new java.util.ArrayList<>();
+        NotifData pinnedCardData = null;
+        for (NotifData pd : pinnedList) {
+            if (pd != null && isCardKey(pd.key)) {
+                pinnedCardData = pd;
+            }
+        }
+        if (pinnedCardData != null) {
+            pinnedOrdered.add(pinnedCardData);
+        }
+        for (NotifData pd : pinnedList) {
+            if (pd != null && pd != pinnedCardData) {
+                pinnedOrdered.add(pd);
+            }
+        }
+        for (int pi = 0; pi < pinnedOrdered.size(); pi++) {
+            final NotifData d = pinnedOrdered.get(pi);
+            final NotifGroup group = pinnedGroup.get(d);
+            CapsuleView cap = new CapsuleView(app);
+            cap.setTag(group);
+            cap.bind(d);
+            // v238: a stay-put item (unpinned card) shows no pin
+            // badge — it is no longer pinned, it just keeps its row.
+            cap.setPinned(group != null && d.key != null
+                    && group.pinnedAtByKey.containsKey(d.key));
+            cap.setStacked(false);
+            // Card (v143): this capsule is the open card — same view,
+            // grown, with its buttons wired; it takes the card height
+            // so the ones below start lower.
+            // v236: a pinned item renders as a card when it is
+            // the open card OR was pinned as a card
+            // (pinnedCardKeys). Other cards opening must not
+            // shrink it back to a capsule.
+            final boolean isCardPinned = isCardKey(d.key)
+                    || pinnedCardKeys.contains(d.key);
+            // v237: this pinned card's own measured height.
+            int pinnedCardH = 0;
+            if (isCardPinned) {
+                cap.setCardExpanded(true);
+                bindCardCapsule(cap, d, group);
+                // v180: pinned card goes to FIRST position (row 0).
+                // v236: a pinned card that is not the open card
+                // sits at its pin-order row (y), not forced to 0.
+                // v237: measure THIS card's own height. The
+                // shared cardHeightPx is the open card's height
+                // and is reset to 0 when it closes; a pinned
+                // card left behind would be squeezed to a 44dp
+                // strip (video 01:27).
+                pinnedCardH = cap.cardHeightForWidth(
+                        dp(CapsuleView.CARD_WIDTH_DP));
+                cap.setLayoutParams(cardLp(y, pinnedCardH));
+                // Left edge starts after the retracted slivers.
+                cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
+            } else {
+                // Pinned capsules sit below the card (when there is
+                // one) in pin-time order; y already accounts for the
+                // card's height.
+                cap.setLayoutParams(capsuleLp(y));
+            }
+            // v151: pinned capsules do not participate in the ripple,
+            // so they stay visible while a card is open (the tapped
+            // pinned capsule is the card itself). Nothing is hidden
+            // here any more. The card sits ABOVE the pinned capsules
+            // below it (z 1) so its content is never covered by them
+            // — they show as slivers at the left edge behind it.
+            if (isCardPinned) {
+                cap.setTranslationZ(1f);
+            }
+            // (v150: no vertical connector, no edge fade.)
+            if (d.isCall) {
+                // Call capsule (v103): tap does nothing (no expanded
+                // card yet, user 2026-11-19 "胶囊展开先不设计"); the
+                // answer button, left swipe and right swipe are the
+                // call actions.
+                // Tap = speaker answer (user 2026-11-19 "来电后点
+                // 一下就是扬声器接听"); tapping again switches to
+                // normal answer (the timer-tap toggle, v108).
+                cap.setOnAnswer(new Runnable() {
+                    @Override
+                    public void run() {
+                        answerCall(true);
+                    }
+                });
+                cap.setOnHangup(new Runnable() {
+                    @Override
+                    public void run() {
+                        hangupCallWithParticles();
+                    }
+                });
+                cap.setOnToggleSpeaker(new Runnable() {
+                    @Override
+                    public void run() {
+                        toggleCallSpeaker();
+                    }
+                });
+            }
+            cap.setOnTap(new Runnable() {
+                @Override
+                public void run() {
+                    if (d.isCall) {
+                        return;
+                    }
+                    // Tap a pinned capsule: it grows into its card.
+                    openCard(cap, d);
+                }
+            });
+            // Left swipe = pin/unpin again, including on the call
+            // capsule (user 2026-11-19 "左滑继续改回钉住和解除钉
+            // 住"). Reverts the v109 shield; the left-swipe speaker
+            // answer is gone.
+            cap.setOnSwipeRight(new Runnable() {
+                @Override
+                public void run() {
+                    togglePin(group, d);
+                    // v180: pinning a card rebuilds the dock so the
+                    // card jumps to first position immediately
+                    // (user 2026-11-20 "钉住卡片也立即排到第一位").
+                    // rebuildDock re-renders the open card at y=0.
+                    rebuildDock();
+                }
+            });
+            cap.setOnSwipeLeft(new Runnable() {
+                @Override
+                public void run() {
+                    // v154: a manual right-swipe on the open card
+                    // dismisses the notification (no capsule pops
+                    // back); otherwise it dissipates the capsule.
+                    if (isCardKey(d.key)) {
+                        dismissOpenCard(d);
+                    } else {
+                        dissipateOne(d);
+                    }
+                }
+            });
+            dock.addView(cap);
+            // v180: a pinned card DOES take layout space now — it is
+            // first, and the pinned capsules below it start under
+            // its height. (The unpinned card in Phase 2 still does
+            // not take layout space; only the pinned card does.)
+            if (isCardPinned) {
+                // v236: cardTopY is the OPEN card's top (for its
+                // tail and the fan); a pinned card that is not
+                // the open card only takes layout space.
+                // Accumulate y so several pinned cards stack
+                // instead of overwriting each other.
+                if (isCardKey(d.key)) {
+                    cardTopY = y;
+                }
+                y += pinnedCardH + dp(CAPSULE_GAP_DP);
+            } else {
+                y += dp(CapsuleView.DEFAULT_HEIGHT_DP
+                        + CAPSULE_GAP_DP);
+            }
+        }
+
+        // Phase 2 — unpinned notifications, grouped normally by app
+        // (user 2026-11-19 "其他同应用通知正常分组排列").
+        for (final NotifGroup group : groups) {
+            if (group.items.isEmpty()) {
+                continue;
+            }
+            // Only the unpinned items participate in group arrangement.
+            final java.util.List<NotifData> items =
+                    new java.util.ArrayList<>();
+            for (NotifData d : group.items) {
+                if (d != null && (d.key == null
+                        || (!group.pinnedAtByKey.containsKey(d.key)
+                            && !stayPutPinTime.containsKey(d.key)))) {
+                    items.add(d);
+                }
+            }
+            if (items.isEmpty()) {
+                continue;
+            }
+            if (items.size() > 1 && !group.expanded) {
+                // Cascade stack: oldest first (drawn under), newest last
+                // (drawn on top). Each capsule sits 6dp below the one
+                // above it, so the older ones peek out by a 6dp edge.
+                int n = items.size();
+                for (int i = n - 1; i >= 0; i--) {
+                    final NotifData d = items.get(i);
+                    CapsuleView cap = new CapsuleView(app);
+                    cap.setTag(group);
+                    cap.bind(d);
+                    cap.setPinned(false);
+                    if (d.isCall) {
+                        bindCallCapsule(cap);
+                    }
+                    // Stacked capsules get an outline so they stay
+                    // readable (user 2026-11-19 "叠加后自动给叠加的
+                    // 添加描边").
+                    cap.setStacked(true);
+                    // i=0 (newest) at the top of the stack; older ones
+                    // 6dp lower each, peeking out below.
+                    int top = y + i * dp(STACK_EDGE_DP);
+                    cap.setLayoutParams(capsuleLp(top));
+                    // v150: a card is open elsewhere — this stack
+                    // dissipated in the ripple, so it stays hidden.
+                    // Calls stay out.
+                    // v191 (user "卡片钉住以后，其他通知正常排列
+                    // 在下面显示" / "就当展开卡片是大胶囊"): a
+                    // PINNED card is just a big capsule in the
+                    // normal flow — the others stay visible below
+                    // it, so do not hide them when the card is pinned.
+                    if (cardKey != null && !isCardPinned()
+                            && !d.isCall) {
+                        cap.setVisibility(View.INVISIBLE);
+                    }
+                    final boolean isTop = (i == 0);
+                    cap.setOnTap(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isTop) {
+                                // Expand with animation (user 2026-11-19
+                                // "通知叠加和展开加一个动画").
+                                group.expanded = true;
+                                rebuildDock();
+                                cascadeCapsulesIn(java.util.Collections
+                                        .singletonList(group));
+                            } else {
+                                // Stack with animation.
+                                collapseGroupAnimated(group);
+                            }
+                        }
+                    });
+                    cap.setOnSwipeRight(new Runnable() {
+                        @Override
+                        public void run() {
+                            togglePin(group, d);
+                            // v180: pinning a card rebuilds the dock
+                            // so it jumps to first position immediately.
+                            rebuildDock();
+                        }
+                    });
+                    cap.setOnSwipeLeft(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isCardKey(d.key)) {
+                                dismissOpenCard(d);
+                            } else {
+                                dissipateOne(d);
+                            }
+                        }
+                    });
+                    dock.addView(cap);
+                }
+                y += dp(CapsuleView.DEFAULT_HEIGHT_DP
+                        + (n - 1) * STACK_EDGE_DP + CAPSULE_GAP_DP);
+                if (group == fanAnchor) {
+                    fanAnchorBottom = y - dp(CAPSULE_GAP_DP);
+                }
+            } else {
+                // Single capsule, or an expanded group: each notification
+                // as its own capsule, newest first, going downward.
+                // (Add oldest-first so the newest is drawn on top —
+                // the same drawing order as the cascade branch above.
+                // Adding newest-first puts the OLDEST on top, so the
+                // stack shows reversed ("叠反了", user video 04:58).)
+                // Card (v143): compute each item's top first, so an
+                // open card's height pushes the ones below it down
+                // (items.get(0) is the newest, at the top).
+                int groupTop = y;
+                // Card does NOT take layout space (user 2026-11-19
+                // "卡片不要挤占位置"): every row keeps its own
+                // pitch; the card overlays the rows below it.
+                // v147: EXCEPT the capsules directly above and below
+                // the card (same app) — they stay visible and connect
+                // to the card (user 2026-11-19 "我说的连在一起就是
+                // 这样" / "连接处就是这种平滑透明"). The one above is
+                // already 6dp above the card; the one below is moved
+                // to 6dp below the card's bottom edge, and every row
+                // under it shifts down by the same amount.
+                int[] tops = new int[items.size()];
+                int ty = groupTop;
+                for (int i = 0; i < items.size(); i++) {
+                    tops[i] = ty;
+                    ty += dp(CapsuleView.DEFAULT_HEIGHT_DP)
+                            + dp(CAPSULE_GAP_DP);
+                }
+                // v148: the card does NOT push anything down (user
+                // 2026-11-19 "都说了不挤通知") — the rows below keep
+                // their own pitch and the card overlays them (v145).
+                // v150: no vertical link to the capsules above/below
+                // (user "不是连着上下的胶囊"), and no edge fade — the
+                // card pops out from the left on its own.
+                for (int idx = items.size() - 1; idx >= 0; idx--) {
+                    final NotifData d = items.get(idx);
+                    CapsuleView cap = new CapsuleView(app);
+                    cap.setTag(group);
+                    cap.bind(d);
+                    cap.setPinned(false);
+                    if (d.isCall) {
+                        bindCallCapsule(cap);
+                    }
+                    cap.setStacked(false);
+                    final boolean isCard = isCardKey(d.key);
+                    int placeTop = tops[idx];
+                    if (isCard) {
+                        cap.setCardExpanded(true);
+                        bindCardCapsule(cap, d, group);
+                        // v235: freeze the card's top while this
+                        // card stays open. A new notification
+                        // above the card shifts its row in the
+                        // group order; reusing the frozen top
+                        // keeps the card still.
+                        int cardTop;
+                        if (frozenCardTopY >= 0 && d.key != null
+                                && d.key.equals(frozenCardKey)) {
+                            cardTop = frozenCardTopY;
+                        } else {
+                            cardTop = tops[idx];
+                            frozenCardTopY = cardTop;
+                            frozenCardKey = d.key;
+                        }
+                        cap.setLayoutParams(cardLp(cardTop));
+                        // Left edge starts after the retracted slivers.
+                        cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
+                    } else {
+                        cap.setLayoutParams(capsuleLp(placeTop));
+                    }
+                    if (cardKey != null && !isCardPinned() && !isCard) {
+                        // v150: dissipated in the ripple; hidden
+                        // while the card is open. Calls stay out.
+                        // v191: a PINNED card is a big capsule — the
+                        // others are laid out below it and stay visible.
+                        if (!d.isCall) {
+                            cap.setVisibility(View.INVISIBLE);
+                        }
+                    } else if (isCard) {
+                        cap.setTranslationZ(0f);
+                        cardTopY = frozenCardTopY;
+                    }
+                    cap.setOnTap(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (d.isCall) {
+                                return;
+                            }
+                            // Tap a capsule: it grows into its card.
+                            // (Single notification, or one item of an
+                            // expanded group — the group stays expanded
+                            // underneath.)
+                            openCard(cap, d);
+                        }
+                    });
+                    cap.setOnSwipeRight(new Runnable() {
+                        @Override
+                        public void run() {
+                            togglePin(group, d);
+                            // v180: pinning a card rebuilds the dock
+                            // so it jumps to first position immediately.
+                            rebuildDock();
+                        }
+                    });
+                    final NotifData item = d;
+                    cap.setOnSwipeLeft(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (isCardKey(item.key)) {
+                                dismissOpenCard(item);
+                            } else {
+                                dissipateOne(item);
+                            }
+                        }
+                    });
+                    dock.addView(cap);
+                }
+                y = ty;
+                if (group == fanAnchor) {
+                    fanAnchorBottom = y - dp(CAPSULE_GAP_DP);
+                }
+            }
+        }
+        // v150: the card edge fade (v148) is off — the card now pops
+        // out from the left and slides right to close, so a static
+        // fade strip on its right edge cannot follow it.
+        // The fan is ALWAYS below the notifications (user 2026-11-18
+        // "这个贴边图标永远在通知下面") — never on top of them, never
+        // jumping over them. The fan can ONLY stack at the very end
+        // (below ALL notifications). Its screen Y is the pile window's
+        // Y now (the pile lives in its own window, not in the dock).
+        // When no capsule is left, it sits at the top.
+        // The fan sits below everything — the rows AND the card
+        // (the card overlays rows but the fan must not sit under it).
+        int cardBottom = (cardKey != null && cardTopY >= 0)
+                ? cardTopY + cardHeightPx : 0;
+        int newPileY = groups.isEmpty() ? 0
+                : Math.max(y, cardBottom);
+        int oldPileY = (pileWindowAdded && pileParams != null)
+                ? pileParams.y : -1;
+        pileTargetY = newPileY;
+        boolean slidePile = oldPileY >= 0 && oldPileY != newPileY
+                && pile != null && pile.getIconCount() > 0;
+        if (slidePile) {
+            // A new notification pushes the fan down smoothly: the
+            // animator drives the pile window Y; updateWindowSize
+            // must not jump it meanwhile (pileYAnimating guard).
+            pileYAnimating = true;
+        }
+        updateWindowSize();
+        if (slidePile) {
+            animatePileWindowY(oldPileY, newPileY);
+        }
+        // v114: a rebuild re-binds every capsule, and bind() resets
+        // the call capsule to the ringing state (handset, no timer).
+        // If a call is up, restore the answered button (speaker +
+        // timer) right away instead of waiting for the next tick.
+        updateCallTimer();
+        // v237: an open card was just pinned — its group's
+        // capsules that were hidden while it was open are now
+        // visible; pop them in one by one instead of letting
+        // them appear instantly.
+        if (popInAfterRebuild && popInGroup != null) {
+            popInAfterRebuild = false;
+            NotifGroup g = popInGroup;
+            popInGroup = null;
+            cascadeCapsulesIn(java.util.Collections.singletonList(g));
+        }
+    }
+
+    private FrameLayout.LayoutParams capsuleLp(int y) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                dp(CapsuleView.DEFAULT_WIDTH_DP),
+                dp(CapsuleView.DEFAULT_HEIGHT_DP),
+                Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
+        lp.topMargin = y;
+        return lp;
+    }
+
+    // ---- Card (v143) ----
+    private FrameLayout.LayoutParams cardLp(int y) {
+        return cardLp(y, cardHeightPx);
+    }
+
+    // v237: card layout with an explicit height (a pinned card
+    // measures its own — the shared cardHeightPx is the open
+    // card's height and is reset to 0 when it closes).
+    private FrameLayout.LayoutParams cardLp(int y, int heightPx) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                dp(CapsuleView.CARD_WIDTH_DP),
+                Math.max(heightPx, dp(CapsuleView.DEFAULT_HEIGHT_DP)),
+                Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
+        lp.topMargin = y;
+        return lp;
+    }
+
+    private boolean isCardKey(String key) {
+        return cardKey != null && key != null && cardKey.equals(key);
+    }
+
+    /** v180: true when the open card is pinned. A pinned card does
+     * not auto-disappear (tap outside does not close it); like a
+     * pinned capsule it can only be removed manually (right-swipe
+     * dismiss on the card, or unpin first). */
+    private boolean isCardPinned() {
+        if (cardKey == null) {
+            return false;
+        }
+        for (NotifGroup g : groups) {
+            if (g != null && g.pinnedAtByKey.containsKey(cardKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private CapsuleView findCapsuleByKey(String key) {
+        if (dock == null || key == null) {
+            return null;
+        }
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            android.view.View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView cap = (CapsuleView) v;
+                if (cap.getData() != null
+                        && key.equals(cap.getData().key)) {
+                    return cap;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** v150: open the card for this capsule. The particle-gather
+     * expand (v149, user "不要这个了") and the slide-then-grow
+     * (v148) are gone. New flow (user 2026-11-19 "点了胶囊后胶囊
+     * 从点击胶囊开始自动右滑消散，点击胶囊先开始，两边依次开始右滑
+     * 消散，然后展开卡片从左边弹出来"): every capsule auto
+     * right-swipes and bursts, rippling outward from the tapped one
+     * (tapped first, then the neighbours above and below, wave by
+     * wave); then the card pops out from the left edge. The
+     * dissipate is visual only — the notifications stay in their
+     * groups, so closing the card pops the capsules back out.
+     * v151: calls and pinned capsules (other than the tapped one)
+     * never auto-dissipate. */
+    /** v263: open the App from the open card. Small window when
+     * the miniwindow switch is on, fullscreen when off. On success
+     * the notification is dismissed (v143) and the card closes.
+     * v270: no card open (capsule tap) — the capsule auto
+     * right-slides and bursts into particles as the App opens,
+     * instead of vanishing instantly. */
+    private void openCardApp(NotifData d) {
+        if (d == null || d.contentIntent == null) {
+            return;
+        }
+        boolean hadCard = cardKey != null;
+        // v270: capsule tap — start the auto right-slide first, so
+        // the animation is already running when the App launches.
+        final NotifData data = d;
+        if (!hadCard) {
+            CapsuleView cap = findCapsuleByKey(d.key);
+            if (cap != null) {
+                cap.playAutoSwipeRight(new Runnable() {
+                    @Override
+                    public void run() {
+                        dissipateOne(data);
+                    }
+                });
+            } else {
+                dissipateOne(data);
+            }
+        }
+        boolean ok = openPendingIntent(d.contentIntent, d.pkg,
+                FeatureFlags.miniwindow);
+        if (!ok) {
+            return;
+        }
+        try {
+            android.content.Intent di = new android.content.Intent(
+                    NotificationService.ACTION_DISMISS);
+            di.putExtra("key", d.key);
+            app.sendBroadcast(di);
+        } catch (Throwable ignored) {
+        }
+        if (hadCard) {
+            // Card was open: close it (its own slide-right animation)
+            // and remove the notification.
+            removeNotifByKey(d.key);
+            closeCard();
+        }
+        // No card was open: dissipateOne (started above) bursts the
+        // capsule and removes + rebuilds after its 310ms delay.
+    }
+
+    public void openCard(CapsuleView cap, NotifData d) {
+        if (cap == null || d == null || d.isCall || cardAnimating) {
+            return;
+        }
+        // v261: card-expansion switch off = tapping a capsule does
+        // not expand the card.
+        // v266: instead it opens the App directly (small window /
+        // fullscreen per the miniwindow switch), so the capsule
+        // stays useful with the card turned off.
+        if (!FeatureFlags.card) {
+            openCardApp(d);
+            return;
+        }
+        if (isCardKey(d.key)) {
+            // v263: tapping the open card opens the App — small
+            // window when the switch is on, fullscreen when off.
+            openCardApp(d);
+            return;
+        }
+        if (cardKey != null) {
+            closeCardInstant();
+        }
+        cardAnimating = true;
+        if (dock == null) {
+            cardAnimating = false;
+            return;
+        }
+        // Ripple participants, in visual (top-to-bottom) order: the
+        // tapped capsule plus the unpinned, non-call capsules. Calls
+        // never dissipate, and pinned capsules (other than the tapped
+        // one) stay out (user 2026-11-19 "来电和钉住的的不参与" /
+        // "如果点击的胶囊是钉住的则这个胶囊展开也是正常右滑消散那
+        // 种"). Find the tapped one by key (the view may have been
+        // rebuilt above).
+        final java.util.List<CapsuleView> caps =
+                new java.util.ArrayList<>();
+        CapsuleView tapped = null;
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                NotifData cd = c.getData();
+                if (cd == null || cd.isCall) {
+                    continue;
+                }
+                boolean isTapped = d.key != null
+                        && d.key.equals(cd.key);
+                if (!isTapped) {
+                    NotifGroup g = (NotifGroup) c.getTag();
+                    if (g != null && cd.key != null
+                            && g.pinnedAtByKey.containsKey(cd.key)) {
+                        continue;
+                    }
+                }
+                caps.add(c);
+                if (isTapped) {
+                    tapped = c;
+                }
+            }
+        }
+        if (tapped == null) {
+            cardAnimating = false;
+            return;
+        }
+        caps.sort(new java.util.Comparator<CapsuleView>() {
+            @Override
+            public int compare(CapsuleView a, CapsuleView b) {
+                return Integer.compare(topOf(a), topOf(b));
+            }
+        });
+        final int tappedIdx = caps.indexOf(tapped);
+        // Waves: wave 0 = the tapped capsule; wave k = the capsules
+        // k rows above and below it. Both sides of one wave go
+        // together, so the dissipate ripples outward from the tap.
+        final java.util.List<java.util.List<CapsuleView>> waves =
+                new java.util.ArrayList<>();
+        waves.add(java.util.Collections.singletonList(tapped));
+        for (int k = 1; ; k++) {
+            java.util.List<CapsuleView> wave =
+                    new java.util.ArrayList<>();
+            int above = tappedIdx - k;
+            int below = tappedIdx + k;
+            if (above >= 0) {
+                wave.add(caps.get(above));
+            }
+            if (below < caps.size()) {
+                wave.add(caps.get(below));
+            }
+            if (wave.isEmpty()) {
+                break;
+            }
+            waves.add(wave);
+        }
+        final int waveCount = waves.size();
+        for (int wi = 0; wi < waveCount; wi++) {
+            final java.util.List<CapsuleView> wave = waves.get(wi);
+            dock.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    for (CapsuleView c : wave) {
+                        final CapsuleView cv = c;
+                        cv.playAutoSwipeRight(new Runnable() {
+                            @Override
+                            public void run() {
+                                burstParticles(cv);
+                            }
+                        });
+                    }
+                }
+            }, wi * 200);
+        }
+        // After the last wave has swiped, pop the card out from the
+        // left edge.
+        final NotifData data = d;
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                showCardAfterRipple(data);
+            }
+        }, (waveCount - 1) * 200 + 280);
+    }
+
+    /** Build the card for the tapped notification and pop it out
+     * from the left edge (v150). Runs after the ripple dissipate. */
+    private void showCardAfterRipple(NotifData d) {
+        if (d == null || dock == null) {
+            cardAnimating = false;
+            return;
+        }
+        // Measure the card height on a scratch view (the dock's
+        // capsule just burst, so it cannot be measured in place).
+        CapsuleView scratch = new CapsuleView(app);
+        scratch.bind(d);
+        scratch.setCardExpanded(true);
+        int h = scratch.cardHeightForWidth(
+                dp(CapsuleView.CARD_WIDTH_DP));
+        cardKey = d.key;
+        cardHeightPx = h;
+        rebuildDock();
+        updateWindowSize();
+        // v174: an opened music card listens for lyrics too.
+        if (d.isMusic) {
+            syncLyricListen(d.key);
+        }
+        final CapsuleView cardCap = findCapsuleByKey(d.key);
+        if (cardCap == null) {
+            cardAnimating = false;
+            return;
+        }
+        // Pop out from the left: start fully off-screen left and
+        // slide to the card's slot (flush at 0 since v156).
+        // v159: NO overshoot — user 2026-11-19 "卡片弹出的时候
+        // 不要他多弹一下了". The OvershootInterpolator(1.2f) made
+        // the card bounce past its slot and spring back (one extra
+        // bounce); a plain DecelerateInterpolator lands exactly on
+        // the slot and stops.
+        final int finalX = dp(CARD_LEFT_OFFSET_DP);
+        cardCap.setTranslationX(-dp(CapsuleView.CARD_WIDTH_DP));
+        cardCap.setScaleX(1f);
+        cardCap.setScaleY(1f);
+        cardCap.setAlpha(1f);
+        cardCap.animate()
+                .translationX(finalX)
+                .setDuration(300)
+                .setInterpolator(
+                        new android.view.animation.DecelerateInterpolator())
+                .withLayer()
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        cardAnimating = false;
+                        updateWindowSize();
+                    }
+                })
+                .start();
+    }
+
+    /** v153: make sure the card's trailing tail exists (creates
+     * it on first use). The tail is a gradient strip in the dock at
+     * the card's row, from the screen's left edge (transparent) to
+     * the card's tint; it stretches from the left edge to the card's
+     * left edge. Its width tracks the card's translationX. */
+    private void ensureCardTail(CapsuleView cardCap) {
+        // v155: a tail whose view is no longer in the dock (e.g. a
+        // rebuild cleared it) is stale — drop it and build a fresh
+        // one instead of wrongly reusing the dead reference.
+        if (cardTail != null && cardTail.getParent() != dock) {
+            cardTail = null;
+        }
+        if (cardTail != null || cardCap == null || dock == null) {
+            return;
+        }
+        final int tailColor = cardCap.getPillColor() != 0
+                ? cardCap.getPillColor()
+                : android.graphics.Color.argb(204, 30, 32, 38);
+        int tailTransparent = android.graphics.Color.argb(0,
+                android.graphics.Color.red(tailColor),
+                android.graphics.Color.green(tailColor),
+                android.graphics.Color.blue(tailColor));
+        android.graphics.drawable.GradientDrawable tailBg =
+                new android.graphics.drawable.GradientDrawable();
+        tailBg.setShape(
+                android.graphics.drawable.GradientDrawable.RECTANGLE);
+        tailBg.setOrientation(
+                android.graphics.drawable.GradientDrawable.Orientation
+                        .LEFT_RIGHT);
+        tailBg.setColors(new int[]{tailTransparent, tailColor});
+        final View tail = new View(app);
+        // v155: round UP and tuck 1px under the card's left edge —
+        // the tail sits behind the card, so the overlap is
+        // invisible, and (int) truncation can no longer leave a
+        // sub-pixel gap between tail and card.
+        int w = Math.max(0,
+                (int) Math.ceil(cardCap.getTranslationX()) + 1);
+        FrameLayout.LayoutParams tlp =
+                new FrameLayout.LayoutParams(w, cardHeightPx);
+        tlp.topMargin = cardTopY;
+        tlp.leftMargin = 0;
+        tail.setLayoutParams(tlp);
+        tail.setBackground(tailBg);
+        tail.setClickable(false);
+        dock.addView(tail, 0);
+        cardTail = tail;
+    }
+
+    /** Drop the card's trailing tail, if one is showing. */
+    private void removeCardTail() {
+        if (cardTail != null) {
+            try {
+                if (dock != null) {
+                    dock.removeView(cardTail);
+                }
+            } catch (Throwable ignored) {
+            }
+            cardTail = null;
+        }
+    }
+
+    /** Stretch (or shrink) the tail to the given width. The tail
+     * is made 1px wider than the card's left edge so it tucks under
+     * the card (v155, no gap from rounding). */
+    private void setCardTailWidth(int w) {
+        if (cardTail == null) {
+            return;
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams)
+                cardTail.getLayoutParams();
+        int target = w + 1;
+        if (lp.width != target) {
+            lp.width = target;
+            cardTail.setLayoutParams(lp);
+        }
+    }
+
+    /** v153: manual drag on the open card (the card is an enlarged
+     * capsule, user "相当于一个放大版胶囊"). dx is the drag distance
+     * in px from the touch-down point. Right: the card slides right
+     * from its slot and the tail stretches live from the left edge
+     * to the card — the same design as the capsule's
+     * growLongCapsule. Left: the tail drops and the card slides
+     * left from its slot. */
+    private void updateCardDrag(CapsuleView cardCap, float dx) {
+        if (cardCap == null || dock == null) {
+            return;
+        }
+        final int startX = dp(CARD_LEFT_OFFSET_DP);
+        if (dx <= 0) {
+            removeCardTail();
+            cardCap.setTranslationX(startX + dx);
+            return;
+        }
+        ensureCardTail(cardCap);
+        cardCap.setTranslationX(startX + dx);
+        setCardTailWidth((int) cardCap.getTranslationX());
+    }
+
+    /** v153: the manual card drag ended below the dissipate
+     * threshold (or was cancelled): spring the card back to its
+     * slot and shrink the tail away with it, then shrink the
+     * window. (Past the threshold the close already fired via
+     * onSwipeLeft → closeCard, so this only runs for a short
+     * drag.) */
+    private void endCardDrag(final CapsuleView cardCap, float dx) {
+        if (cardCap == null || dock == null) {
+            return;
+        }
+        final int startX = dp(CARD_LEFT_OFFSET_DP);
+        final float fromX = cardCap.getTranslationX();
+        if (fromX == startX) {
+            removeCardTail();
+            endDragWindowDelayed();
+            return;
+        }
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(200);
+        anim.setInterpolator(
+                new android.view.animation.DecelerateInterpolator());
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        float f = (Float) a.getAnimatedValue();
+                        float x = fromX + (startX - fromX) * f;
+                        cardCap.setTranslationX(x);
+                        setCardTailWidth((int) x);
+                    }
+                });
+        anim.addListener(
+                new android.animation.AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(
+                            android.animation.Animator animator) {
+                        removeCardTail();
+                        endDragWindowDelayed();
+                    }
+                });
+        anim.start();
+    }
+
+    /** v151: close the open card (tap outside / close button /
+     * right swipe on the card). The card auto right-swipes away and
+     * bursts; then the capsules pop back out from the left edge,
+     * rippling outward from the card's old row. NEW in v151: while
+     * the card slides right it drags a transparent trailing tail
+     * (user "展开卡片也要做透明拖尾" / "因为它也有右滑消散的动画")
+     * — a gradient strip from the screen's left edge (transparent)
+     * to the card's tint, stretching as the card slides right, same
+     * principle as the capsule's drag tail. */
+    public void closeCard() {
+        if (cardKey == null || cardAnimating || dock == null) {
+            return;
+        }
+        final CapsuleView cardCap = findCapsuleByKey(cardKey);
+        if (cardCap == null) {
+            closeCardInstant();
+            return;
+        }
+        cardAnimating = true;
+        // v157: the card stays fully opaque while it auto-slides
+        // right (user 2026-11-19: manual right-swipe is perfect,
+        // the auto slide's tail + card opacity are wrong). The v151
+        // fade (alpha 1.0 -> 0.3) made the card a ghost while the
+        // tail stayed solid — the two no longer matched, so the tail
+        // looked disconnected from the card. The manual drag never
+        // fades the card, so the auto slide must not either.
+        cardCap.setAlpha(1f);
+        // The card's row: the capsules pop back out rippling
+        // outward from here.
+        final int cardRowTop = cardTopY;
+        // The card's key, so the pop-out knows which capsule is the
+        // card itself (it pops back out even if it is pinned).
+        final String closedCardKey = cardKey;
+        // Widen the window so the card's right slide stays visible
+        // (the narrow window the auto-swipe uses).
+        beginAutoSwipeWindow();
+        // v153: start from wherever the card is — a manual drag may
+        // already have it part-way right (don't snap back to the
+        // slot before sliding away).
+        final int startX = (int) cardCap.getTranslationX();
+        final int endX = startX + dp(200);
+        // v151/v153: the transparent trailing tail. Reuse the one
+        // from a manual drag if it exists, else create it.
+        ensureCardTail(cardCap);
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(240);
+        anim.setInterpolator(
+                new android.view.animation.DecelerateInterpolator());
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        float f = (Float) a.getAnimatedValue();
+                        cardCap.setTranslationX(
+                                startX + (endX - startX) * f);
+                        // v157: no alpha fade — the card stays at
+                        // 1.0 (like the manual drag) so the tail and
+                        // the card keep the same opacity throughout.
+                        // The tail stretches from the left edge to
+                        // the card's left edge as it slides right.
+                        setCardTailWidth((int) cardCap.getTranslationX());
+                    }
+                });
+        anim.addListener(
+                new android.animation.AnimatorListenerAdapter() {
+                    @Override
+                    public void onAnimationEnd(
+                            android.animation.Animator animator) {
+                        // Burst the card, drop the tail, then — after
+                        // the particles have flown (same 310ms as
+                        // dissipateOne, because the rebuild clears
+                        // the dock and would cut the burst short) —
+                        // bring the capsules back.
+                        burstParticles(cardCap);
+                        removeCardTail();
+                        dock.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                closeCardInstant();
+                                popCapsulesOutFromLeft(cardRowTop,
+                                        closedCardKey);
+                                cardAnimating = false;
+                            }
+                        }, 310);
+                    }
+                });
+        anim.start();
+    }
+
+    /** v151: after the card dissipates, the capsules pop back out
+     * from the left edge, rippling outward from the card's old row.
+     * Only the capsules that actually dissipated pop back out: the
+     * unpinned, non-call ones, plus the card's own capsule (it pops
+     * back even if it is pinned). Pinned capsules (other than the
+     * card) and calls never left, so they stay put. */
+    private void popCapsulesOutFromLeft(final int cardRowTop,
+            final String closedCardKey) {
+        if (dock == null) {
+            return;
+        }
+        final java.util.List<CapsuleView> caps =
+                new java.util.ArrayList<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                NotifData cd = c.getData();
+                if (cd == null || cd.isCall) {
+                    continue;
+                }
+                boolean isCard = closedCardKey != null
+                        && closedCardKey.equals(cd.key);
+                if (!isCard) {
+                    NotifGroup g = (NotifGroup) c.getTag();
+                    if (g != null && cd.key != null
+                            && g.pinnedAtByKey.containsKey(cd.key)) {
+                        continue;
+                    }
+                }
+                caps.add(c);
+            }
+        }
+        if (caps.isEmpty()) {
+            return;
+        }
+        for (final CapsuleView c : caps) {
+            int top = topOf(c);
+            int dist = 0;
+            if (cardRowTop >= 0) {
+                dist = Math.abs(top - cardRowTop)
+                        / Math.max(1, dp(CapsuleView.DEFAULT_HEIGHT_DP
+                                + CAPSULE_GAP_DP));
+            }
+            c.setTranslationX(-dp(200));
+            c.setAlpha(1f);
+            c.animate().translationX(0f)
+                    .setStartDelay(dist * 35L)
+                    .setDuration(280)
+                    .setInterpolator(
+                            new android.view.animation.DecelerateInterpolator())
+                    .withLayer()
+                    .start();
+        }
+        updateWindowSize();
+    }
+
+    /** Drop the card state and rebuild the plain layout. No
+     * animation — used when the card view is gone, or after the
+     * close animation already put everything home. */
+    private void closeCardInstant() {
+        // v174: re-sync lyric listening for the closed card's key -
+        // the card is gone, so listening continues only if pinned.
+        String closedKey = cardKey;
+        cardKey = null;
+        cardHeightPx = 0;
+        // v151: drop a leftover card tail (close interrupted).
+        removeCardTail();
+        rebuildDock();
+        if (closedKey != null) {
+            syncLyricListen(closedKey);
+        }
+    }
+
+    /** Wire a card capsule (called from rebuildDock when it places
+     * the card). v162: the open buttons are gone — the header pin
+     * icon toggles pin/unpin instead; the X is gone too (close by
+     * tapping outside or swiping right). */
+    private void bindCardCapsule(final CapsuleView cap,
+            final NotifData d, final NotifGroup group) {
+        // v153: the card is an enlarged capsule — wire its manual
+        // drag (live tail) to BubbleWindow.
+        cap.setOnCardDragListener(
+                new CapsuleView.OnCardDragListener() {
+                    @Override
+                    public void onCardDrag(float dx) {
+                        updateCardDrag(cap, dx);
+                    }
+
+                    @Override
+                    public void onCardDragEnd(float dx) {
+                        endCardDrag(cap, dx);
+                    }
+                });
+        cap.setCardPinned(group != null && d != null && d.key != null
+                && group.pinnedAtByKey.containsKey(d.key));
+        cap.setOnCardPinToggle(new Runnable() {
+            @Override
+            public void run() {
+                togglePin(group, d);
+                // v180: pinning a card rebuilds the dock so the card
+                // jumps to first position immediately (user 2026-11-20
+                // "钉住卡片也立即排到第一位"). v163's in-place pin is
+                // gone.
+                rebuildDock();
+            }
+        });
+        cap.setOnCardClose(new Runnable() {
+            @Override
+            public void run() {
+                closeCard();
+            }
+        });
+        // v171: music card controls — send the command to the module
+        // process, which owns the MediaController.
+        cap.setOnMusicControl(new CapsuleView.OnMusicControlListener() {
+            @Override
+            public void onMusicControl(String command, long seekMs) {
+                sendMusicControl(command, seekMs);
+            }
+        });
+    }
+
+    /** v171: send a music control command to the module process. */
+    private void sendMusicControl(String command, long seekMs) {
+        try {
+            android.content.Intent intent = new android.content.Intent(
+                    NotificationService.ACTION_MUSIC_CONTROL);
+            intent.putExtra("command", command);
+            if (seekMs >= 0) {
+                intent.putExtra("seek_position", seekMs);
+            }
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v171: progress tick from the module — update the open music
+     * card's bar, times and play/pause icon (only when the open
+     * card is the music notification for this key). */
+    public void onMusicProgress(String key, long positionMs,
+            long durationMs, boolean playing, boolean favorite,
+            boolean hasFavorite) {
+        try {
+            if (cardKey == null || key == null
+                    || !cardKey.equals(key)) {
+                return;
+            }
+            if (dock == null) {
+                return;
+            }
+            for (int i = 0; i < dock.getChildCount(); i++) {
+                android.view.View v = dock.getChildAt(i);
+                if (v instanceof CapsuleView) {
+                    CapsuleView cap = (CapsuleView) v;
+                    NotifData cd = cap.getData();
+                    if (cd != null && key.equals(cd.key)
+                            && cd.isMusic) {
+                        cap.updateMusicProgress(positionMs, durationMs,
+                                playing);
+                        if (hasFavorite) {
+                            cap.setMusicFavorite(favorite);
+                        }
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+
+
+
+    /** v204: full music state from the session (1.0.5
+     * sendMusicStateFromController) — a manual skip changes the
+     * session metadata immediately, so the card's title/artist
+     * follow without waiting for a new notification. Only the
+     * matching music capsule is updated, and only when the
+     * broadcast title/artist actually differ.
+     * v212 (user 2026-11-20, Flyme only): the old guard returned
+     * early unless a card was open, so the dock capsule stayed on
+     * the old song until the user expanded the card and shrank it
+     * back ("要我展开卡片之后缩小他才变"). For Flyme, update the
+     * capsule even with no card open.
+     * v217 (user 2026-11-20, generic): the same staleness was
+     * reported for QQ Original / NetEase / Qishui ("胶囊切歌不
+     * 刷新" / "只有点卡卡片才会一起刷新") — the session knew the
+     * new song but the capsule never heard it without an open
+     * card. The guard is gone for ALL music now: the capsule
+     * follows the session whether or not a card is open. The
+     * key+isMusic match below still scopes the update to the
+     * one music capsule for this key. */
+    public void onMusicState(String key, String title, String artist) {
+        try {
+            if (key == null) {
+                return;
+            }
+            if (dock == null) {
+                return;
+            }
+            for (int i = 0; i < dock.getChildCount(); i++) {
+                android.view.View v = dock.getChildAt(i);
+                if (v instanceof CapsuleView) {
+                    CapsuleView cap = (CapsuleView) v;
+                    NotifData cd = cap.getData();
+                    if (cd != null && key.equals(cd.key)
+                            && cd.isMusic) {
+                        boolean changed = false;
+                        if (title != null && !title.isEmpty()
+                                && !title.equals(cd.title)) {
+                            cap.updateTitle(title);
+                            changed = true;
+                        }
+                        if (artist != null && !artist.isEmpty()
+                                && !artist.equals(cd.text)) {
+                            cap.updateText(artist);
+                            changed = true;
+                        }
+                        if (changed) {
+                            cap.updateMusicCard();
+                        }
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v218: live session album art for the music capsule (the
+     * controller's art, pushed when it first appears for a song).
+     * Sets the capsule's art in place — icon, tint and card disc —
+     * without waiting for a notification re-post. The card is the
+     * capsule grown, so findCapsuleByKey covers the open card too;
+     * a docked (fan) music item has no visible capsule to update. */
+    /** v262: apply the scroll switch to every visible capsule
+     * at once, so flipping it stops (or restarts) the lyric
+     * scrolling immediately. */
+    public void refreshLyricsScroll() {
+        if (dock == null) {
+            return;
+        }
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                ((CapsuleView) v).applyScrollFlag();
+            }
+        }
+    }
+
+    public void onMusicArt(String key,
+            android.graphics.Bitmap art) {
+        try {
+            if (key == null || art == null || dock == null) {
+                return;
+            }
+            CapsuleView cap = findCapsuleByKey(key);
+            if (cap != null) {
+                NotifData cd = cap.getData();
+                if (cd != null && cd.isMusic) {
+                    cap.updateArt(art);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v154: manual right-swipe on the open card dismisses the
+     * notification (user "展开卡片手动右滑就消掉通知"). Like a
+     * capsule's manual right-swipe (dissipateOne): the notification
+     * leaves the bubble group, so no capsule pops back when the
+     * card closes. The card still slides right with its tail and
+     * bursts (closeCard) — it just doesn't come back. */
+    private void dismissOpenCard(NotifData d) {
+        if (d == null || d.key == null) {
+            closeCard();
+            return;
+        }
+        removeNotifByKey(d.key);
+        closeCard();
+    }
+
+    /** Remove one notification (by key) from the bubble groups,
+     * synchronously. Drops its pin if it was pinned; drops the
+     * group if it becomes empty. (dissipateOne does this after a
+     * 310ms delay; the card dismiss needs it now, before
+     * closeCard's rebuildDock, so the capsule can't pop back.) */
+    private void removeNotifByKey(String key) {
+        if (key == null) {
+            return;
+        }
+        for (int gi = groups.size() - 1; gi >= 0; gi--) {
+            NotifGroup g = groups.get(gi);
+            if (g == null) {
+                continue;
+            }
+            boolean removed = false;
+            for (int i = g.items.size() - 1; i >= 0; i--) {
+                NotifData it = g.items.get(i);
+                if (it != null && key.equals(it.key)) {
+                    g.items.remove(i);
+                    removed = true;
+                    break;
+                }
+            }
+            if (removed) {
+                // v238: dropping a removed notification's stay-put
+                // record (and pinned-card mark) too.
+                stayPutPinTime.remove(key);
+                pinnedCardKeys.remove(key);
+                if (g.pinnedAtByKey.remove(key) != null) {
+                    g.sortItems();
+                    if (g.pinnedAtByKey.isEmpty()) {
+                        g.pinned = false;
+                        g.pinnedAt = 0;
+                    } else {
+                        g.pinnedAt = earliestPinTime(g);
+                    }
+                }
+                if (g.items.isEmpty()) {
+                    groups.remove(gi);
+                }
+                break;
+            }
+        }
+    }
+
+    /** Ask the module (the NotificationListenerService) to cancel a
+     * notification by key — SystemUI cannot cancel another app's
+     * notification itself. */
+    private void dismissNotification(String key) {
+        if (key == null || app == null) {
+            return;
+        }
+        try {
+            android.content.Intent intent = new android.content.Intent(
+                    "com.chenan.flymebobo.DISMISS");
+            intent.setPackage("com.chenan.flymebobo");
+            intent.putExtra("key", key);
+            try {
+                android.os.Bundle opts =
+                        android.app.BroadcastOptions.makeBasic()
+                                .setShareIdentityEnabled(true).toBundle();
+                app.sendBroadcast(intent, null, opts);
+            } catch (Throwable t) {
+                app.sendBroadcast(intent);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ---- Open app (v143, ported whole from 1.x BubbleManager,
+    // fixed14/88/143 — user 2026-11-18 "把代码完整拿过来，别做改变
+    // 了" / "照搬改成我们能用的"). freeform = small window. ----
+    private boolean openPendingIntent(
+            android.app.PendingIntent pi, String pkg, boolean freeform) {
+        if (pi == null) {
+            return false;
+        }
+        try {
+            android.os.Bundle opts = makeFreeformOptions(pkg, freeform);
+            try {
+                if (opts != null) {
+                    pi.send(app, 0, null, null, null, null, opts);
+                } else {
+                    pi.send();
+                }
+                return true;
+            } catch (Throwable th) {
+                try {
+                    pi.send();
+                    return true;
+                } catch (Throwable ignored) {
+                    return false;
+                }
+            }
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean openIntent(
+            android.content.Intent intent, boolean freeform) {
+        if (intent == null) {
+            return false;
+        }
+        try {
+            intent.addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            String targetPkg = intent.getPackage();
+            if (targetPkg == null && intent.getComponent() != null) {
+                targetPkg = intent.getComponent().getPackageName();
+            }
+            android.os.Bundle opts =
+                    makeFreeformOptions(targetPkg, freeform);
+            if (opts != null) {
+                app.startActivity(intent, opts);
+            } else {
+                app.startActivity(intent);
+            }
+            return true;
+        } catch (Throwable th) {
+            try {
+                app.startActivity(intent);
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            }
+        }
+    }
+
+    private boolean prepareFlymeMiniWindow(String pkg) {
+        if (pkg == null) {
+            return false;
+        }
+        try {
+            Class<?> cls =
+                    Class.forName("flyme.view.WindowManagerExt");
+            Object inst = cls.getMethod("getInstance",
+                    Context.class).invoke(null, app);
+            if (inst == null) {
+                return false;
+            }
+            cls.getMethod("setStartWindowMode", String.class)
+                    .invoke(inst, pkg);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void clearFlymeMiniWindow(String pkg) {
+        if (pkg == null) {
+            return;
+        }
+        try {
+            Class<?> cls =
+                    Class.forName("flyme.view.WindowManagerExt");
+            Object inst = cls.getMethod("getInstance",
+                    Context.class).invoke(null, app);
+            if (inst == null) {
+                return;
+            }
+            try {
+                cls.getMethod("setStartWindowMode", String.class,
+                        Boolean.TYPE).invoke(inst, pkg, Boolean.FALSE);
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private android.os.Bundle makeFreeformOptions(
+            String pkg, boolean freeform) {
+        final int WINDOWING_MODE_FULLSCREEN = 1;
+        final int WINDOWING_MODE_FREEFORM = 5;
+        if (!freeform) {
+            // Fullscreen: clear any persisted mini-window mode, then
+            // launch with explicit fullscreen windowing mode (fixed143
+            // all-ROM background-start opt-in).
+            clearFlymeMiniWindow(pkg);
+            try {
+                android.app.ActivityOptions opts =
+                        android.app.ActivityOptions.makeBasic();
+                try {
+                    android.app.ActivityOptions.class.getMethod(
+                            "setLaunchWindowingMode", Integer.TYPE)
+                            .invoke(opts, WINDOWING_MODE_FULLSCREEN);
+                } catch (Throwable ignored) {
+                }
+                if (android.os.Build.VERSION.SDK_INT >= 34) {
+                    try {
+                        opts.setPendingIntentBackgroundActivityStartMode(1);
+                    } catch (Throwable ignored) {
+                    }
+                } else {
+                    try {
+                        android.app.ActivityOptions.class.getMethod(
+                                "setPendingIntentBackgroundActivityStartMode",
+                                Integer.TYPE).invoke(opts, 1);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                return opts.toBundle();
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+        try {
+            android.app.ActivityOptions opts =
+                    android.app.ActivityOptions.makeBasic();
+            // Flyme path first: proprietary small window.
+            if (prepareFlymeMiniWindow(pkg)) {
+                if (android.os.Build.VERSION.SDK_INT >= 34) {
+                    try {
+                        opts.setPendingIntentBackgroundActivityStartMode(1);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                android.os.Bundle bundle = opts.toBundle();
+                bundle.putBoolean("start_windowmode", true);
+                return bundle;
+            }
+            // Standard Android freeform fallback (non-Flyme devices).
+            float f = 1080f;
+            float f2 = 2400f;
+            try {
+                android.util.DisplayMetrics dm =
+                        app.getResources().getDisplayMetrics();
+                f = dm.widthPixels;
+                f2 = dm.heightPixels;
+            } catch (Throwable ignored) {
+            }
+            android.graphics.Rect rect = new android.graphics.Rect(
+                    Math.round(0.075f * f), Math.round(0.175f * f2),
+                    Math.round(f * 0.925f), Math.round(f2 * 0.825f));
+            opts.setLaunchBounds(rect);
+            try {
+                android.app.ActivityOptions.class.getMethod(
+                        "setLaunchWindowingMode", Integer.TYPE)
+                        .invoke(opts, WINDOWING_MODE_FREEFORM);
+            } catch (Throwable ignored) {
+            }
+            return opts.toBundle();
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * Arrange the capsules DOWNWARD by time: newest at the top, older
+     * ones below, each one CAPSULE_GAP below the previous. The dock is
+     * a free layout, so each capsule is placed by its own top margin.
+     */
+    private void layoutCapsules() {
+        rebuildDock();
+    }
+
+    public void dismissCapsule(CapsuleView cap) {
+        if (cap == null) {
+            return;
+        }
+        NotifGroup group = (NotifGroup) cap.getTag();
+        if (group == null) {
+            return;
+        }
+        // A manual dismiss is an active dock: the whole group
+        // converges into a notification icon in the fan.
+        dockGroup(group);
+    }
+
+    /**
+     * RIGHT SWIPE — dock (user 2026-11-18 "这个是我主动贴合的功能"
+     * / "也就是右滑贴合功能" / "右滑汇聚成通知图标"): the user
+     * actively docks a notification (swipe toward the edge), one at
+     * a time. That notification converges into a notification icon,
+     * joining the fan as the newest; the survivors move up and the
+     * fan gathers below the next anchor. The icon can ONLY gather
+     * BELOW the capsule notification — it must not jump over it
+     * ("图标只能汇聚在胶囊通知下面 / 不能跃过"). This is the manual
+     * trigger; dissipateAllOneByOne() just plays the same step
+     * repeatedly.
+     */
+    /**
+     * Add (or refresh) the fan icon for a group being docked. One icon
+     * per app (DockedPile dedups by pkg). The group is remembered in
+     * dockedGroups so tapping the icon expands it back out. Returns the
+     * icon (for the converge animation) or null.
+     */
+    private PileIcon addPileIconForGroup(NotifGroup group) {
+        if (group == null || pile == null) {
+            return null;
+        }
+        // Merge into the already-docked group for this app, if any, so
+        // earlier docked notifications are not lost when the same app
+        // docks again.
+        NotifGroup stored = dockedGroups.get(group.pkg);
+        if (stored != null && stored != group) {
+            for (NotifData d : group.items) {
+                if (d != null && !stored.hasKey(d.key)) {
+                    stored.add(d);
+                }
+            }
+            group = stored;
+        } else {
+            dockedGroups.put(group.pkg, group);
+        }
+        NotifData latest = group.latest();
+        if (latest == null) {
+            return null;
+        }
+        final String pkg = group.pkg;
+        PileIcon icon = new PileIcon(app, dockLeft);
+        icon.setPkg(pkg);
+        // v24: load the app icon here in SystemUI (v1 does it this
+        // way) — no Bitmap is passed across processes any more.
+        try {
+            android.graphics.drawable.Drawable d =
+                    app.getPackageManager().getApplicationIcon(pkg);
+            if (d != null) {
+                icon.setIcon(d);
+            }
+        } catch (Throwable ignored) {
+        }
+        icon.setOnTap(new Runnable() {
+            @Override
+            public void run() {
+                expandAllDockedGroups();
+            }
+        });
+        setupPileIconDrag(icon);
+        pile.addIcon(icon);
+        // Resize the pile window right away (v25): it must never be
+        // left 1x1 while icons exist, even if a caller forgets
+        // rebuildDock.
+        updatePileWindow();
+        return icon;
+    }
+
+    /** Tap a pile icon: expand ALL docked notifications back out
+     * (user 2026-11-19 "点击贴合图标展开全部通知") — every app's
+     * docked group comes back, not just the tapped icon's app.
+     * Staged animation (user 2026-11-19 "展开动画为先向下排列图标
+     * 然后由第一个图标依次向下展开通知" / "通知胶囊从贴合方向弹出来"):
+     * (1) the pile icons first arrange downward into a vertical
+     * column; (2) then, from the first icon, each group's capsules
+     * expand downward one by one, each capsule sliding in from the
+     * docked direction (the left edge). */
+    private void expandAllDockedGroups() {
+        if (dockedGroups.isEmpty()) {
+            return;
+        }
+        final java.util.List<NotifGroup> all =
+                new java.util.ArrayList<>(dockedGroups.values());
+        Collections.sort(all, new Comparator<NotifGroup>() {
+            @Override
+            public int compare(NotifGroup a, NotifGroup b) {
+                return Long.compare(b.latestTime(), a.latestTime());
+            }
+        });
+        dockedGroups.clear();
+        // Phase 1 — pile icons arrange downward, then fade out.
+        animatePileIconsDownward(new Runnable() {
+            @Override
+            public void run() {
+                // Phase 2 — groups back, capsules cascade in one by one.
+                // Merge by pkg: if a group for this app is already
+                // out (a new notification reclaimed it), fold the
+                // docked items into it instead of adding a second
+                // group for the same app.
+                if (pile != null) {
+                    pile.clearIcons();
+                }
+                for (NotifGroup g : all) {
+                    if (g == null) {
+                        continue;
+                    }
+                    NotifGroup existing = null;
+                    for (NotifGroup eg : groups) {
+                        if (eg.pkg != null && eg.pkg.equals(g.pkg)) {
+                            existing = eg;
+                            break;
+                        }
+                    }
+                    if (existing != null && existing != g) {
+                        for (NotifData d : g.items) {
+                            if (d != null && !existing.hasKey(d.key)) {
+                                existing.add(d);
+                            }
+                        }
+                        // Re-expanded: show spread out, not stacked
+                        // (user 2026-11-19 "你他么叠放了啊").
+                        existing.expanded = true;
+                    } else if (!groups.contains(g)) {
+                        // Re-expanded: show spread out, not stacked.
+                        g.expanded = true;
+                        groups.add(g);
+                    }
+                }
+                Collections.sort(groups, new Comparator<NotifGroup>() {
+                    @Override
+                    public int compare(NotifGroup a, NotifGroup b) {
+                        // Pinned groups stay at the very front (user
+                        // 2026-11-19 "钉住的通知自动排在最前面后，重新
+                        // 展开的其他通知只能由它后面开始排列"): pinned
+                        // first, then by latest time within each side,
+                        // so re-expanded groups can only land behind
+                        // the pinned ones.
+                        if (a.pinned != b.pinned) {
+                            return a.pinned ? -1 : 1;
+                        }
+                        if (a.pinned) {
+                            return Long.compare(a.pinnedAt, b.pinnedAt);
+                        }
+                        return Long.compare(b.latestTime(), a.latestTime());
+                    }
+                });
+                rebuildDock();
+                cascadeCapsulesIn(all);
+                updatePileWindow();
+            }
+        });
+    }
+
+    /** Phase 1 of the expand animation: the pile (fan) icons arrange
+     * downward into a vertical column (newest/anchor on top, older
+     * ones below), then the whole pile fades out. Calls onDone when
+     * finished. The pile window is grown tall first so the icons are
+     * not clipped while they move down. */
+    private void animatePileIconsDownward(final Runnable onDone) {
+        if (pile == null || pile.getChildCount() == 0) {
+            if (onDone != null) {
+                onDone.run();
+            }
+            return;
+        }
+        final int n = pile.getChildCount();
+        final int step = dp(40);
+        // Grow the pile window tall enough for the vertical column,
+        // and wide enough that the icons (34dp) are never clipped at
+        // the right edge while they slide to X=0.
+        if (pileWindowAdded && pileParams != null && wm != null) {
+            pileParams.height = n * step + dp(8);
+            // v111: min 48dp (was 40dp) so the 34dp icon has room.
+            pileParams.width = Math.max(pileParams.width, dp(48));
+            try {
+                wm.updateViewLayout(pileRoot, pileParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        // Each icon moves from its fan slot into the column: the
+        // leftmost (slot 0, newest/anchor) goes to the top row, older
+        // ones below. Slot is read from the icon's actual X so the
+        // order follows the fan, not the child order.
+        float stepPx = 1f;
+        try {
+            stepPx = pile.stepPx();
+        } catch (Throwable ignored) {
+        }
+        long maxDelay = 0;
+        for (int i = 0; i < n; i++) {
+            View icon = pile.getChildAt(i);
+            if (icon == null) {
+                continue;
+            }
+            int slot = stepPx > 0
+                    ? Math.round(icon.getX() / stepPx) : i;
+            if (slot < 0) {
+                slot = 0;
+            }
+            if (slot >= n) {
+                slot = n - 1;
+            }
+            long delay = slot * 45L;
+            if (delay > maxDelay) {
+                maxDelay = delay;
+            }
+            // v111: no withLayer() here — a hardware layer is
+            // sized to the 22dp frame and can clip the 34dp icon's
+            // 12dp overflow on tap.
+            icon.animate()
+                    .translationX(-icon.getX())
+                    .translationY(slot * step)
+                    .setDuration(260)
+                    .setStartDelay(delay)
+                    .start();
+        }
+        // Fade the pile out, then hand over to phase 2.
+        if (pileRoot != null) {
+            pileRoot.animate().alpha(0f).setDuration(180)
+                    .setStartDelay(260L + maxDelay)
+                    .withLayer()
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            pileRoot.setAlpha(1f);
+                            if (onDone != null) {
+                                onDone.run();
+                            }
+                        }
+                    }).start();
+        } else if (onDone != null) {
+            onDone.run();
+        }
+    }
+
+    /** Phase 2 of the expand animation: the capsules of each group
+     * expand downward one by one, starting from the first (top)
+     * group. Every capsule slides in from the docked direction (the
+     * left edge) and fades in. Groups are staggered so they appear
+     * in order, top to bottom. */
+    private void cascadeCapsulesIn(java.util.List<NotifGroup> order) {
+        if (dock == null || order == null || order.isEmpty()) {
+            return;
+        }
+        // Collect the dock's capsules per group, in dock order.
+        // Pinned capsules are skipped: they do not participate in
+        // group arrangement (user 2026-11-19 "钉住的不参与分组排列"),
+        // so expanding/collapsing a group only moves its unpinned
+        // items; pinned rows stay fixed in pin order.
+        final java.util.Map<NotifGroup, java.util.List<CapsuleView>> byGroup =
+                new java.util.HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (!(v instanceof CapsuleView)) {
+                continue;
+            }
+            Object tag = v.getTag();
+            if (!(tag instanceof NotifGroup)) {
+                continue;
+            }
+            NotifGroup g = (NotifGroup) tag;
+            CapsuleView cv = (CapsuleView) v;
+            if (cv.getData() != null && cv.getData().key != null
+                    && g.pinnedAtByKey.containsKey(cv.getData().key)) {
+                continue;
+            }
+            java.util.List<CapsuleView> list = byGroup.get(g);
+            if (list == null) {
+                list = new java.util.ArrayList<>();
+                byGroup.put(g, list);
+            }
+            list.add((CapsuleView) v);
+        }
+        // One running counter across ALL capsules: every capsule
+        // pops out one by one, 110ms apart (user 2026-11-19 05:52
+        // "同应用不同通知也要逐条弹出不要一起弹出"). Within a group
+        // the dock's child order is oldest-first (rebuildDock adds
+        // old first), so iterate in REVERSE (newest/top first) to keep
+        // the top-to-bottom expand direction ("由上往下展开").
+        int index = 0;
+        for (NotifGroup g : order) {
+            java.util.List<CapsuleView> caps = byGroup.get(g);
+            if (caps == null || caps.isEmpty()) {
+                continue;
+            }
+            for (int i = caps.size() - 1; i >= 0; i--) {
+                CapsuleView cap = caps.get(i);
+                long delay = index * 110L;
+                index++;
+                cap.setTranslationX(-dp(200));
+                cap.setAlpha(0f);
+                cap.animate().translationX(0f).alpha(1f)
+                        .setDuration(240)
+                        .setStartDelay(delay)
+                        .withLayer()
+                        .start();
+            }
+        }
+    }
+
+    /** Tap a pile icon: expand that app's docked notifications back out. */
+    private void expandDockedGroup(String pkg) {
+        if (pkg == null) {
+            return;
+        }
+        NotifGroup g = dockedGroups.remove(pkg);
+        if (g == null) {
+            return;
+        }
+        if (pile != null) {
+            pile.removeIconForPkg(pkg);
+        }
+        // Merge by pkg — never two groups for one app.
+        NotifGroup existing = null;
+        for (NotifGroup eg : groups) {
+            if (eg.pkg != null && eg.pkg.equals(pkg)) {
+                existing = eg;
+                break;
+            }
+        }
+        if (existing != null && existing != g) {
+            for (NotifData d : g.items) {
+                if (d != null && !existing.hasKey(d.key)) {
+                    existing.add(d);
+                }
+            }
+            // Re-expanded: show spread out, not stacked.
+            existing.expanded = true;
+        } else if (!groups.contains(g)) {
+            // Re-expanded: show spread out, not stacked.
+            g.expanded = true;
+            groups.add(g);
+        }
+        Collections.sort(groups, new Comparator<NotifGroup>() {
+            @Override
+            public int compare(NotifGroup a, NotifGroup b) {
+                // Pinned groups stay at the very front (user 2026-11-19
+                // "钉住的通知自动排在最前面后，重新展开的其他通知只能由
+                // 它后面开始排列"): pinned first, then by latest time
+                // within each side, so re-expanded groups can only land
+                // behind the pinned ones.
+                if (a.pinned != b.pinned) {
+                    return a.pinned ? -1 : 1;
+                }
+                if (a.pinned) {
+                    return Long.compare(a.pinnedAt, b.pinnedAt);
+                }
+                return Long.compare(b.latestTime(), a.latestTime());
+            }
+        });
+        rebuildDock();
+    }
+
+    /**
+     * Long-press drag to move a pile icon (reorder the fan). Long-press
+     * picks the icon up; dragging moves it with the finger; releasing
+     * drops it into the nearest slot.
+     */
+    private void setupPileIconDrag(final PileIcon icon) {
+        if (icon == null) {
+            return;
+        }
+        final boolean[] dragging = new boolean[]{false};
+        final float[] downX = new float[]{0f};
+        final float[] downY = new float[]{0f};
+        icon.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                dragging[0] = true;
+                // Widen the window so the icon can be dragged anywhere
+                // on screen (v5: the window is content-sized again).
+                beginDragWindow();
+                icon.animate().scaleX(1.15f).scaleY(1.15f)
+                        .setDuration(120).withLayer().start();
+                return true;
+            }
+        });
+        icon.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, android.view.MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        downX[0] = e.getRawX();
+                        downY[0] = e.getRawY();
+                        return false;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (!dragging[0]) {
+                            return false;
+                        }
+                        // Free 2D drag: follow the finger up/down as
+                        // well as left/right (user 2026-11-19 "贴合的
+                        // 应用图标没办法上下移动换位置").
+                        icon.setTranslationX(e.getRawX() - downX[0]);
+                        icon.setTranslationY(e.getRawY() - downY[0]);
+                        return true;
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        if (!dragging[0]) {
+                            return false;
+                        }
+                        dragging[0] = false;
+                        icon.animate().scaleX(1f).scaleY(1f)
+                                .setDuration(120).withLayer().start();
+                        endDragWindow();
+                        finishPileIconDrag(icon);
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+    }
+
+    /** Drop a dragged pile icon: it always stacks to the END of the
+     * fan (user 2026-11-20 "拖动后让他自动堆叠到最后去"). The end is
+     * the anchor end (newest slot, list index n-1, flush at the
+     * edge); the drop position no longer picks a slot. */
+    private void finishPileIconDrag(PileIcon icon) {
+        if (icon == null || pile == null) {
+            return;
+        }
+        int n = pile.getIconCount();
+        icon.setTranslationX(0f);
+        icon.setTranslationY(0f);
+        if (n <= 1) {
+            return;
+        }
+        // v202: drag-to-end = the dragged icon stacks BELOW the
+        // current last icon (user 2026-11-20 "CBA c才是第一位" /
+        // "拖动c他就叠加到a下面去"): fan C,B,A, drag C -> B,A,C.
+        // The far/right end (after A) is list index 0 (oldest slot).
+        // v200 had this X position right but moveIcon never reordered
+        // the views, so the icon kept floating ON TOP of the icon it
+        // should tuck under — DockedPile.moveIcon now keeps the view
+        // z-order in sync with the list order.
+        pile.moveIcon(icon, 0);
+    }
+
+    /** Stack a capsule under the previous one (user 2026-11-19 "缩小改成
+     * 由最下面通知叠加到上一个通知下面" / "消散成排列好了的图标串"): the
+     * capsule slides up by one slot (44dp + 6dp gap) to tuck under the
+     * notification above it. Shrink runs bottom-up, one by one, so the
+     * capsules pile up into a stack that dissipates into the arranged
+     * string of fan icons. No fade — the capsule stays visible as it
+     * stacks. */
+    private void stackCapsuleUnder(View v) {
+        if (v == null) {
+            return;
+        }
+        // Use a fresh ObjectAnimator, NOT v.animate(): the expand
+        // (cascadeCapsulesIn) drives the same view's
+        // ViewPropertyAnimator for its slide-in, and reusing it here
+        // while the expand is still pending/running swallows the
+        // stack (user 2026-11-19 "你这个没有叠加啊" — the stack never
+        // played). An ObjectAnimator on translationY is independent.
+        // RELATIVE: up another step from wherever it is now, so
+        // calling it again on the same capsule keeps rising (the pile
+        // rises together, user 2026-11-19 "叠加是通知一起移动上去吧").
+        // The step is just the capsule HEIGHT (44dp), not height+gap:
+        // from a 50dp spacing that lands each capsule 6dp below the
+        // one above it — the SAME-APP CASCADE look (6dp edges, newest
+        // on top), not an exact overlap where you can't see the
+        // individual notifications (user 2026-11-19 "叠加成同应用那种
+        // 啊" / "别搞个不伦不类的").
+        android.animation.ObjectAnimator anim =
+                android.animation.ObjectAnimator.ofFloat(v, "translationY",
+                        v.getTranslationY(),
+                        v.getTranslationY()
+                                - dp(CapsuleView.DEFAULT_HEIGHT_DP));
+        anim.setDuration(240);
+        anim.start();
+    }
+    /** Layout top of a dock child (its LayoutParams topMargin) — the
+     * reliable vertical order right after rebuildDock, before layout
+     * has run and getY() becomes meaningful. */
+    private static int topOf(View v) {
+        if (v == null || !(v.getLayoutParams()
+                instanceof FrameLayout.LayoutParams)) {
+            return 0;
+        }
+        return ((FrameLayout.LayoutParams) v.getLayoutParams()).topMargin;
+    }
+
+
+    /** Collapse a group into a stack with animation (user 2026-11-19
+     * "通知叠加和展开加一个动画"): record each capsule's current Y,
+     * rebuild the dock (which lays them out as a cascade), then slide
+     * each capsule from its old spread-out position into its stacked
+     * position (240ms, 110ms stagger per capsule, same pace as the
+     * expand). */
+    private void collapseGroupAnimated(final NotifGroup group) {
+        if (dock == null || group == null) {
+            return;
+        }
+        final java.util.Map<String, Integer> oldTops =
+                new java.util.HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (!(v instanceof CapsuleView)) {
+                continue;
+            }
+            CapsuleView c = (CapsuleView) v;
+            if (c.getTag() == group && c.getData() != null
+                    && c.getData().key != null
+                    && !group.pinnedAtByKey.containsKey(c.getData().key)) {
+                oldTops.put(c.getData().key, (int) v.getY());
+            }
+        }
+        group.expanded = false;
+        rebuildDock();
+        int step = 0;
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (!(v instanceof CapsuleView)) {
+                continue;
+            }
+            CapsuleView c = (CapsuleView) v;
+            if (c.getTag() != group || c.getData() == null
+                    || c.getData().key == null
+                    || group.pinnedAtByKey.containsKey(c.getData().key)) {
+                continue;
+            }
+            Integer oldTop = oldTops.get(c.getData().key);
+            if (oldTop == null) {
+                continue;
+            }
+            int newTop = ((FrameLayout.LayoutParams)
+                    v.getLayoutParams()).topMargin;
+            int dy = oldTop - newTop;
+            if (dy != 0) {
+                v.setTranslationY(dy);
+                v.animate().translationY(0f)
+                        .setDuration(240)
+                        .setStartDelay(step * 110L)
+                        .withLayer().start();
+                step++;
+            }
+        }
+    }
+
+    /** Expand ALL groups before shrinking (user 2026-11-19 "改成全部展开
+     * 然后由最后一个逐一向上叠加" / "就是之前说过的收缩动画改成我现在说的
+     * 这种"): the shrink starts with every notification spread out on
+     * its own row (no cascades), then the stacking runs bottom-up one
+     * by one. Returns true if any group was expanded, so the caller
+     * waits for the expand to be visible before the first stack
+     * starts. (Replaces v35's collapseExpandedGroups, which did the
+     * opposite — it merged expanded groups into a stack first.) */
+    private boolean expandAllGroupsAnimated() {
+        boolean expanded = false;
+        java.util.List<NotifGroup> order = new java.util.ArrayList<>();
+        for (NotifGroup g : groups) {
+            if (g != null && g.items.size() > 1 && !g.expanded
+                    && !g.pinned) {
+                g.expanded = true;
+                expanded = true;
+            }
+            if (g != null) {
+                order.add(g);
+            }
+        }
+        if (expanded) {
+            rebuildDock();
+            cascadeCapsulesIn(order);
+        }
+        return expanded;
+    }
+
+    /** Add a group's fan icon and hold it just below its capsule
+     * (user 2026-11-18 "图标只能汇聚在胶囊通知下面"). The icon is
+     * gathered BEFORE the capsule shrinks, so the capsule visibly
+     * becomes the icon (user 2026-11-19 "先缩成图标"). Returns the
+     * icon, or null. */
+    private PileIcon gatherIconBelowCapsule(NotifGroup target,
+            int capsuleTop) {
+        if (pile == null || target == null) {
+            return null;
+        }
+        PileIcon icon = addPileIconForGroup(target);
+        if (icon == null) {
+            return null;
+        }
+        int fanTop = (pileParams != null) ? pileParams.y : 0;
+        int belowTop = capsuleTop
+                + dp(CapsuleView.DEFAULT_HEIGHT_DP + CAPSULE_GAP_DP);
+        icon.setTranslationY(belowTop - fanTop);
+        // Stretch the pile window up to the icon so it is not clipped
+        // ("残缺") while it waits above the fan.
+        stretchPileWindowTo(belowTop);
+        return icon;
+    }
+
+    /** Slide a gathered icon down to stack onto the fan (user
+     * 2026-11-19 "然后再叠加图标"): the icon's translationY animates
+     * to 0 (its fan slot) and the fan stack animation runs — the
+     * reverse of the top-to-bottom expand. */
+    private void stackIconToFan(PileIcon icon) {
+        if (icon == null) {
+            return;
+        }
+        icon.animate().translationY(0f)
+                .setDuration(350).withLayer().start();
+        // (Fan stack animation deleted, user 2026-11-19 "删了": the
+        // column sweep made the icons fly around. Only the slide into
+        // the fan remains.)
+    }
+
+    /** Dock gathered icons to the edge (user 2026-11-19 "图标贴边不叠
+     * 加，只有最后一个通知也缩小再叠加"): all but the last icon snap
+     * straight to their fan slot with no slide and no stacking; only
+     * the last icon slides down to stack onto the fan, then the fan
+     * stack animation runs once. */
+    private void dockIconsToEdge(final List<PileIcon> icons) {
+        if (icons == null || icons.isEmpty()) {
+            return;
+        }
+        for (int i = 0; i < icons.size() - 1; i++) {
+            PileIcon icon = icons.get(i);
+            icon.animate().cancel();
+            icon.setTranslationY(0f);
+        }
+        PileIcon last = icons.get(icons.size() - 1);
+        last.animate().translationY(0f)
+                .setDuration(350).withLayer().start();
+        // (Fan stack animation deleted, user 2026-11-19 "删了".)
+    }
+
+    /** Set the pile's top margin inside the pile window. Used to keep
+     * the fan at the same screen Y while the window is stretched. */
+    private void setPileTopMargin(int marginPx) {
+        if (pile == null) {
+            return;
+        }
+        FrameLayout.LayoutParams lp =
+                (FrameLayout.LayoutParams) pile.getLayoutParams();
+        if (lp.topMargin != marginPx) {
+            lp.topMargin = marginPx;
+            pile.setLayoutParams(lp);
+        }
+    }
+
+    /** Stretch the pile window up to cover a screen Y (user 2026-11-19
+     * "扇子图标残缺"): a gathered icon sits above the fan (below its
+     * capsule); if the window stays 34dp tall the icon is clipped.
+     * The window top moves up to the icon and the pile is pushed down
+     * inside it by the same amount, so the fan stays exactly where it
+     * was on screen. updatePileWindow shrinks it back afterwards. */
+    private void stretchPileWindowTo(int topY) {
+        if (pileParams == null || !pileWindowAdded || pile == null
+                || wm == null) {
+            return;
+        }
+        int pad = dp(4);
+        int fanTop = pileTargetY;
+        if (topY >= fanTop - pad) {
+            return; // already covered
+        }
+        int newTop = topY - pad;
+        int shift = fanTop - newTop;
+        int fanBottom = fanTop
+                + Math.max(pileRoot != null
+                        ? pileRoot.getMeasuredHeight() : 0, dp(34));
+        setPileTopMargin(shift);
+        pileParams.y = newTop;
+        pileParams.height = Math.max(fanBottom - newTop, 1);
+        try {
+            wm.updateViewLayout(pileRoot, pileParams);
+        } catch (Throwable ignored) {
+        }
+    }
+
+
+
+    public void dockGroup(final NotifGroup target) {
+        if (target == null || dock == null
+                || !dockingGroups.add(target)) {
+            return;
+        }
+        // Old tops of the surviving capsules, by key, so they can
+        // slide up one by one to fill the position.
+        int rowTop = 0;
+        final Map<String, Integer> oldTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == target) {
+                    rowTop = (int) v.getY();
+                } else if (c.getData() != null && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+            }
+        }
+        // Phase 1 (user 2026-11-19 "先缩成图标" / "和展开动画相反"):
+        // gather the icon below the capsule FIRST, so as the capsule
+        // shrinks it visibly becomes the icon.
+        final PileIcon icon = gatherIconBelowCapsule(target, rowTop);
+        // Stack the capsule under the previous one (user 2026-11-19).
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == target) {
+                    stackCapsuleUnder(v);
+                }
+            }
+        }
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                groups.remove(target);
+                dockingGroups.remove(target);
+                holdWindowHeight = true;
+                rebuildDock();
+                // Phase 2 (user 2026-11-19 "然后再叠加图标"): the icon
+                // slides down to stack onto the fan, and at the same
+                // time the other notifications slide up to fill the gap.
+                stackIconToFan(icon);
+                slideSurvivorsUp(oldTops);
+            }
+        }, 300);
+    }
+
+
+    /** Slide the surviving capsules up to close the gap left by a
+     * docked/dissipated group (their old tops are captured before
+     * the rebuild). */
+    // The notifications behind a removed row move up ONE BY ONE
+    // to fill the position (user 2026-11-18 "后面的通知就依次向上
+    // 补位"): each survivor slides up in order (top to bottom), 80ms
+    // apart, instead of all jumping at once.
+    private void slideSurvivorsUp(Map<String, Integer> oldTops) {
+        if (dock == null || oldTops == null || oldTops.isEmpty()) {
+            // v161: no survivors to slide — release the held window
+            // height right away, or the window stays tall forever.
+            if (holdWindowHeight) {
+                holdWindowHeight = false;
+                updateWindowSize();
+            }
+            return;
+        }
+        // Collect the survivors that actually moved, each as a single
+        // notification (user 2026-11-19 "其他通知依次前顶的那点也要改
+        // 成按单一通知来看" / "每条通知都按照单通知来看").
+        final java.util.List<CapsuleView> moved =
+                new java.util.ArrayList<>();
+        final java.util.Map<CapsuleView, Integer> dys =
+                new java.util.HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (!(v instanceof CapsuleView)) {
+                continue;
+            }
+            CapsuleView c = (CapsuleView) v;
+            Integer oldTop = c.getData() != null
+                    ? oldTops.get(c.getData().key) : null;
+            if (oldTop == null) {
+                continue;
+            }
+            // The new top comes from the layout params, NOT getY():
+            // these views were just created in rebuildDock and have
+            // not been laid out yet, so getY() is still 0; using it
+            // makes every survivor jump when the layout lands
+            // mid-animation (user 2026-11-19 "拖动消散会到处跳动").
+            int newTop = (int) v.getY();
+            if (v.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                newTop = ((FrameLayout.LayoutParams)
+                        v.getLayoutParams()).topMargin;
+            }
+            int dy = oldTop - newTop;
+            if (dy != 0) {
+                moved.add(c);
+                dys.put(c, dy);
+            }
+        }
+        // Slide up one by one from top to bottom (ascending OLD top):
+        // the survivor nearest the gap (directly below the removed
+        // notification) moves first, then the next one down. Dock
+        // child order is oldest-first inside a group (bottom-to-top),
+        // so staggering in child order made the bottom-most survivor
+        // move first, which looked wrong.
+        java.util.Collections.sort(moved,
+                new java.util.Comparator<CapsuleView>() {
+                    @Override
+                    public int compare(CapsuleView a, CapsuleView b) {
+                        Integer ta = a.getData() != null
+                                ? oldTops.get(a.getData().key) : null;
+                        Integer tb = b.getData() != null
+                                ? oldTops.get(b.getData().key) : null;
+                        int x = ta == null ? 0 : ta;
+                        int y = tb == null ? 0 : tb;
+                        return Integer.compare(x, y);
+                    }
+                });
+        int step = 0;
+        for (CapsuleView c : moved) {
+            c.setTranslationY(dys.get(c));
+            c.animate().translationY(0f)
+                    .setDuration(300)
+                    .setStartDelay(step * 80L)
+                    .withLayer().start();
+            step++;
+        }
+        // v161: release the held window height once the slide
+        // finishes (300ms + 80ms stagger per survivor, plus a
+        // small buffer) — shrinking earlier clips the last
+        // survivor's slide and it looks like flickering (user
+        // 2026-11-19 "导致他看起来想闪烁一样"). No survivors
+        // moved: release right away so the window shrinks now.
+        final int movedCount = moved.size();
+        final long releaseDelay = movedCount <= 0 ? 0
+                : 300L + 80L * (movedCount - 1) + 60L;
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                holdWindowHeight = false;
+                updateWindowSize();
+            }
+        }, releaseDelay);
+    }
+
+    /**
+     * LEFT SWIPE — particle dissipate (user 2026-11-18 "左滑就是
+     * 直接粒子化消散"): the notification bursts into particles and
+     * vanishes outright. It does NOT become an edge icon and does
+     * NOT join the fan; it is simply gone. The survivors move up.
+     */
+    /**
+     * Real particle burst: small circles fly outward from the capsule
+     * and fade away (preview: particles scatter in place and vanish,
+     * they do NOT converge to the edge). The capsule itself fades and
+     * shrinks at the same time; the particle views are removed when
+     * their animation ends.
+     */
+    private void burstParticles(View capsule) {
+        if (capsule == null || dock == null || app == null) {
+            return;
+        }
+        // The capsule itself vanishes instantly as the particles spawn
+        // (user 2026-11-19 "有粒子动画但是通知没有消散"): without this,
+        // the particles play and the capsule stays on screen.
+        capsule.setVisibility(View.INVISIBLE);
+        int color = Color.WHITE;
+        if (capsule instanceof CapsuleView) {
+            int pc = ((CapsuleView) capsule).getPillColor();
+            if (pc != 0) {
+                color = pc;
+            }
+        }
+        Random rnd = new Random();
+        // The whole pill dissipates together — body AND tail. The pill
+        // is (180+dx) wide when dragged out; particles must spawn along
+        // that full length, not just the 180dp capsule body (user
+        // 2026-11-19 "拖尾和胶囊一起消散" / "只消散胶囊没有让胶囊后面
+        // 的拖尾一起消散"). Scale the count with the length so the tail
+        // is covered at the same density.
+        int pillW = capsule.getWidth();
+        if (capsule instanceof CapsuleView) {
+            pillW = ((CapsuleView) capsule).getPillWidth();
+        }
+        if (pillW <= 0) {
+            pillW = capsule.getWidth();
+        }
+        int baseW = dp(CapsuleView.DEFAULT_WIDTH_DP);
+        int count = 16;
+        if (baseW > 0 && pillW > baseW) {
+            count = Math.round(16f * pillW / baseW);
+        }
+        for (int i = 0; i < count; i++) {
+            final View p = new View(app);
+            int size = dp(3 + rnd.nextInt(4));
+            GradientDrawable bg = new GradientDrawable();
+            bg.setShape(GradientDrawable.OVAL);
+            bg.setColor(color);
+            p.setBackground(bg);
+            FrameLayout.LayoutParams lp =
+                    new FrameLayout.LayoutParams(size, size);
+            float sx = capsule.getX() + rnd.nextFloat() * pillW;
+            float sy = capsule.getY() + rnd.nextFloat() * capsule.getHeight();
+            lp.leftMargin = (int) sx;
+            lp.topMargin = (int) sy;
+            p.setLayoutParams(lp);
+            dock.addView(p);
+            double angle = rnd.nextDouble() * Math.PI * 2;
+            float dist = dp(40 + rnd.nextInt(50));
+            float dx = (float) (Math.cos(angle) * dist);
+            float dy = (float) (Math.sin(angle) * dist);
+            p.animate()
+                    .translationX(dx)
+                    .translationY(dy)
+                    .alpha(0f)
+                    .scaleX(0.5f)
+                    .scaleY(0.5f)
+                    .setDuration(320 + rnd.nextInt(120))
+                    .withLayer()
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                dock.removeView(p);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    })
+                    .start();
+        }
+    }
+
+    /**
+     * Dissipate ONLY the dragged notification (user 2026-11-19
+     * "同一应用多个通知滑动会导致一起消散" / "能不能改成只消散拖动
+     * 的那一个"): the other notifications in the same app's group
+     * stay. The group shrinks; if it empties, it goes away.
+     */
+    /**
+     * Toggle the pin of ONE notification (per-notification pin, user
+     * 2026-11-19 "每条通知都按照单通知来看" / "钉住一个也应该能钉住
+     * 其他的"). Pinning the first notification of a group pins the
+     * group (pin-order insert, behind already-pinned groups, v57);
+     * pinning another while one is already pinned just adds its key
+     * (the group is already in the pin section, pinnedAt unchanged).
+     * Unpinning the last pinned notification unpins the group (it
+     * drops into the non-pinned section by latest time).
+     */
+    /** v174: lyric listening is on while a music capsule is pinned
+     * OR its music card is open. The module only runs the lyric
+     * listener (500ms poll re-reading the live notification) while
+     * musicListening is true, and togglePin was the only sender - so
+     * opening a music card never started it and the card's lyric
+     * froze at the pop-time line. Centralize the decision here so
+     * every pin/card transition re-syncs it. */
+    private void syncLyricListen(String key) {
+        if (app == null || key == null) {
+            return;
+        }
+        boolean want = false;
+        outer:
+        for (NotifGroup g : groups) {
+            if (g == null) {
+                continue;
+            }
+            for (NotifData d : g.items) {
+                if (d != null && key.equals(d.key) && d.isMusic) {
+                    want = g.pinnedAtByKey.containsKey(key)
+                            || isCardKey(key);
+                    break outer;
+                }
+            }
+        }
+        if (want != lyricListenOn) {
+            lyricListenOn = want;
+            android.content.Intent intent = new android.content.Intent(
+                    NotificationService.ACTION_LYRIC_LISTEN);
+            intent.putExtra("key", key);
+            intent.putExtra("listen", want);
+            try {
+                app.sendBroadcast(intent);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void togglePin(NotifGroup group, NotifData d) {
+        if (group == null || d == null || d.key == null) {
+            return;
+        }
+        if (group.pinnedAtByKey.containsKey(d.key)) {
+            // Unpin this one.
+            Long unpinTime = group.pinnedAtByKey.get(d.key);
+            boolean wasPinnedCard = pinnedCardKeys.contains(d.key);
+            group.pinnedAtByKey.remove(d.key);
+            // v236: unpinning a pinned card reverts it to a capsule.
+            pinnedCardKeys.remove(d.key);
+            // v238: a pinned card that is unpinned stays in
+            // place — it does NOT jump back to its group
+            // position. Remember its pin time so Phase 1 keeps
+            // it at that row as a capsule.
+            if (wasPinnedCard && unpinTime != null) {
+                stayPutPinTime.put(d.key, unpinTime);
+            }
+            group.sortItems();
+            if (group.pinnedAtByKey.isEmpty()) {
+                group.pinned = false;
+                group.pinnedAt = 0;
+                groups.remove(group);
+                int at = 0;
+                while (at < groups.size() && groups.get(at).pinned) {
+                    at++;
+                }
+                while (at < groups.size()
+                        && groups.get(at).latestTime() > group.latestTime()) {
+                    at++;
+                }
+                groups.add(at, group);
+            } else {
+                // Still pinned (other notifications pinned): the
+                // group's pin time is the earliest remaining pin.
+                group.pinnedAt = earliestPinTime(group);
+            }
+        } else {
+            // Pin this one (its own pin time — pinned notifications
+            // of one app sort by pin order, user 2026-11-19 06:08).
+            boolean firstPin = group.pinnedAtByKey.isEmpty();
+            group.pinnedAtByKey.put(d.key, System.currentTimeMillis());
+            // v238: re-pinning clears the stay-put record.
+            stayPutPinTime.remove(d.key);
+            // v236: pinning an OPEN card makes it a pinned card
+            // — it stays expanded even after another card opens.
+            // Pinning a plain capsule does not add it here.
+            if (isCardKey(d.key)) {
+                pinnedCardKeys.add(d.key);
+                // v237: this card's group's capsules were hidden
+                // while it was open; now that it is pinned they
+                // become visible — pop them in (flag consumed by
+                // rebuildDock below).
+                popInAfterRebuild = true;
+                popInGroup = group;
+            }
+            group.sortItems();
+            if (firstPin) {
+                group.pinned = true;
+                group.pinnedAt = System.currentTimeMillis();
+                groups.remove(group);
+                int at = 0;
+                while (at < groups.size() && groups.get(at).pinned) {
+                    at++;
+                }
+                groups.add(at, group);
+            }
+        }
+        // Live lyrics (v76): the module process only listens to the
+        // MediaSession while a music capsule is pinned (user
+        // 2026-11-19 "固定了就实时监听歌词"); unpinned music just
+        // pops once per song change (v75). Tell it the new state.
+        // v174: lyric listening follows pin OR open card (see
+        // syncLyricListen) - a card opened unpinned must listen too.
+        if (d.isMusic) {
+            syncLyricListen(d.key);
+        }
+    }
+
+    /** Earliest pin time among a group's pinned notifications. */
+    private long earliestPinTime(NotifGroup group) {
+        long t = 0;
+        for (Long v : group.pinnedAtByKey.values()) {
+            if (v != null && (t == 0 || v < t)) {
+                t = v;
+            }
+        }
+        return t;
+    }
+
+    public void dissipateOne(final NotifData data) {
+        if (data == null || dock == null) {
+            return;
+        }
+        NotifGroup targetGroup = null;
+        final Map<String, Integer> oldTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getData() == data
+                        || (c.getData() != null && data.key != null
+                                && data.key.equals(c.getData().key))) {
+                    targetGroup = (NotifGroup) c.getTag();
+                    burstParticles(v);
+                    v.setVisibility(View.INVISIBLE);
+                } else if (c.getData() != null && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+            }
+        }
+        if (targetGroup == null || !dockingGroups.add(targetGroup)) {
+            return;
+        }
+        final NotifGroup group = targetGroup;
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // Remove just this notification, by key.
+                for (int i = group.items.size() - 1; i >= 0; i--) {
+                    NotifData it = group.items.get(i);
+                    if (it == data || (it != null && data.key != null
+                            && data.key.equals(it.key))) {
+                        group.items.remove(i);
+                        break;
+                    }
+                }
+                // If the dismissed notification was pinned, drop its
+                // pin (per-notification pin); if that was the last
+                // pin, the group is no longer pinned.
+                if (data != null && data.key != null
+                        && group.pinnedAtByKey.remove(data.key) != null) {
+                    group.sortItems();
+                    if (group.pinnedAtByKey.isEmpty()) {
+                        group.pinned = false;
+                        group.pinnedAt = 0;
+                    } else {
+                        group.pinnedAt = earliestPinTime(group);
+                    }
+                }
+                if (group.items.isEmpty()) {
+                    groups.remove(group);
+                }
+                dockingGroups.remove(group);
+                holdWindowHeight = true;
+                rebuildDock();
+                slideSurvivorsUp(oldTops);
+            }
+        }, 310);
+    }
+
+    public void dissipateToParticles(final NotifGroup target) {
+        if (target == null || dock == null) {
+            return;
+        }
+        // Old tops of the surviving capsules, so they can slide up
+        // one by one to fill the position.
+        final Map<String, Integer> oldTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == target) {
+                    // Burst into real particles and vanish directly —
+                    // no icon left, and no lingering fade. The capsule
+                    // AND its tail disappear the instant the burst
+                    // starts (user 2026-11-19 "消散的时候直接消失"),
+                    // the particles carry the dissipate visual.
+                    burstParticles(v);
+                    v.setVisibility(View.INVISIBLE);
+                } else if (c.getData() != null && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+            }
+        }
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                groups.remove(target);
+                holdWindowHeight = true;
+                rebuildDock();
+                // The notifications behind move up one by one.
+                slideSurvivorsUp(oldTops);
+            }
+        }, 310);
+    }
+
+    /**
+     * The ANCHOR (user 2026-11-18 "现在以最上面这个通知为锚点"):
+     * the topmost notification — the first group, newest first.
+     * Expand/shrink animations use it as the reference point.
+     */
+    public NotifGroup anchorGroup() {
+        return groups.isEmpty() ? null : groups.get(0);
+    }
+
+    /**
+     * The anchor level of a group (user 2026-11-18 "三级锚点也是
+     * 类似于二级锚点"): 0 = the primary anchor (the topmost group),
+     * 1 = the secondary anchor (the first pinned group below it),
+     * 2 = the tertiary anchor (the next pinned group below that),
+     * and so on. -1 means the group is not an anchor.
+     */
+    public int anchorLevel(NotifGroup g) {
+        if (groups.isEmpty() || g == null) {
+            return -1;
+        }
+        if (g == groups.get(0)) {
+            return 0;
+        }
+        int level = 0;
+        for (int i = 1; i < groups.size(); i++) {
+            if (groups.get(i).pinned) {
+                level++;
+                if (groups.get(i) == g) {
+                    return level;
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** The DEEPEST anchor that still exists: the last pinned group
+     * below the primary anchor (tertiary, secondary, ...). Null when
+     * no pinned group sits below the primary anchor. */
+    public NotifGroup deepestAnchorGroup() {
+        NotifGroup deep = null;
+        for (int i = 1; i < groups.size(); i++) {
+            if (groups.get(i).pinned) {
+                deep = groups.get(i);
+            }
+        }
+        return deep;
+    }
+
+    /** The group the fan stacks below: the deepest anchor if there
+     * is one, otherwise the primary anchor. */
+    public NotifGroup fanAnchorGroup() {
+        NotifGroup deep = deepestAnchorGroup();
+        return deep != null ? deep : anchorGroup();
+    }
+
+    /** Screen centre of the anchor capsule's top, for animations. */
+    public int[] anchorLocationOnScreen() {
+        NotifGroup anchor = anchorGroup();
+        if (anchor == null) {
+            return null;
+        }
+        CapsuleView cap = topCapsule(anchor);
+        if (cap == null) {
+            return null;
+        }
+        int[] loc = new int[2];
+        cap.getLocationOnScreen(loc);
+        loc[0] += cap.getWidth() / 2;
+        loc[1] += cap.getHeight() / 2;
+        return loc;
+    }
+
+    public DockedPile getPile() {
+        return pile;
+    }
+
+    public List<NotifGroup> getGroups() {
+        return new ArrayList<>(groups);
+    }
+
+    private void updateWindowSize() {
+        if (!windowAdded || wm == null || root == null) {
+            return;
+        }
+        try {
+            root.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            int w = Math.max(root.getMeasuredWidth(), 1) + dp(PIN_OVERHANG_DP);
+            int h = Math.max(root.getMeasuredHeight(), 1);
+            // v161: while survivors are sliding up, keep the window
+            // at its old (taller) height so the animation is not
+            // clipped; slideSurvivorsUp shrinks it afterwards.
+            if (holdWindowHeight && params.height > h) {
+                h = params.height;
+            }
+            if (params.width != w || params.height != h) {
+                params.width = w;
+                params.height = h;
+                wm.updateViewLayout(root, params);
+            }
+        } catch (Throwable ignored) {
+        }
+        updatePileWindow();
+    }
+
+    /** Size the pile window to the actual fan content and put it at
+     * pileTargetY. The width follows the real fan (totalWidthDp), not
+     * a fixed 136dp, so the window never covers app UI past the last
+     * icon. No icons: shrink to a dot so it blocks nothing. */
+    private void updatePileWindow() {
+        if (!pileWindowAdded || wm == null || pileRoot == null
+                || pileParams == null) {
+            return;
+        }
+        try {
+            int count = pile != null ? pile.getIconCount() : 0;
+            if (count <= 0) {
+                if (pileParams.width != 1 || pileParams.height != 1) {
+                    pileParams.width = 1;
+                    pileParams.height = 1;
+                    wm.updateViewLayout(pileRoot, pileParams);
+                }
+                return;
+            }
+            pileRoot.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            // Undo any stretch: the pile sits at the top of the window
+            // again (user 2026-11-19 "扇子图标残缺").
+            setPileTopMargin(0);
+            // Right margin so the rightmost icon's 34dp iconView never
+            // ends exactly at the window edge and gets clipped on tap
+            // (user 2026-11-19 "贴边图标点它的时候右边会被截掉一块").
+            // v111: +16dp (was +6dp, v92) — the rightmost icon's
+            // 34dp iconView still got clipped on tap.
+            int w = Math.max(dp(pile.totalWidthDp()) + dp(16), 1);
+            // Floor at the icon height (v25): a bad measurement must
+            // never shrink the window to 1px and hide every icon.
+            int h = Math.max(pileRoot.getMeasuredHeight(), dp(34));
+            int y = pileTargetY;
+            if (pileYAnimating) {
+                // The animator owns Y right now; only fix the size.
+                if (pileParams.width != w || pileParams.height != h) {
+                    pileParams.width = w;
+                    pileParams.height = h;
+                    wm.updateViewLayout(pileRoot, pileParams);
+                }
+                return;
+            }
+            if (pileParams.width != w || pileParams.height != h
+                    || pileParams.y != y) {
+                pileParams.width = w;
+                pileParams.height = h;
+                pileParams.y = y;
+                wm.updateViewLayout(pileRoot, pileParams);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Shrink-stack the pile icons into the fan (user 2026-11-19
+     * "这应该是你设置的窗口有问题对吧"): the stack animation starts
+     * the icons in a vertical column BELOW the fan, but the pile
+     * window is only one icon row tall, so the column is outside
+     * the window and gets clipped (and icons can get stuck
+     * translated). Grow the window tall enough for the column
+     * first, run the animation, then shrink it back. */
+    /** Slide the pile window from one Y to another (new notification
+     * pushing the fan down). Drives pileParams.y directly. */
+    private void animatePileWindowY(int fromY, int toY) {
+        if (!pileWindowAdded || wm == null || pileRoot == null
+                || pileParams == null || fromY == toY) {
+            pileYAnimating = false;
+            return;
+        }
+        pileYAnimating = true;
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofInt(fromY, toY);
+        anim.setDuration(300);
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        try {
+                            pileParams.y = (Integer) a.getAnimatedValue();
+                            wm.updateViewLayout(pileRoot, pileParams);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                });
+        anim.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator a) {
+                pileYAnimating = false;
+                updatePileWindow();
+            }
+        });
+        anim.start();
+    }
+
+    /**
+     * Widen the window to the full screen width while a capsule is being
+     * dragged, so the long pill is never clipped (user 2026-11-19 "你把
+     * 滑动距离取消限制"). The window is only wide during the drag — the
+     * user is dragging then, so nothing else needs tapping — and it is
+     * shrunk back by endDragWindow() the moment the drag ends. A
+     * permanently full-screen window blocks ALL touches (v4 regression,
+     * user "魔块导致屏幕无法被点击了"): FLAG_NOT_TOUCH_MODAL only passes
+     * through touches outside the window, and a full-screen window has
+     * no outside.
+     */
+    /**
+     * Widen ONLY the capsule window for an AUTO right-swipe
+     * (playAutoSwipeRight), just enough for the longest tail — NOT
+     * full-screen (user 2026-11-19 "为什么我要等全部气泡都消散了才
+     * 能点击屏幕" / "能不能做穿透"). A full-screen window swallows
+     * every touch (FLAG_NOT_TOUCH_MODAL only passes touches outside
+     * the window, and a full-screen window has no outside), so during
+     * the whole auto-dissipate sequence the user could tap nothing.
+     * The auto-swipe only grows the pill to the right (180 + 200dp),
+     * so the window only needs to be that wide; touches outside it
+     * (almost the whole screen) pass through to the app below. The
+     * pile window is left alone. Manual drag still uses
+     * beginDragWindow() (full-screen) — the finger is dragging then.
+     */
+    public void beginAutoSwipeWindow() {
+        if (!windowAdded || wm == null || root == null || params == null) {
+            return;
+        }
+        dragWindowGen++;
+        try {
+            int w = dp(CapsuleView.DEFAULT_WIDTH_DP + 200 + PIN_OVERHANG_DP);
+            if (params.width != w) {
+                params.width = w;
+                wm.updateViewLayout(root, params);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public void beginDragWindow() {
+        if (!windowAdded || wm == null || root == null || params == null) {
+            return;
+        }
+        dragWindowGen++;
+        try {
+            int sw = app.getResources().getDisplayMetrics().widthPixels;
+            int sh = app.getResources().getDisplayMetrics().heightPixels;
+            if (params.width != sw || params.height != sh) {
+                params.width = sw;
+                params.height = sh;
+                wm.updateViewLayout(root, params);
+            }
+            // Widen the pile window too, so a dragged pile icon is
+            // never clipped at its window edge.
+            if (pileWindowAdded && pileParams != null && pileRoot != null) {
+                if (pileParams.width != sw || pileParams.height != sh) {
+                    pileParams.width = sw;
+                    pileParams.height = sh;
+                    wm.updateViewLayout(pileRoot, pileParams);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Shrink the window back to content size after a drag ends. */
+    public void endDragWindow() {
+        updateWindowSize();
+    }
+
+    /** Generation of the drag window; a delayed shrink only runs if no
+     * new drag has started since it was posted. */
+    private int dragWindowGen;
+
+    /**
+     * Shrink the window back after the dissipate particles finish
+     * flying (~450ms). The window must stay wide while the tail
+     * particles burst, or they are clipped at the window edge.
+     */
+    public void endDragWindowDelayed() {
+        if (dock == null) {
+            return;
+        }
+        final int gen = dragWindowGen;
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (gen == dragWindowGen) {
+                    updateWindowSize();
+                }
+            }
+        }, 450);
+    }
+
+    private int dp(int v) {
+        return Math.round(v * app.getResources().getDisplayMetrics().density);
+    }
+
+    /**
+     * Dissipate the notifications below the anchor into their own
+     * edge icons (user 2026-11-18 "下面的通知消散成各自贴边图标
+     * 并且没有消散的通知会自动向上靠"): every non-pinned group below
+     * the anchor fades out and becomes one pile icon; the survivors
+     * (anchor + pinned) are re-laid out from the top and slide up
+     * to close the gap. The particle burst itself is a visual layer
+     * (previewed); here the capsule fades/shrinks toward the edge.
+     */
+    public void dissipateBelowAnchor() {
+        if (groups.size() <= 1 || dock == null) {
+            return;
+        }
+        // Expand all first, then stack up one by one from the last
+        // notification (user 2026-11-19 "改成全部展开然后由最后一个逐一
+        // 向上叠加").
+        int mergeDelay = expandAllGroupsAnimated() ? 350 : 0;
+        final List<NotifGroup> targets = new ArrayList<>();
+        for (int i = 1; i < groups.size(); i++) {
+            NotifGroup g = groups.get(i);
+            if (!g.pinned) {
+                targets.add(g);
+            }
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        // Old top (dock coordinates) of every surviving capsule, by key,
+        // and the capsule top of each dissipating group.
+        final Map<String, Integer> oldTops = new HashMap<>();
+        final Map<NotifGroup, Integer> targetTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getData() != null && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+                NotifGroup g = (NotifGroup) c.getTag();
+                if (g != null && targets.contains(g)) {
+                    targetTops.put(g, (int) v.getY());
+                }
+            }
+        }
+        // Phase 1 (user 2026-11-19 "由最后一个通知开始逐一缩小成
+        // 图标" / "缩小的速度和展开保持一致"): shrink one by one,
+        // starting from the last (bottom-most) target and going up,
+        // at the expand's pace (240ms each, 110ms apart). Each icon
+        // is gathered below its capsule just before its own shrink.
+        final List<PileIcon> icons = new ArrayList<>();
+        for (int ti = targets.size() - 1; ti >= 0; ti--) {
+            final NotifGroup g = targets.get(ti);
+            final int order = targets.size() - 1 - ti;
+            dock.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    Integer top = targetTops.get(g);
+                    PileIcon icon = gatherIconBelowCapsule(g,
+                            top != null ? top : 0);
+                    if (icon != null) {
+                        icons.add(icon);
+                    }
+                    for (int i = 0; i < dock.getChildCount(); i++) {
+                        View v = dock.getChildAt(i);
+                        if (v instanceof CapsuleView) {
+                            CapsuleView c = (CapsuleView) v;
+                            if (c.getTag() == g) {
+                                stackCapsuleUnder(v);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }, mergeDelay + order * 110);
+        }
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                groups.removeAll(targets);
+                rebuildDock();
+                // Phase 2 (user 2026-11-19 "图标贴边不叠加，只有
+                // 最后一个通知也缩小再叠加"): all but the last icon snap
+                // to the edge; only the last one stacks.
+                dockIconsToEdge(icons);
+                // Survivors slide up to their new (higher) positions.
+                dock.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        for (int i = 0; i < dock.getChildCount(); i++) {
+                            View v = dock.getChildAt(i);
+                            if (!(v instanceof CapsuleView)) {
+                                continue;
+                            }
+                            CapsuleView c = (CapsuleView) v;
+                            Integer oldTop = c.getData() != null
+                                    ? oldTops.get(c.getData().key) : null;
+                            if (oldTop == null) {
+                                continue;
+                            }
+                            int dy = oldTop - (int) v.getY();
+                            if (dy != 0) {
+                                v.setTranslationY(dy);
+                                v.animate().translationY(0f)
+                                        .setDuration(300).withLayer().start();
+                            }
+                        }
+                    }
+                });
+            }
+        }, mergeDelay + (targets.size() - 1) * 110 + 300);
+    }
+
+
+    /**
+     * Dissipate the DEEPEST anchor (user 2026-11-18 "直到这个二级
+     * 锚点也消散会汇聚成图标，这堆叠加图标继续向一级锚点下面聚拢",
+     * and "三级锚点也是类似于二级锚点"): the deepest pinned anchor
+     * also dissipates and converges into an icon, joining the fan
+     * as the newest (flush at the edge); the whole fan then gathers
+     * up to sit below the next anchor up the chain.
+     */
+    public void dissipateDeepestAnchor() {
+        NotifGroup deep = deepestAnchorGroup();
+        if (deep == null || dock == null) {
+            return;
+        }
+        final NotifGroup target = deep;
+        // Phase 1 (user 2026-11-19 "先缩成图标"): gather the icon
+        // below the capsule FIRST, so the capsule visibly becomes it.
+        int rowTop = 0;
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == target) {
+                    rowTop = (int) v.getY();
+                    break;
+                }
+            }
+        }
+        final PileIcon icon = gatherIconBelowCapsule(target, rowTop);
+        // Stack the capsule under the previous one (user 2026-11-19).
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c.getTag() == target) {
+                    stackCapsuleUnder(v);
+                }
+            }
+        }
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                groups.remove(target);
+                rebuildDock();
+                // Phase 2 (user 2026-11-19 "然后再叠加图标"): the icon
+                // slides down to stack onto the fan.
+                stackIconToFan(icon);
+            }
+        }, 300);
+    }
+
+
+    /**
+     * Dissipate everything ONE BY ONE (user 2026-11-18 "你整个一条
+     * 一条消散的"): the non-pinned notifications below the anchor
+     * go first, bottom-up, each bursting into particles and joining
+     * the fan; then the anchors dissipate one at a time from the
+     * deepest up (tertiary, secondary, primary), each joining the
+     * fan as the newest while the whole fan gathers up below the
+     * next anchor. Each step is ~650ms apart.
+     */
+    public void dissipateAllOneByOne() {
+        if (dock == null || groups.isEmpty() || isDissipatingAll) {
+            return;
+        }
+        // A card is open: close it first; a second tap outside
+        // dissipates. The card must not be swept away with the rest.
+        // v180: a pinned card is never auto-closed here either.
+        // v192: but a pinned card no longer BLOCKS the dissipate —
+        // it is a big capsule, and the others below it dissipate
+        // normally (the queue skips pinned notifications and calls,
+        // so the pinned card stays out).
+        if (cardKey != null && !isCardPinned()) {
+            closeCard();
+            return;
+        }
+        isDissipatingAll = true;
+        // Expand ALL groups first (including pinned ones, so their
+        // non-pinned notifications are visible), then dissipate one by
+        // one from the bottom (user 2026-11-19 "改成全展开后由下往上依
+        // 次消散").
+        boolean anyExpanded = false;
+        for (NotifGroup g : groups) {
+            if (g != null && g.items.size() > 1 && !g.expanded) {
+                g.expanded = true;
+                anyExpanded = true;
+            }
+        }
+        int mergeDelay = 0;
+        if (anyExpanded) {
+            rebuildDock();
+            cascadeCapsulesIn(new ArrayList<>(groups));
+            mergeDelay = 350;
+        }
+        // The queue is ALL groups, bottom-up. The auto right-swipe is
+        // a dissipate (消散), not a dismiss (消通知): it SKIPS OVER the
+        // pinned notification of the same app (that one stays out) and
+        // dissipates the group's other notifications, which are
+        // preserved in the fan (user 2026-11-19 05:44 "自动右滑是消散，
+        // 但是不消通知，消散完了它会略过钉住的同应用通知").
+        final List<NotifGroup> queue = new ArrayList<>();
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            NotifGroup g = groups.get(i);
+            if (g != null) {
+                queue.add(g);
+            }
+        }
+        if (queue.isEmpty()) {
+            isDissipatingAll = false;
+            return;
+        }
+        // Phase 1 (user 2026-11-19 "全部都缩成图标了再开始叠加" /
+        // "由最后一个通知开始逐一缩小成图标" / "缩小的速度和展开保持一致"):
+        // shrink ALL capsules into icons first — one by one, starting
+        // from the last (bottom-most) notification and going up, at
+        // the expand's pace (240ms each, 110ms apart — the reverse of
+        // the top-to-bottom expand). No stacking starts until every
+        // shrink has finished.
+        // Stack EVERY capsule, one by one, bottom-to-top, regardless
+        // of app (user 2026-11-19 "不区分应用，全部叠加到一起").
+        final List<View> caps = new ArrayList<>();
+        final java.util.Set<String> dissipatedKeys = new java.util.HashSet<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                NotifGroup tag = (NotifGroup) c.getTag();
+                if (queue.contains(tag)) {
+                    // Spare every pinned notification (per-notification
+                    // pin); the group's other notifications still
+                    // dissipate. A call capsule is never auto-dissipated
+                    // (v110): even after unpinning it must stay out
+                    // until the call ends (user 2026-11-19 "解除钉住
+                    // 后自动右滑仍然是贴边").
+                    NotifData d = c.getData();
+                    if (d != null && d.isCall) {
+                        continue;
+                    }
+
+                    if (tag != null && d != null && d.key != null
+                            && tag.pinnedAtByKey.containsKey(d.key)) {
+                        continue;
+                    }
+                    caps.add(v);
+                    if (d != null && d.key != null) {
+                        dissipatedKeys.add(d.key);
+                    }
+                }
+            }
+        }
+        if (caps.isEmpty()) {
+            isDissipatingAll = false;
+            return;
+        }
+        caps.sort(new java.util.Comparator<View>() {
+            @Override
+            public int compare(View a, View b) {
+                // Sort by layout top (topMargin), NOT getY(): getY() is
+                // 0 for every capsule until layout runs after
+                // rebuildDock, so sorting by it is meaningless. The
+                // topMargin is set synchronously by rebuildDock.
+                int ta = topOf(a);
+                int tb = topOf(b);
+                return Integer.compare(tb, ta);
+            }
+        });
+        // Dissipate one by one, bottom to top (user 2026-11-19
+        // "改成全展开后由下往上依次消散" / "去除叠加了"): NO stacking
+        // any more. After the expand, each capsule bursts into
+        // particles IN PLACE, starting from the bottom-most one and
+        // going up. caps is already sorted bottom-to-top, so caps[0]
+        // is the bottom-most. Stagger 200ms (v94, user "间隔时间让他
+        // 显得平滑一点"): the 240ms swipe is still running when the
+        // next capsule starts, so the bursts overlap into a smooth
+        // continuous cascade instead of choppy one-by-one gaps.
+        // Hide all pile icons first, so the fan is empty while the
+        // capsules dissipate.
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (pile != null) {
+                    for (int i = 0; i < pile.getChildCount(); i++) {
+                        View v = pile.getChildAt(i);
+                        if (v instanceof PileIcon) {
+                            v.setVisibility(View.INVISIBLE);
+                        }
+                    }
+                }
+            }
+        }, mergeDelay);
+        final int n = caps.size();
+        for (int ci = 0; ci < n; ci++) {
+            final View cap = caps.get(ci);
+            dock.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    // Auto right-swipe, then burst at the end of the
+                    // swipe (user 2026-11-19 "展开后逐条自动右滑消散").
+                    if (cap instanceof CapsuleView) {
+                        ((CapsuleView) cap).playAutoSwipeRight(
+                                new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        burstParticles(cap);
+                                    }
+                                });
+                    } else {
+                        burstParticles(cap);
+                    }
+                }
+            }, mergeDelay + ci * 200);
+        }
+        // After the last dissipate finishes, the icons pop in.
+        int dissipateDone = mergeDelay + n * 200 + 380;
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                // Non-pinned groups go away entirely (into the fan).
+                // A pinned group keeps its pinned notification; its
+                // dissipated notifications go into a NEW docked group
+                // for the same app, so the icon string still pops out
+                // for them (addPileIconForGroup merges into an existing
+                // docked group for that pkg). Clicking the icon
+                // expands them back, arranged together with the pinned
+                // ones (expandDockedGroup merges by pkg, pinned-first).
+                // Collect the pinned groups' docked groups first — do
+                // NOT add their icons yet. The pile window must be
+                // repositioned by rebuildDock() first (pileTargetY is
+                // recomputed from the final state: only the pinned
+                // notification left out, so the pile sits right below
+                // it), and only then are the icons added, so they pop
+                // in below the pinned notification, not elsewhere
+                // (user 2026-11-19 05:49 "图标弹出的位置是钉住的通知下
+                // 面" / "不要弹到其他地方去").
+                final java.util.List<NotifGroup> pinnedDocked =
+                        new java.util.ArrayList<>();
+                for (NotifGroup g : queue) {
+                    if (g.pinned) {
+                        NotifGroup docked = new NotifGroup(g.pkg);
+                        java.util.Iterator<NotifData> it =
+                                g.items.iterator();
+                        while (it.hasNext()) {
+                            NotifData d = it.next();
+                            if (d != null && d.key != null
+                                    && dissipatedKeys.contains(d.key)) {
+                                it.remove();
+                                docked.add(d);
+                            }
+                        }
+                        if (!docked.items.isEmpty()) {
+                            pinnedDocked.add(docked);
+                        }
+                    } else {
+                        groups.remove(g);
+                    }
+                }
+                rebuildDock();
+                // The icons pop directly from off-screen to their
+                // designated spots (user 2026-11-19 "汇聚完成后图标直接
+                // 由屏幕外弹出到指定地方" — and "改回去": this pop-in was
+                // asked for and should NOT have been reverted in v50).
+                // Pinned groups' docked icons first (they pop in
+                // below the pinned notification), then the rest.
+                for (NotifGroup docked : pinnedDocked) {
+                    addPileIconForGroup(docked);
+                }
+                for (NotifGroup g : queue) {
+                    if (!g.pinned) {
+                        addPileIconForGroup(g);
+                    }
+                }
+                updatePileWindow();
+                isDissipatingAll = false;
+                if (pile != null) {
+                    for (int i = 0; i < pile.getChildCount(); i++) {
+                        View v = pile.getChildAt(i);
+                        if (v instanceof PileIcon) {
+                            v.setVisibility(View.VISIBLE);
+                            v.setTranslationX(-dp(200));
+                            v.setAlpha(0f);
+                            v.animate().translationX(0f).alpha(1f)
+                                    .setDuration(240).withLayer().start();
+                        }
+                    }
+                }
+            }
+        }, dissipateDone);
+    }
+
+
+
+}

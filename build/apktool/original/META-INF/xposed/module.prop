@@ -1,0 +1,9 @@
+id=com.chenan.flymebobo
+name=flymebobo
+version=2.0
+author=Chenan
+description=flymebobo 2.0: 气泡通知, 贴边锚点, 粒子展开/收缩; 音乐播放器; 来电接管; 本地识别验证码/取件码。
+minApiVersion=102
+targetApiVersion=102
+staticScope=true
+exceptionMode=protective
