@@ -292,6 +292,7 @@ public class CapsuleView extends FrameLayout {
     private Runnable onTap;
     private Runnable onSwipeRight;
     private Runnable onSwipeLeft;
+    private Runnable onDockSwipe;
     /** v153: the open card is an enlarged capsule (user "相当于一个
      * 放大版胶囊") — a manual right-swipe on it drags out the same
      * smooth transparent tail as a capsule, live. BubbleWindow owns
@@ -996,7 +997,10 @@ public class CapsuleView extends FrameLayout {
                             // 改回钉住和解除钉住"). The v108/v109
                             // left-swipe speaker answer is gone;
                             // speaker is via the timer tap mid-call.
-                            if (dx < -dp(60)
+                            // v279: split by distance — a LIGHT left
+                            // swipe (60–140dp) pins; a HEAVY left
+                            // swipe (past 140dp) docks into the fan.
+                            if (dx < -dp(60) && dx > -dp(140)
                                     && onSwipeRight != null) {
                                 endDragWindowIfOpen();
                                 onSwipeRight.run();
@@ -1010,6 +1014,11 @@ public class CapsuleView extends FrameLayout {
                                     animate().translationX(0f)
                                             .setDuration(200).start();
                                 }
+                                return true;
+                            } else if (dx <= -dp(140)
+                                    && onDockSwipe != null) {
+                                endDragWindowIfOpen();
+                                onDockSwipe.run();
                                 return true;
                             } else if (dx > dp(120)
                                     && onSwipeLeft != null) {
@@ -2359,6 +2368,10 @@ public class CapsuleView extends FrameLayout {
 
     public void setOnSwipeLeft(Runnable onSwipeLeft) {
         this.onSwipeLeft = onSwipeLeft;
+    }
+
+    public void setOnDockSwipe(Runnable onDockSwipe) {
+        this.onDockSwipe = onDockSwipe;
     }
 
     public void setOnCardDragListener(OnCardDragListener l) {

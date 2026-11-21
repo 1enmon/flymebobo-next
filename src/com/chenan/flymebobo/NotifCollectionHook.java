@@ -1357,6 +1357,12 @@ public final class NotifCollectionHook {
         if (dash < 0) {
             dash = s.indexOf('-');
         }
+        if (dash < 0) {
+            // Migu sends "Artist · Album" (U+00B7 middle dot) —
+            // the second part is the ALBUM name, not the song.
+            // Split on it so the artist comes out clean.
+            dash = s.indexOf('\u00b7');
+        }
         if (dash <= 0 || dash >= s.length() - 1) {
             return null;
         }

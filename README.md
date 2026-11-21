@@ -24,6 +24,10 @@ Flyme WindowManagerExt and some hooks target SystemUI internals.
   notification actions.
 - A settings app (MainActivity) with real-time feature switches — no
   SystemUI restart needed after flipping one.
+- Footer links in the settings app: source repo, Coolapk profile, and a
+  "buy me a coffee" WeChat Pay QR.
+
+Current version: v310 (versionCode 310).
 
 ## Build
 

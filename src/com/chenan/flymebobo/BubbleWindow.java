@@ -100,6 +100,11 @@ public class BubbleWindow {
     private static final long REPOP_GUARD_MS = 5_000L;
     private final Map<String, Long> lastPopByPkg = new HashMap<>();
     private long lastPopAt;
+    /** v302: Migu songs the user dismissed (right-swipe). Key →
+     * title at dismiss time. A lyric update for the same song must
+     * NOT re-pop the capsule the user just dismissed. A new song
+     * (different title) clears the entry and pops normally. */
+    private final Map<String, String> dismissedMiguMusic = new HashMap<>();
 
     /** Groups currently out, newest first (by latest notification time). */
     private final List<NotifGroup> groups = new ArrayList<>();
@@ -339,7 +344,7 @@ public class BubbleWindow {
                     // for the OTHER notifications below it.
                     if (!isCardPinned()) {
                         closeCard();
-                    } else {
+                    } else if (FeatureFlags.blankDissipate) {
                         dissipateAllOneByOne();
                     }
                     return false;
@@ -369,7 +374,7 @@ public class BubbleWindow {
                 if (cardKey != null) {
                     if (!isCardPinned()) {
                         closeCard();
-                    } else {
+                    } else if (FeatureFlags.blankDissipate) {
                         dissipateAllOneByOne();
                     }
                     return false;
@@ -380,7 +385,11 @@ public class BubbleWindow {
                 if (cardAnimating) {
                     return false;
                 }
-                dissipateAllOneByOne();
+                // v272: "点击空白自动消散" switch off -> the tap
+                // does nothing; capsules stay until swiped by hand.
+                if (FeatureFlags.blankDissipate) {
+                    dissipateAllOneByOne();
+                }
                 return false;
             }
         });
@@ -506,7 +515,17 @@ public class BubbleWindow {
         // activities are exempt too (v222: the timer re-posts the
         // same key every second; double delivery is still stopped
         // by the v194 hook-popped guard in XposedEntry).
-        if (!data.isMusic && !data.isDownload && !data.isLive && data.key != null) {
+        // v307: WeChat/QQ exempt from the 2s seen guard too (user
+        // 2026-11-21). Same person sends two messages: both show in
+        // the shade, but the second was counted as a duplicate and
+        // dropped — only the first capsule ever popped. WeChat reuses
+        // the same notification key per conversation, so the same-key
+        // guard swallows the second message. The v146 key+content
+        // backstop still catches true duplicates.
+        if (!data.isMusic && !data.isDownload && !data.isLive
+                && data.key != null
+                && !"com.tencent.mm".equals(data.pkg)
+                && !"com.tencent.mobileqq".equals(data.pkg)) {
             long now = System.currentTimeMillis();
             synchronized (seenNotifKeys) {
                 Long at = seenNotifKeys.get(data.key);
@@ -801,8 +820,15 @@ public class BubbleWindow {
         // within 15s — drop it here even if the source dedup let it
         // through. Music and downloads are exempt (their re-posts
         // are legitimate updates).
+        // v307: WeChat/QQ exempt too (user 2026-11-21). Same person
+        // sends two messages: both show in the shade, but the second
+        // was counted as a duplicate and dropped — only the first
+        // capsule ever popped. The v146 key+content backstop still
+        // catches true duplicates (same key + same content).
         if (data != null && !data.isMusic && !data.isDownload
-                && data.pkg != null) {
+                && data.pkg != null
+                && !"com.tencent.mm".equals(data.pkg)
+                && !"com.tencent.mobileqq".equals(data.pkg)) {
             String fp = data.pkg + "\u0001"
                     + (data.title == null ? "" : data.title) + "\u0001"
                     + (data.text == null ? "" : data.text);
@@ -868,6 +894,82 @@ public class BubbleWindow {
                 }
             }
         }
+        // v301: Migu-only (user: "针对修复" / "不写通用").
+        // Migu re-posts the same key every time the lyric refreshes
+        // and pops a duplicate each time; other apps don't do this
+        // (NetEase's ticker is filtered, its re-posts are spaced
+        // out). So only Migu gets this gate: if a Migu music
+        // capsule is already on screen, refresh its lyric in place
+        // and return — never pop again. Other music apps keep the
+        // existing logic untouched.
+        // v302: if the user already dismissed this Migu song
+        // (right-swipe), a lyric update for the SAME song must NOT
+        // re-pop it. Only a new song (different title) pops again.
+        if (data.isMusic
+                && "cmccwm.mobilemusic".equals(data.pkg)) {
+            if (data.key != null && data.title != null) {
+                String dismissedTitle = dismissedMiguMusic.get(data.key);
+                if (data.title.equals(dismissedTitle)) {
+                    return;
+                }
+                if (dismissedTitle != null) {
+                    dismissedMiguMusic.remove(data.key);
+                }
+            }
+            CapsuleView miguCap = findMusicCapsuleByPkg(data.pkg);
+            if (miguCap != null) {
+                if (data.lyrics != null) {
+                    miguCap.updateLyrics(data.lyrics);
+                }
+                if (data.title != null) {
+                    miguCap.updateTitle(data.title);
+                }
+                if (data.text != null) {
+                    miguCap.updateText(data.text);
+                }
+                miguCap.updateMusicCard();
+                return;
+            }
+        }
+        // v296: music re-post? If a capsule view with this exact
+        // key is already on screen, refresh it in place and return
+        // — never touch the groups, never pop. The log proves Migu
+        // re-posts the same key 6 times in 11s (HookPosted/HookMusic
+        // only, no broadcast); the group remove/re-add is what let
+        // the 2nd/4th/6th delivery slip through as a "new" pop.
+        // The view is the ground truth — if it's there, it's an
+        // update, full stop.
+        if (data.isMusic && data.key != null) {
+            CapsuleView existingCap = findCapsuleByKey(data.key);
+            if (existingCap == null) {
+                // Fallback: the key may differ between hook and
+                // broadcast deliveries of the same re-post. If ANY
+                // music capsule for this app is on screen, it's the
+                // same song — refresh it in place, don't pop.
+                existingCap = findMusicCapsuleByPkg(data.pkg);
+            }
+            if (existingCap != null) {
+                NotifData oldData = existingCap.getData();
+                if (oldData != null) {
+                    oldData.title = data.title;
+                    oldData.text = data.text;
+                    oldData.lyrics = data.lyrics;
+                    oldData.largeIcon = data.largeIcon;
+                    oldData.contentIntent = data.contentIntent;
+                }
+                if (data.title != null) {
+                    existingCap.updateTitle(data.title);
+                }
+                if (data.text != null) {
+                    existingCap.updateText(data.text);
+                }
+                if (data.lyrics != null) {
+                    existingCap.updateLyrics(data.lyrics);
+                }
+                existingCap.updateMusicCard();
+                return;
+            }
+        }
         // Dedup by key: the same notification never pops twice.
         // EXCEPT music: a music notification keeps the SAME key across
         // song changes (one notification, updated — the player is a
@@ -883,6 +985,16 @@ public class BubbleWindow {
         // passed — the same notification popping twice.
         boolean isMusicUpdate = false;
         boolean isLiveUpdate = false;
+        // v308: WeChat/QQ exempt from the same-key drop (user
+        // 2026-11-21). Same person sends two messages: WeChat reuses
+        // the same notification key per conversation, so the second
+        // message hit "same key in a group → return" and was dropped
+        // — only the first capsule ever popped. For WeChat/QQ the
+        // same key with new content is a NEW message, not a
+        // duplicate; let it through (v306 noStack gives it its own
+        // group/capsule).
+        boolean isChatApp = "com.tencent.mm".equals(data.pkg)
+                || "com.tencent.mobileqq".equals(data.pkg);
         for (NotifGroup g : groups) {
             if (g.hasKey(data.key)) {
                 if (data.isMusic) {
@@ -894,7 +1006,7 @@ public class BubbleWindow {
                     // status) — that is an UPDATE, not a duplicate.
                     g.removeByKey(data.key);
                     isLiveUpdate = true;
-                } else {
+                } else if (!isChatApp) {
                     return;
                 }
                 break;
@@ -905,7 +1017,9 @@ public class BubbleWindow {
         // content) otherwise pops again as a brand-new capsule, and
         // every app re-posts — that is the "all apps pop twice"
         // regression.
-        if (!data.isMusic && !data.isLive) {
+        // v308: WeChat/QQ exempt — same key is a new message, not a
+        // re-post of the docked one.
+        if (!data.isMusic && !data.isLive && !isChatApp) {
             for (NotifGroup g : dockedGroups.values()) {
                 if (g.hasKey(data.key)) {
                     return;
@@ -975,11 +1089,18 @@ public class BubbleWindow {
             }
         }
         // Same app stacks into one group (newest first inside it).
+        // v306: WeChat + QQ are the exception (user 2026-11-21):
+        // every message is its own capsule row, never stacked.
+        // Same person, different messages = separate popups.
+        boolean noStack = "com.tencent.mm".equals(data.pkg)
+                || "com.tencent.mobileqq".equals(data.pkg);
         NotifGroup group = null;
-        for (NotifGroup g : groups) {
-            if (g.pkg != null && g.pkg.equals(data.pkg)) {
-                group = g;
-                break;
+        if (!noStack) {
+            for (NotifGroup g : groups) {
+                if (g.pkg != null && g.pkg.equals(data.pkg)) {
+                    group = g;
+                    break;
+                }
             }
         }
         // v160: discard any DOCKED group for this app (notifications
@@ -1921,6 +2042,13 @@ public class BubbleWindow {
                     rebuildDock();
                 }
             });
+            // v279: heavy left swipe docks the group into the fan.
+            cap.setOnDockSwipe(new Runnable() {
+                @Override
+                public void run() {
+                    dockGroup(group);
+                }
+            });
             cap.setOnSwipeLeft(new Runnable() {
                 @Override
                 public void run() {
@@ -2032,6 +2160,13 @@ public class BubbleWindow {
                             // v180: pinning a card rebuilds the dock
                             // so it jumps to first position immediately.
                             rebuildDock();
+                        }
+                    });
+                    // v279: heavy left swipe docks the group into the fan.
+                    cap.setOnDockSwipe(new Runnable() {
+                        @Override
+                        public void run() {
+                            dockGroup(group);
                         }
                     });
                     cap.setOnSwipeLeft(new Runnable() {
@@ -2152,6 +2287,13 @@ public class BubbleWindow {
                             // v180: pinning a card rebuilds the dock
                             // so it jumps to first position immediately.
                             rebuildDock();
+                        }
+                    });
+                    // v279: heavy left swipe docks the group into the fan.
+                    cap.setOnDockSwipe(new Runnable() {
+                        @Override
+                        public void run() {
+                            dockGroup(group);
                         }
                     });
                     final NotifData item = d;
@@ -2283,6 +2425,27 @@ public class BubbleWindow {
         return null;
     }
 
+    /** Find the on-screen music capsule for this app, if any.
+     * Used as a fallback when the key doesn't match (hook vs
+     * broadcast may deliver the same re-post with a different
+     * key object). One app has at most one music capsule. */
+    private CapsuleView findMusicCapsuleByPkg(String pkg) {
+        if (dock == null || pkg == null) {
+            return null;
+        }
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            android.view.View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView cap = (CapsuleView) v;
+                NotifData d = cap.getData();
+                if (d != null && d.isMusic && pkg.equals(d.pkg)) {
+                    return cap;
+                }
+            }
+        }
+        return null;
+    }
+
     /** v150: open the card for this capsule. The particle-gather
      * expand (v149, user "不要这个了") and the slide-then-grow
      * (v148) are gone. New flow (user 2026-11-19 "点了胶囊后胶囊
@@ -2302,7 +2465,7 @@ public class BubbleWindow {
      * right-slides and bursts into particles as the App opens,
      * instead of vanishing instantly. */
     private void openCardApp(NotifData d) {
-        if (d == null || d.contentIntent == null) {
+        if (d == null) {
             return;
         }
         boolean hadCard = cardKey != null;
@@ -2322,17 +2485,39 @@ public class BubbleWindow {
                 dissipateOne(data);
             }
         }
-        boolean ok = openPendingIntent(d.contentIntent, d.pkg,
-                FeatureFlags.miniwindow);
+        // v277: some music notifications (notably QQ Music Flyme)
+        // carry no contentIntent at all, so the tap did nothing.
+        // Fall back to launching the app by package name.
+        boolean ok;
+        if (d.contentIntent != null) {
+            ok = openPendingIntent(d.contentIntent, d.pkg,
+                    FeatureFlags.miniwindow);
+        } else {
+            ok = false;
+            try {
+                android.content.Intent li = app.getPackageManager()
+                        .getLaunchIntentForPackage(d.pkg);
+                if (li != null) {
+                    ok = openIntent(li, FeatureFlags.miniwindow);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
         if (!ok) {
             return;
         }
-        try {
-            android.content.Intent di = new android.content.Intent(
-                    NotificationService.ACTION_DISMISS);
-            di.putExtra("key", d.key);
-            app.sendBroadcast(di);
-        } catch (Throwable ignored) {
+        // v276: music notifications are NOT dismissed when the App
+        // opens — cancelling the music notification kills the
+        // foreground service and the music (and the App) gets
+        // closed. Only regular notifications are dismissed.
+        if (!d.isMusic) {
+            try {
+                android.content.Intent di = new android.content.Intent(
+                        NotificationService.ACTION_DISMISS);
+                di.putExtra("key", d.key);
+                app.sendBroadcast(di);
+            } catch (Throwable ignored) {
+            }
         }
         if (hadCard) {
             // Card was open: close it (its own slide-right animation)
@@ -2348,12 +2533,38 @@ public class BubbleWindow {
         if (cap == null || d == null || d.isCall || cardAnimating) {
             return;
         }
-        // v261: card-expansion switch off = tapping a capsule does
-        // not expand the card.
-        // v266: instead it opens the App directly (small window /
-        // fullscreen per the miniwindow switch), so the capsule
-        // stays useful with the card turned off.
-        if (!FeatureFlags.card) {
+        // v278: log the tap decision (isMusic / card / musicCard)
+        // so a "music card won't open" report can be diagnosed
+        // from the log instead of guessed at.
+        try {
+            FileLog.i("TapCard key=" + d.key + " pkg=" + d.pkg
+                    + " isMusic=" + d.isMusic
+                    + " card=" + FeatureFlags.card
+                    + " musicCard=" + FeatureFlags.musicCard);
+        } catch (Throwable ignored) {
+        }
+        // v261/v266: card-expansion switch off = tapping a capsule
+        // does not expand the card; instead it opens the App
+        // directly (small window / fullscreen per the miniwindow
+        // switch), so the capsule stays useful with the card off.
+        // v274: the card switch does NOT control music — music
+        // capsules are governed ONLY by the musicCard switch.
+        if (d.isMusic) {
+            // v278: safety net — if the in-memory musicCard flag
+            // is off, re-read the APP's prefs once in case the
+            // toggle broadcast was missed (stale flag). If the
+            // prefs also say off, then open the App directly.
+            if (!FeatureFlags.musicCard) {
+                try {
+                    FeatureFlags.load(app);
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!FeatureFlags.musicCard) {
+                openCardApp(d);
+                return;
+            }
+        } else if (!FeatureFlags.card) {
             openCardApp(d);
             return;
         }
@@ -3414,6 +3625,25 @@ public class BubbleWindow {
                     if (g == null) {
                         continue;
                     }
+                    // v306: WeChat/QQ docked messages come back as
+                    // separate capsules too — split the stored group
+                    // into one group per message.
+                    boolean gNoStack =
+                            "com.tencent.mm".equals(g.pkg)
+                            || "com.tencent.mobileqq".equals(g.pkg);
+                    if (gNoStack && g.items.size() > 1) {
+                        for (NotifData d : new java.util.ArrayList<>(
+                                g.items)) {
+                            if (d == null) {
+                                continue;
+                            }
+                            NotifGroup one = new NotifGroup(g.pkg);
+                            one.add(d);
+                            one.expanded = true;
+                            groups.add(one);
+                        }
+                        continue;
+                    }
                     NotifGroup existing = null;
                     for (NotifGroup eg : groups) {
                         if (eg.pkg != null && eg.pkg.equals(g.pkg)) {
@@ -3890,6 +4120,42 @@ public class BubbleWindow {
         if (icon == null) {
             return null;
         }
+        // v303: the user diagnosed it — "有个窗口在这里挡着了".
+        // The dock window ("flymebobo") sits ON TOP of the pile
+        // window ("flymebobo-pile") and covers the icon while it
+        // sinks down, so a piece goes missing. Both are
+        // TYPE_APPLICATION_OVERLAY; the later-added window is on
+        // top, but the dock window gets updateViewLayout calls that
+        // can push it back above the pile. Re-add the pile window
+        // so it's on top before the icon appears.
+        if (pileWindowAdded && pileRoot != null && wm != null
+                && pileParams != null) {
+            try {
+                wm.removeView(pileRoot);
+            } catch (Throwable ignored) {
+            }
+            try {
+                wm.addView(pileRoot, pileParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        // v303: grow the pile window WIDE enough before the icon
+        // appears. The user reports the Migu icon loses a piece
+        // (right side clipped) while it sinks down — the width was
+        // only grown later in stackIconToFan, so during the gather
+        // and the drop the window was still too narrow. Grow it
+        // here, before the icon is positioned.
+        if (pileWindowAdded && pileParams != null && wm != null
+                && pile != null) {
+            int needW = dp(pile.totalWidthDp()) + dp(48);
+            if (pileParams.width < needW) {
+                pileParams.width = needW;
+                try {
+                    wm.updateViewLayout(pileRoot, pileParams);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
         int fanTop = (pileParams != null) ? pileParams.y : 0;
         int belowTop = capsuleTop
                 + dp(CapsuleView.DEFAULT_HEIGHT_DP + CAPSULE_GAP_DP);
@@ -3908,6 +4174,50 @@ public class BubbleWindow {
         if (icon == null) {
             return;
         }
+        // v304: the user reports the icon is STILL clipped ("还是缺").
+        // The re-add in gatherIconBelowCapsule isn't enough — the
+        // 300ms delay runs rebuildDock, which calls updateViewLayout
+        // on the dock window and pushes it back on top of the pile
+        // window before the slide starts. Re-add the pile window
+        // here too, right before the slide, so it's on top during
+        // the whole drop.
+        if (pileWindowAdded && pileRoot != null && wm != null
+                && pileParams != null) {
+            try {
+                wm.removeView(pileRoot);
+            } catch (Throwable ignored) {
+            }
+            try {
+                wm.addView(pileRoot, pileParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        // v281: grow the pile window BEFORE the icon slides down.
+        // The user reports the icon's RIGHT half is clipped while
+        // it drops ("下滑的右边被切掉了一半") — the window width
+        // (totalWidthDp + 16dp) is too tight for the sliding icon,
+        // so give it a full extra icon width of right margin.
+        if (pileWindowAdded && pileParams != null && wm != null
+                && pile != null) {
+            int n = pile.getIconCount();
+            int needW = dp(pile.totalWidthDp()) + dp(48);
+            int needH = n * dp(40) + dp(16);
+            boolean changed = false;
+            if (pileParams.width < needW) {
+                pileParams.width = needW;
+                changed = true;
+            }
+            if (pileParams.height < needH) {
+                pileParams.height = needH;
+                changed = true;
+            }
+            if (changed) {
+                try {
+                    wm.updateViewLayout(pileRoot, pileParams);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
         icon.animate().translationY(0f)
                 .setDuration(350).withLayer().start();
         // (Fan stack animation deleted, user 2026-11-19 "删了": the
@@ -3923,6 +4233,30 @@ public class BubbleWindow {
     private void dockIconsToEdge(final List<PileIcon> icons) {
         if (icons == null || icons.isEmpty()) {
             return;
+        }
+        // v281: same as stackIconToFan — grow the pile window
+        // (width + height) before the last icon slides down, or
+        // its right half is clipped while it drops.
+        if (pileWindowAdded && pileParams != null && wm != null
+                && pile != null) {
+            int n = pile.getIconCount();
+            int needW = dp(pile.totalWidthDp()) + dp(48);
+            int needH = n * dp(40) + dp(16);
+            boolean changed = false;
+            if (pileParams.width < needW) {
+                pileParams.width = needW;
+                changed = true;
+            }
+            if (pileParams.height < needH) {
+                pileParams.height = needH;
+                changed = true;
+            }
+            if (changed) {
+                try {
+                    wm.updateViewLayout(pileRoot, pileParams);
+                } catch (Throwable ignored) {
+                }
+            }
         }
         for (int i = 0; i < icons.size() - 1; i++) {
             PileIcon icon = icons.get(i);
@@ -4363,6 +4697,16 @@ public class BubbleWindow {
     public void dissipateOne(final NotifData data) {
         if (data == null || dock == null) {
             return;
+        }
+        // v302: user dismissed a Migu song (right-swipe) — remember
+        // it so a lyric update for the same song doesn't re-pop it.
+        if (data.isMusic
+                && "cmccwm.mobilemusic".equals(data.pkg)
+                && data.key != null && data.title != null) {
+            dismissedMiguMusic.put(data.key, data.title);
+            if (dismissedMiguMusic.size() > 64) {
+                dismissedMiguMusic.clear();
+            }
         }
         NotifGroup targetGroup = null;
         final Map<String, Integer> oldTops = new HashMap<>();

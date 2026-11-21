@@ -339,12 +339,21 @@ public class XposedEntry extends XposedModule {
                 // popCapsule already treats a same-key music
                 // re-post as an update, never a second pop, so
                 // the guard is not needed for music.
-                if (!isMusic && key != null && BubbleWindow.isNotifCollectionHookActive()
+                // v309: WeChat/QQ are EXEMPT too (user 2026-11-21).
+                // Same conversation reuses the SAME key for every
+                // message, so the guard dropped every message after
+                // the first — only one capsule ever popped. The
+                // popCapsule dedup (v146 key+content) still catches
+                // true duplicates.
+                String pkg = intent.getStringExtra("pkg");
+                boolean isChatApp = "com.tencent.mm".equals(pkg)
+                        || "com.tencent.mobileqq".equals(pkg);
+                if (!isMusic && !isChatApp && key != null
+                        && BubbleWindow.isNotifCollectionHookActive()
                         && BubbleWindow.getInstance()
                                 .hasNotificationKey(key)) {
                     return;
                 }
-                String pkg = intent.getStringExtra("pkg");
                 String title = intent.getStringExtra("title");
                 String text = intent.getStringExtra("text");
                 long postTime = intent.getLongExtra("postTime", 0);

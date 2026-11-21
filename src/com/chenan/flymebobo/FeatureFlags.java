@@ -28,6 +28,8 @@ public class FeatureFlags {
     public static volatile boolean card = true;
     public static volatile boolean scroll = true;
     public static volatile boolean miniwindow = true;
+    public static volatile boolean blankDissipate = true;
+    public static volatile boolean musicCard = true;
 
     public static void set(String key, boolean enabled) {
         if (key == null) {
@@ -49,6 +51,10 @@ public class FeatureFlags {
             scroll = enabled;
         } else if ("miniwindow".equals(key)) {
             miniwindow = enabled;
+        } else if ("blankDissipate".equals(key)) {
+            blankDissipate = enabled;
+        } else if ("musicCard".equals(key)) {
+            musicCard = enabled;
         }
     }
 
@@ -69,6 +75,8 @@ public class FeatureFlags {
             card = prefs.getBoolean("card", true);
             scroll = prefs.getBoolean("scroll", true);
             miniwindow = prefs.getBoolean("miniwindow", true);
+            blankDissipate = prefs.getBoolean("blankDissipate", true);
+            musicCard = prefs.getBoolean("musicCard", true);
         } catch (Throwable ignored) {
             // Defaults (all on) stand.
         }

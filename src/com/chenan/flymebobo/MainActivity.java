@@ -1,6 +1,7 @@
 package com.chenan.flymebobo;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -10,6 +11,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.TypedValue;
@@ -78,8 +80,8 @@ public class MainActivity extends Activity {
             new Feature("live", "来电", "接听 · 挂断 · 扬声器",
                     "来电有专属胶囊：接听、挂断、\n扬声器切换都在上面。\n来电永不自动消散。",
                     Color.rgb(139, 92, 246), "电"),
-            new Feature("card", "展开卡片", "点胶囊展开卡片",
-                    "点一下胶囊，展开成卡片看全文。\n关掉后点胶囊不再展开卡片。",
+            new Feature("card", "展开卡片", "点胶囊展开卡片（不含音乐）",
+                    "点一下胶囊，展开成卡片看全文。\n关掉后点胶囊不再展开卡片。\n音乐胶囊不受这个开关管，\n由“音乐卡片”开关单独控制。",
                     Color.rgb(20, 184, 166), "卡"),
             new Feature("scroll", "胶囊滚动", "内容太长滚动显示",
                     "胶囊里的标题和正文太长时，\n会左右滚动显示完整内容。\n关掉后超长内容用 … 截断。",
@@ -87,18 +89,47 @@ public class MainActivity extends Activity {
             new Feature("miniwindow", "小窗打开", "点卡片小窗打开 App",
                     "点一下展开的卡片，打开这个通知的 App。\n开着：小窗打开；关着：全屏打开。",
                     Color.rgb(14, 165, 233), "窗"),
+            new Feature("blankDissipate", "点击空白自动消散", "点空白处胶囊自动消散",
+                    "点一下屏幕空白处，所有胶囊逐条向右消散。\n关掉后点空白处胶囊留在屏幕上，\n只能手动右滑消散或左滑收进扇子。",
+                    Color.rgb(249, 115, 22), "散"),
+            new Feature("musicCard", "音乐卡片", "点音乐胶囊展开播放器卡片",
+                    "点一下音乐胶囊，展开成播放器卡片：\n专辑圆盘、歌词、进度条和播放控制。\n关掉后点音乐胶囊直接打开音乐 App，\n不再展开播放器卡片。",
+                    Color.rgb(219, 39, 119), "音"),
     };
 
     private SharedPreferences prefs;
     private LinearLayout list;
+    private ScrollView scrollView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        // v273: 功能默认全打开 — one-time reset: every feature
+        // switch is ON unless the user turns it off afterwards.
+        // (Older prefs could hold an OFF left over from testing,
+        // e.g. "card" was toggled off while testing v266, and a
+        // brand-new key would otherwise inherit a stale value.)
+        if (!prefs.getBoolean("defaults_v274_applied", false)) {
+            SharedPreferences.Editor e = prefs.edit();
+            for (int i = 0; i < FEATURES.length; i++) {
+                e.putBoolean(FEATURES[i].key, true);
+            }
+            e.putBoolean("defaults_v274_applied", true);
+            e.apply();
+            // Tell SystemUI at once so the live flags match.
+            for (int i = 0; i < FEATURES.length; i++) {
+                Intent t = new Intent(
+                        "com.chenan.flymebobo.FEATURE_TOGGLE");
+                t.putExtra("key", FEATURES[i].key);
+                t.putExtra("enabled", true);
+                sendBroadcast(t);
+            }
+        }
 
         ScrollView scroll = new ScrollView(this);
+        scrollView = scroll;
         scroll.setBackgroundColor(Color.WHITE);
         scroll.setFillViewport(true);
 
@@ -197,8 +228,98 @@ public class MainActivity extends Activity {
         log.setLayoutParams(loglp);
         root.addView(log);
 
+        // ---- Footer links (v310): 开源仓库 · 酷安主页 · 请我喝咖啡 ----
+        // Same row as 1.x (fixed122). Repo is the 2.0 source
+        // (flymebobo-next); coffee shows the user's WeChat Pay QR
+        // (assets/coffee_qr.png, decoded from 1.x's embedded copy).
+        LinearLayout linkRow = new LinearLayout(this);
+        linkRow.setOrientation(LinearLayout.HORIZONTAL);
+        linkRow.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams linkRowLp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        linkRowLp.topMargin = dp(10);
+        linkRow.setLayoutParams(linkRowLp);
+        root.addView(linkRow);
+
+        TextView repoLink = new TextView(this);
+        repoLink.setText("开源仓库");
+        repoLink.setTextSize(12);
+        repoLink.setTextColor(Color.rgb(14, 165, 233));
+        repoLink.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://github.com/1enmon/flymebobo-next")));
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        linkRow.addView(repoLink);
+
+        TextView sep1 = new TextView(this);
+        sep1.setText("  ·  ");
+        sep1.setTextSize(12);
+        sep1.setTextColor(Color.rgb(153, 153, 153));
+        linkRow.addView(sep1);
+
+        TextView coolapkLink = new TextView(this);
+        coolapkLink.setText("酷安主页");
+        coolapkLink.setTextSize(12);
+        coolapkLink.setTextColor(Color.rgb(14, 165, 233));
+        coolapkLink.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://www.coolapk.com/u/44111882")));
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        linkRow.addView(coolapkLink);
+
+        TextView sep2 = new TextView(this);
+        sep2.setText("  ·  ");
+        sep2.setTextSize(12);
+        sep2.setTextColor(Color.rgb(153, 153, 153));
+        linkRow.addView(sep2);
+
+        TextView coffeeLink = new TextView(this);
+        coffeeLink.setText("请我喝咖啡");
+        coffeeLink.setTextSize(12);
+        coffeeLink.setTextColor(Color.rgb(14, 165, 233));
+        coffeeLink.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    InputStream in = getAssets().open("coffee_qr.png");
+                    Bitmap qr = BitmapFactory.decodeStream(in);
+                    try {
+                        in.close();
+                    } catch (Throwable ignored) {
+                    }
+                    if (qr != null) {
+                        ImageView iv = new ImageView(MainActivity.this);
+                        iv.setImageBitmap(qr);
+                        iv.setPadding(dp(16), dp(8), dp(16), dp(8));
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("请我喝咖啡")
+                                .setMessage("微信扫码，感谢支持！")
+                                .setView(iv)
+                                .setPositiveButton("关闭", null)
+                                .show();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        linkRow.addView(coffeeLink);
+
         TextView gh = new TextView(this);
-        gh.setText("github.com/1enmon/flymebobo · GPL-3.0-only");
+        gh.setText("GPL-3.0-only · 部分实现参考了 Flyme灵动岛");
         gh.setTextSize(11);
         gh.setTextColor(Color.rgb(153, 153, 153));
         gh.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -229,7 +350,199 @@ public class MainActivity extends Activity {
         });
         root.addView(perm);
 
+        // Replay the feature guide.
+        TextView guideBtn = new TextView(this);
+        guideBtn.setText("功能引导");
+        guideBtn.setTextSize(13);
+        guideBtn.setTextColor(Color.rgb(14, 165, 233));
+        guideBtn.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams gblp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        gblp.topMargin = dp(16);
+        guideBtn.setLayoutParams(gblp);
+        guideBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showGuide(0);
+            }
+        });
+        root.addView(guideBtn);
+
         setContentView(scroll);
+        // v273: first-run feature guide (once). Post it so the
+        // feature cards are laid out before we measure them.
+        if (!prefs.getBoolean("guide_shown_v273", false)) {
+            scroll.post(new Runnable() {
+                @Override
+                public void run() {
+                    showGuide(0);
+                }
+            });
+        }
+    }
+
+    // ---- Feature guide (v273) ----
+    // A dim overlay that spotlights one feature card at a time,
+    // with a tooltip and 下一步 / 跳过. Shown once on first run;
+    // replayable from the "功能引导" link at the bottom.
+    private FrameLayout guideOverlay;
+    private View guideHl;
+    private TextView guideTip;
+    private TextView guideStep;
+    private int guideIdx;
+
+    private void showGuide(int start) {
+        guideIdx = start;
+        if (guideOverlay != null) {
+            ViewGroup parent = (ViewGroup) guideOverlay.getParent();
+            if (parent != null) parent.removeView(guideOverlay);
+        }
+        final FrameLayout root = (FrameLayout) getWindow().getDecorView();
+        guideOverlay = new FrameLayout(this);
+        guideOverlay.setBackgroundColor(Color.argb(150, 0, 0, 0));
+        guideOverlay.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        guideOverlay.setClickable(true);
+
+        guideHl = new View(this);
+        guideHl.setBackground(roundedStroke(Color.WHITE, dp(22), dp(3)));
+        guideOverlay.addView(guideHl);
+
+        LinearLayout tipBox = new LinearLayout(this);
+        tipBox.setOrientation(LinearLayout.VERTICAL);
+        tipBox.setBackground(rounded(Color.WHITE, dp(16)));
+        tipBox.setPadding(dp(16), dp(14), dp(16), dp(14));
+        FrameLayout.LayoutParams tbp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tbp.leftMargin = dp(20);
+        tbp.rightMargin = dp(20);
+        tbp.bottomMargin = dp(32);
+        tbp.gravity = Gravity.BOTTOM;
+        tipBox.setLayoutParams(tbp);
+
+        guideStep = new TextView(this);
+        guideStep.setTextSize(11);
+        guideStep.setTextColor(Color.rgb(153, 153, 153));
+        tipBox.addView(guideStep);
+
+        guideTip = new TextView(this);
+        guideTip.setTextSize(15);
+        guideTip.setTextColor(Color.rgb(31, 41, 55));
+        guideTip.setLineSpacing(0, 1.3f);
+        LinearLayout.LayoutParams tipLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tipLp.topMargin = dp(4);
+        guideTip.setLayoutParams(tipLp);
+        tipBox.addView(guideTip);
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setGravity(Gravity.END);
+        LinearLayout.LayoutParams brLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        brLp.topMargin = dp(12);
+        btnRow.setLayoutParams(brLp);
+
+        TextView skip = new TextView(this);
+        skip.setText("跳过");
+        skip.setTextSize(14);
+        skip.setTextColor(Color.rgb(107, 114, 128));
+        skip.setPadding(dp(12), dp(8), dp(12), dp(8));
+        skip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dismissGuide();
+            }
+        });
+        btnRow.addView(skip);
+
+        TextView next = new TextView(this);
+        next.setText("下一步");
+        next.setTextSize(14);
+        next.setTextColor(Color.WHITE);
+        next.setTypeface(next.getTypeface(), android.graphics.Typeface.BOLD);
+        next.setGravity(Gravity.CENTER);
+        next.setBackground(rounded(Color.rgb(34, 197, 94), dp(999)));
+        next.setPadding(dp(20), dp(8), dp(20), dp(8));
+        LinearLayout.LayoutParams nxLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nxLp.leftMargin = dp(12);
+        next.setLayoutParams(nxLp);
+        next.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showGuideStep(guideIdx + 1);
+            }
+        });
+        btnRow.addView(next);
+        tipBox.addView(btnRow);
+
+        guideOverlay.addView(tipBox);
+        root.addView(guideOverlay);
+        showGuideStep(guideIdx);
+    }
+
+    private void showGuideStep(int idx) {
+        if (idx >= FEATURES.length) {
+            dismissGuide();
+            return;
+        }
+        guideIdx = idx;
+        final Feature f = FEATURES[idx];
+        final View card = list.getChildAt(idx);
+        if (card == null) {
+            dismissGuide();
+            return;
+        }
+        // Scroll the card near the top, then place the highlight
+        // once the scroll has settled.
+        int targetY = Math.max(0, card.getTop() - dp(120));
+        if (scrollView != null) {
+            scrollView.smoothScrollTo(0, targetY);
+        }
+        card.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (guideOverlay == null) return;
+                int[] loc = new int[2];
+                card.getLocationOnScreen(loc);
+                int[] rootLoc = new int[2];
+                guideOverlay.getLocationOnScreen(rootLoc);
+                int x = loc[0] - rootLoc[0];
+                int y = loc[1] - rootLoc[1];
+                FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(
+                        card.getWidth(), card.getHeight());
+                hp.leftMargin = x;
+                hp.topMargin = y;
+                guideHl.setLayoutParams(hp);
+                // Pop-in animation on the highlight.
+                guideHl.setScaleX(0.96f);
+                guideHl.setScaleY(0.96f);
+                guideHl.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(180).start();
+                guideStep.setText((guideIdx + 1) + " / " + FEATURES.length);
+                guideTip.setText(f.title + " — " + f.subtitle);
+            }
+        }, 320);
+    }
+
+    private void dismissGuide() {
+        prefs.edit().putBoolean("guide_shown_v273", true).apply();
+        if (guideOverlay != null) {
+            ViewGroup parent = (ViewGroup) guideOverlay.getParent();
+            if (parent != null) parent.removeView(guideOverlay);
+            guideOverlay = null;
+        }
+    }
+
+    private android.graphics.drawable.Drawable roundedStroke(
+            int color, int radius, int width) {
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable();
+        d.setCornerRadius(radius);
+        d.setStroke(width, color);
+        return d;
     }
 
     private View statusPill(String label, boolean on) {
