@@ -10,7 +10,7 @@ export BT=$HOME/workspace/tools/android/build-tools-34
 export PATH=$JDK/bin:$BT:$PATH
 SRC=$HOME/workspace/flymebobo2/src
 APKTOOL_DIR=$HOME/workspace/flymebobo2/build/apktool
-OUT=flymebobo-2.0-v310.apk
+OUT=flymebobo-2.1-v333.apk
 
 # 1. Compile (javac must use -source 17 -target 17; JDK 21 default is
 # class version 65 which d8 cannot eat).
@@ -22,7 +22,7 @@ $JDK/bin/javac -nowarn -source 17 -target 17 \
 # 2. Dex (must use r8 8.5.35 D8; build-tools r34's own d8 8.2.2 NPEs on
 # anonymous classes in field initializers).
 cd /tmp/bb20-classes && $JDK/bin/jar --create --file /tmp/bb20-classes.jar .
-$JDK/bin/java -cp /tmp/r8.jar com.android.tools.r8.D8 --min-api 26 \
+$JDK/bin/java -cp $HOME/workspace/tools/android/r8-8.5.35.jar com.android.tools.r8.D8 --min-api 26 \
   --lib $HOME/workspace/tools/android/android-34.jar \
   --output /tmp/bb20-dex /tmp/bb20-classes.jar
 

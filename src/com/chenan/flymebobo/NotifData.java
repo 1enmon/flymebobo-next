@@ -41,6 +41,16 @@ public class NotifData {
      * UPDATE (like music), not a duplicate. Set by the hook after
      * construction. */
     public boolean isLive;
+    /** v311: Amap live navigation capsule (foot/ride) — turn +
+     * distance from the Amap hook, not from a notification.
+     * Auto-pins on pop like a download. Set by BubbleWindow
+     * .onNaviInfo after construction. */
+    public boolean isNavi;
+    /** v320: Amap bus live navigation capsule (no voice) — mode A
+     * (waiting: real-time arrival) or mode B (on the bus: next
+     * stop / remaining stations). Auto-pins on pop like a nav
+     * capsule. Set by BubbleWindow.onBusInfo after construction. */
+    public boolean isBus;
     /** The notification's tap action (contentIntent), for the card's
      * 全屏打开 / 小窗打开 buttons (v143). Passed across processes as a
      * Parcelable extra in the ACTION_NOTIFY broadcast, like 1.x

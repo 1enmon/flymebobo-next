@@ -4,6 +4,10 @@ import android.content.Context;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
@@ -92,6 +96,48 @@ public class BubbleWindow {
     private boolean windowAdded;
     private boolean dockLeft = true;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    /** v320: Amap bus live navigation state (no voice). Mode A
+     * (waiting) shows real-time arrival from BusNaviHook; mode B
+     * (on the bus) shows next stop / remaining stations, computed
+     * from the route station list + the user's live position.
+     * Station coords are GCJ-02 (Amap) while the phone GPS is
+     * WGS-84, so the pass radius is generous (300m) and boarding
+     * is decided by bus-arrived + moving at bus speed near the
+     * route, NOT by matching the bus's reported position. */
+    private String busLine;
+    private String busStartName;
+    private String busEndName;
+    private final ArrayList<String> busStationNames = new ArrayList<>();
+    // Per-station [lng, lat] for stations that have coords
+    // (intermediates from passdepotcoord); null for start/end.
+    private final ArrayList<double[]> busStationCoords = new ArrayList<>();
+    private boolean busOnBoard;
+    private int busPassedIdx = -1;
+    private String busLastShownText;
+    private double busUserLat;
+    private double busUserLng;
+    private long busUserLocTime;
+    private double busUserSpeed;
+    private boolean busLocListening;
+    private LocationManager busLocMgr;
+    private LocationListener busLocListener;
+    /** v322: Amap foot navigation "compute it yourself". The foot
+     * JS never pushes notifyNaviInfo and the foot notification
+     * never updates, so the route polyline + totals are captured
+     * at nav start (ACTION_FOOT_ROUTE) and the capsule is computed
+     * from the live position projected onto the polyline:
+     * remaining distance/time, arrival time, and the next turn
+     * (first significant bearing change ahead). */
+    private double[] footPtsLat;
+    private double[] footPtsLng;
+    private double[] footSegLen;
+    private double footTotalLen;
+    private int footTotalTime;
+    private double footTraveled;
+    private String footLastShownText;
+    private boolean footLocListening;
+    private LocationManager footLocMgr;
+    private LocationListener footLocListener;
     /** 1.x pop throttle: same app only pops once per 30s, and any
      * notification within 5s of the last pop only refreshes (the
      * notification still joins its group/stack, it just does not
@@ -556,6 +602,757 @@ public class BubbleWindow {
     // swiped it away in the shade, the app cancelled it). Drop its
     // capsule from the bubble groups so the bubble stays in sync
     // with the shade. Runs on the main handler like onNotification.
+    // v311: Amap live navigation (foot/ride) — turn + distance
+    // from the Amap hook (ModuleRoute.notifyNaviInfo). One capsule
+    // per type (key "navi:footnavi" / "navi:ridenavi"), isLive so a
+    // re-post updates in place (same as the v222 live pattern) and
+    // the dedup guards exempt it. Auto-pinned like downloads so it
+    // stays out while navigating; removed on NAVI_END.
+    public void onNaviInfo(final String bizType, final String title,
+            final String content, final int status, final int icon) {
+        if (bizType == null || app == null) {
+            return;
+        }
+        // v314 (diagnostic): log every push BEFORE the bizType
+        // filter, so BubbleNotify.log shows whether the engine
+        // calls notifyNaviInfo at all and with what bizType.
+        try {
+            FileLog.i("NaviInfo bizType=" + bizType + " title=" + title
+                    + " content=" + content + " status=" + status
+                    + " icon=" + icon);
+        } catch (Throwable ignored) {
+        }
+        if (!"footnavi".equals(bizType) && !"ridenavi".equals(bizType)) {
+            return;
+        }
+        final String key = "navi:" + bizType;
+        // v317: the engine puts the live instruction in title OR
+        // content (one is empty) — title="96米后左转" content="",
+        // or title="" content="直行114米". Merge so the instruction
+        // is always the capsule title and the nav-type label is the
+        // second line; only the start state ("导航开始" /
+        // "从当前位置出发") keeps both fields as-is.
+        String navLabel = "footnavi".equals(bizType) ? "步行导航"
+                : "骑行导航";
+        boolean hasTitle = title != null && !title.isEmpty();
+        boolean hasContent = content != null && !content.isEmpty();
+        String dispTitle;
+        String dispText;
+        if (hasTitle && hasContent) {
+            dispTitle = title;
+            dispText = content;
+        } else if (hasTitle) {
+            dispTitle = title;
+            dispText = navLabel;
+        } else if (hasContent) {
+            dispTitle = content;
+            dispText = navLabel;
+        } else {
+            dispTitle = "正在导航";
+            dispText = navLabel;
+        }
+        final NotifData data = new NotifData(key,
+                "com.autonavi.minimap",
+                dispTitle, dispText, System.currentTimeMillis(),
+                null, null);
+        data.isLive = true;
+        data.isNavi = true;
+        onNotification(data);
+    }
+
+    // v311: Amap navigation ended — drop the nav capsule.
+    public void onNaviEnd(final String bizType) {
+        if (bizType == null || app == null) {
+            return;
+        }
+        final String key = "navi:" + bizType;
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey(key);
+                rebuildDock();
+            }
+        });
+    }
+
+    // v320: Amap bus live navigation, mode A (waiting for the bus).
+    // Called on every real-time poll (~30s, ~10s when close).
+    // Shows "xx路 还有N站，约M分钟到" as an auto-pinned live
+    // capsule, one per line (key "bus:<line>"). Once boarding is
+    // detected (busOnBoard) these updates are ignored — mode B
+    // owns the capsule from then on.
+    public void onBusInfo(final String line, final String station,
+            final String stationLeft, final String arrival,
+            final String busX, final String busY) {
+        if (line == null || app == null) {
+            return;
+        }
+        try {
+            FileLog.i("BusInfo line=" + line + " station=" + station
+                    + " left=" + stationLeft + " arrival=" + arrival
+                    + " bus=(" + busX + "," + busY + ")");
+        } catch (Throwable ignored) {
+        }
+        if (busOnBoard) {
+            return;
+        }
+        int left = parseIntSafe(stationLeft, -1);
+        int arrSec = parseIntSafe(arrival, -1);
+        String text;
+        if (left == 0 || (arrSec >= 0 && arrSec <= 30)) {
+            text = "正在进站";
+        } else if (left > 0 && arrSec >= 0) {
+            int min = (arrSec + 59) / 60;
+            text = "还有" + left + "站，约" + min + "分钟到";
+        } else if (left > 0) {
+            text = "还有" + left + "站";
+        } else if (arrSec >= 0) {
+            text = "约" + ((arrSec + 59) / 60) + "分钟到";
+        } else {
+            text = "实时公交";
+        }
+        // Only pop when the text changed — otherwise a dismissed
+        // capsule would re-pop on every poll (~30s) / fix (~2s).
+        if (text.equals(busLastShownText)) {
+            return;
+        }
+        busLastShownText = text;
+        final NotifData data = new NotifData("bus:" + line,
+                "com.autonavi.minimap", line, text,
+                System.currentTimeMillis(), null, null);
+        data.isLive = true;
+        data.isBus = true;
+        onNotification(data);
+    }
+
+    // v320: Amap bus live navigation, mode B route. Stores the
+    // station list (start + intermediates + end) and the
+    // intermediate coords, resets boarding state, and starts the
+    // passive location listener so boarding can be detected.
+    public void onBusRoute(final String busname,
+            final String direction, final String startName,
+            final String endName, final String passNames,
+            final String passCoords) {
+        if (busname == null || app == null) {
+            return;
+        }
+        try {
+            FileLog.i("BusRoute bus=" + busname + " dir=" + direction
+                    + " " + startName + "->" + endName
+                    + " passNames=" + passNames
+                    + " passCoords=" + passCoords);
+        } catch (Throwable ignored) {
+        }
+        busLine = busname;
+        busStartName = startName;
+        busEndName = endName;
+        busOnBoard = false;
+        busPassedIdx = -1;
+        busLastShownText = null;
+        busStationNames.clear();
+        busStationCoords.clear();
+        if (startName != null && !startName.isEmpty()) {
+            busStationNames.add(startName);
+            busStationCoords.add(null);
+        }
+        String[] names = null;
+        if (passNames != null && !passNames.isEmpty()) {
+            names = passNames.split(" ");
+        }
+        double[] coords = null;
+        if (passCoords != null && !passCoords.isEmpty()) {
+            String[] parts = passCoords.split(",");
+            coords = new double[parts.length];
+            for (int i = 0; i < parts.length; i++) {
+                coords[i] = parseDoubleSafe(parts[i], 0);
+            }
+        }
+        if (names != null) {
+            for (int i = 0; i < names.length; i++) {
+                if (names[i] == null || names[i].isEmpty()) {
+                    continue;
+                }
+                busStationNames.add(names[i]);
+                double[] c = null;
+                if (coords != null && coords.length >= (i + 1) * 2) {
+                    c = new double[]{coords[i * 2], coords[i * 2 + 1]};
+                }
+                busStationCoords.add(c);
+            }
+        }
+        if (endName != null && !endName.isEmpty()) {
+            busStationNames.add(endName);
+            busStationCoords.add(null);
+        }
+        startBusLocation();
+    }
+
+    // v320: passive location listener (SystemUI). Passive only —
+    // it never powers GPS itself, it just receives fixes other
+    // apps (Amap) already requested. Feeds boarding detection
+    // and mode B next-stop tracking.
+    private void startBusLocation() {
+        if (busLocListening || app == null) {
+            return;
+        }
+        try {
+            busLocMgr = (LocationManager) app.getSystemService(
+                    Context.LOCATION_SERVICE);
+            if (busLocMgr == null) {
+                return;
+            }
+            busLocListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(Location location) {
+                    onBusLocation(location);
+                }
+
+                @Override
+                public void onStatusChanged(String provider,
+                        int status, Bundle extras) {
+                }
+
+                @Override
+                public void onProviderEnabled(String provider) {
+                }
+
+                @Override
+                public void onProviderDisabled(String provider) {
+                }
+            };
+            busLocMgr.requestLocationUpdates(
+                    LocationManager.PASSIVE_PROVIDER, 2000, 0,
+                    busLocListener);
+            busLocListening = true;
+            try {
+                FileLog.i("BusLoc passive listener started");
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable th) {
+            try {
+                FileLog.i("BusLoc start failed: " + th);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void stopBusLocation() {
+        if (!busLocListening) {
+            return;
+        }
+        busLocListening = false;
+        try {
+            if (busLocMgr != null && busLocListener != null) {
+                busLocMgr.removeUpdates(busLocListener);
+            }
+        } catch (Throwable ignored) {
+        }
+        busLocMgr = null;
+        busLocListener = null;
+    }
+
+    // v320: each passive fix updates the user's position, then
+    // runs boarding detection (mode A -> B) or next-stop tracking
+    // (mode B). Speed falls back to distance/time between fixes
+    // when the provider reports no speed.
+    private void onBusLocation(Location location) {
+        if (location == null || busLine == null) {
+            return;
+        }
+        double lat = location.getLatitude();
+        double lng = location.getLongitude();
+        long now = System.currentTimeMillis();
+        double speed = location.hasSpeed() ? location.getSpeed() : 0;
+        if (speed <= 0 && busUserLocTime > 0 && now > busUserLocTime) {
+            double d = distMeters(busUserLat, busUserLng, lat, lng);
+            double dt = (now - busUserLocTime) / 1000.0;
+            if (dt > 0) {
+                speed = d / dt;
+            }
+        }
+        busUserLat = lat;
+        busUserLng = lng;
+        busUserLocTime = now;
+        busUserSpeed = speed;
+        if (busStationNames.isEmpty()) {
+            return;
+        }
+        if (!busOnBoard) {
+            maybeBoardBus();
+        } else {
+            updateBusNextStop();
+        }
+    }
+
+    // v320: boarding detection. The bus has arrived at the user's
+    // station (the latest BUS_INFO said so — tracked implicitly:
+    // we only run this while mode A is live) and the user is now
+    // moving at bus speed (>3 m/s) near the route (within 500m
+    // of any station with coords, or within 500m of the boarding
+    // station area). GCJ-02 vs WGS-84 offset makes exact
+    // bus-position matching unreliable, so it is not used.
+    private void maybeBoardBus() {
+        if (busUserSpeed < 3.0) {
+            return;
+        }
+        boolean nearRoute = false;
+        for (int i = 0; i < busStationCoords.size(); i++) {
+            double[] c = busStationCoords.get(i);
+            if (c == null) {
+                continue;
+            }
+            // c is [lng, lat].
+            if (distMeters(busUserLat, busUserLng, c[1], c[0])
+                    <= 500) {
+                nearRoute = true;
+                break;
+            }
+        }
+        if (!nearRoute) {
+            return;
+        }
+        busOnBoard = true;
+        busPassedIdx = 0;
+        try {
+            FileLog.i("BusBoarded line=" + busLine
+                    + " speed=" + busUserSpeed);
+        } catch (Throwable ignored) {
+        }
+        updateBusNextStop();
+    }
+
+    // v320: mode B next-stop tracking. Advance busPassedIdx past
+    // every station the user has come within 300m of (generous
+    // radius for GCJ-02/WGS-84 offset + GPS error), then the next
+    // stop is the station after it. Updates the same bus capsule
+    // ("下一站：XX站，还剩N站").
+    private void updateBusNextStop() {
+        if (busStationNames.isEmpty() || busLine == null) {
+            return;
+        }
+        for (int i = busPassedIdx + 1;
+                i < busStationNames.size() - 1; i++) {
+            double[] c = busStationCoords.get(i);
+            if (c == null) {
+                continue;
+            }
+            if (distMeters(busUserLat, busUserLng, c[1], c[0])
+                    <= 300) {
+                busPassedIdx = i;
+            } else {
+                break;
+            }
+        }
+        int nextIdx = busPassedIdx + 1;
+        if (nextIdx >= busStationNames.size()) {
+            return;
+        }
+        String nextName = busStationNames.get(nextIdx);
+        int remain = busStationNames.size() - 1 - nextIdx;
+        String text = "下一站：" + nextName + "站";
+        if (remain > 0) {
+            text += "，还剩" + remain + "站";
+        } else {
+            text += "，终点站";
+        }
+        // Only pop when the next stop changed (see onBusInfo).
+        if (text.equals(busLastShownText)) {
+            return;
+        }
+        busLastShownText = text;
+        final NotifData data = new NotifData("bus:" + busLine,
+                "com.autonavi.minimap", busLine, text,
+                System.currentTimeMillis(), null, null);
+        data.isLive = true;
+        data.isBus = true;
+        onNotification(data);
+    }
+
+    // v320: bus capsule dismissed — stop tracking this route.
+    public void onBusEnd() {
+        if (busLine == null) {
+            return;
+        }
+        final String key = "bus:" + busLine;
+        busLine = null;
+        busOnBoard = false;
+        busPassedIdx = -1;
+        busLastShownText = null;
+        busStationNames.clear();
+        busStationCoords.clear();
+        stopBusLocation();
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey(key);
+                rebuildDock();
+            }
+        });
+    }
+
+    private static int parseIntSafe(String s, int def) {
+        if (s == null) {
+            return def;
+        }
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (Throwable ignored) {
+            return def;
+        }
+    }
+
+    private static double parseDoubleSafe(String s, double def) {
+        if (s == null) {
+            return def;
+        }
+        try {
+            return Double.parseDouble(s.trim());
+        } catch (Throwable ignored) {
+            return def;
+        }
+    }
+
+    private static double distMeters(double lat1, double lng1,
+            double lat2, double lng2) {
+        double r = 6371000.0;
+        double dLat = Math.toRadians(lat2 - lat1);
+        double dLng = Math.toRadians(lng2 - lng1);
+        double a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+                + Math.cos(Math.toRadians(lat1))
+                * Math.cos(Math.toRadians(lat2))
+                * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+        double c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        return r * c;
+    }
+
+    // v322: Amap foot navigation "compute it yourself" — route
+    // received at nav start. Parse the compact polyline
+    // ("lat,lng;lat,lng;..."), precompute segment lengths, and
+    // start the passive location listener.
+    public void onFootRoute(final int totalLength,
+            final int totalTime, final String points) {
+        if (points == null || points.isEmpty() || app == null) {
+            return;
+        }
+        try {
+            FileLog.i("FootRoute totalLen=" + totalLength
+                    + " totalTime=" + totalTime
+                    + " points=" + points.length() + " chars");
+        } catch (Throwable ignored) {
+        }
+        String[] pairs = points.split(";");
+        int n = pairs.length;
+        double[] lats = new double[n];
+        double[] lngs = new double[n];
+        int count = 0;
+        for (int i = 0; i < n; i++) {
+            String[] ll = pairs[i].split(",");
+            if (ll.length < 2) {
+                continue;
+            }
+            double la = parseDoubleSafe(ll[0], 0);
+            double lo = parseDoubleSafe(ll[1], 0);
+            if (la == 0 && lo == 0) {
+                continue;
+            }
+            lats[count] = la;
+            lngs[count] = lo;
+            count++;
+        }
+        if (count < 2) {
+            return;
+        }
+        footPtsLat = new double[count];
+        footPtsLng = new double[count];
+        System.arraycopy(lats, 0, footPtsLat, 0, count);
+        System.arraycopy(lngs, 0, footPtsLng, 0, count);
+        footSegLen = new double[count - 1];
+        double sum = 0;
+        for (int i = 0; i < count - 1; i++) {
+            footSegLen[i] = distMeters(footPtsLat[i], footPtsLng[i],
+                    footPtsLat[i + 1], footPtsLng[i + 1]);
+            sum += footSegLen[i];
+        }
+        footTotalLen = totalLength > 0 ? totalLength : sum;
+        footTotalTime = totalTime;
+        footTraveled = 0;
+        footLastShownText = null;
+        startFootLocation();
+        // Show the capsule immediately with the total, so the user
+        // sees it even before the first fix arrives.
+        updateFootCapsule();
+    }
+
+    private void startFootLocation() {
+        if (footLocListening || app == null) {
+            return;
+        }
+        try {
+            footLocMgr = (LocationManager) app.getSystemService(
+                    Context.LOCATION_SERVICE);
+            if (footLocMgr == null) {
+                return;
+            }
+            footLocListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(Location location) {
+                    onFootLocation(location);
+                }
+
+                @Override
+                public void onStatusChanged(String provider,
+                        int status, Bundle extras) {
+                }
+
+                @Override
+                public void onProviderEnabled(String provider) {
+                }
+
+                @Override
+                public void onProviderDisabled(String provider) {
+                }
+            };
+            footLocMgr.requestLocationUpdates(
+                    LocationManager.PASSIVE_PROVIDER, 1000, 0,
+                    footLocListener);
+            footLocListening = true;
+            try {
+                FileLog.i("FootLoc passive listener started");
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable th) {
+            try {
+                FileLog.i("FootLoc start failed: " + th);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void stopFootLocation() {
+        if (!footLocListening) {
+            return;
+        }
+        footLocListening = false;
+        try {
+            if (footLocMgr != null && footLocListener != null) {
+                footLocMgr.removeUpdates(footLocListener);
+            }
+        } catch (Throwable ignored) {
+        }
+        footLocMgr = null;
+        footLocListener = null;
+    }
+
+    // v322: each passive fix projects the position onto the route
+    // polyline, advances footTraveled (monotonic — never goes
+    // backward), and refreshes the walk capsule.
+    private void onFootLocation(Location location) {
+        if (location == null || footPtsLat == null
+                || footPtsLat.length < 2) {
+            return;
+        }
+        double traveled = projectTraveled(location.getLatitude(),
+                location.getLongitude());
+        if (traveled > footTraveled) {
+            footTraveled = traveled;
+        }
+        updateFootCapsule();
+    }
+
+    // v322: project (lat,lng) onto the polyline and return the
+    // distance along the polyline to the closest point. Uses a
+    // local equirectangular projection (accurate enough for a
+    // walking route) and clamps each segment projection to the
+    // segment. Returns -1 when there is no polyline.
+    private double projectTraveled(double lat, double lng) {
+        if (footPtsLat == null || footPtsLat.length < 2) {
+            return -1;
+        }
+        double latRad = Math.toRadians(lat);
+        double cosLat = Math.cos(latRad);
+        double bestDist = Double.MAX_VALUE;
+        double bestTraveled = 0;
+        double cum = 0;
+        for (int i = 0; i < footPtsLat.length - 1; i++) {
+            double ax = (footPtsLng[i] - lng) * cosLat;
+            double ay = footPtsLat[i] - lat;
+            double bx = (footPtsLng[i + 1] - lng) * cosLat;
+            double by = footPtsLat[i + 1] - lat;
+            double dx = bx - ax;
+            double dy = by - ay;
+            double segLen2 = dx * dx + dy * dy;
+            double t = 0;
+            if (segLen2 > 0) {
+                t = -(ax * dx + ay * dy) / segLen2;
+                if (t < 0) {
+                    t = 0;
+                } else if (t > 1) {
+                    t = 1;
+                }
+            }
+            double px = ax + t * dx;
+            double py = ay + t * dy;
+            double dDeg = Math.sqrt(px * px + py * py);
+            double dMeters = dDeg * 111320.0;
+            if (dMeters < bestDist) {
+                bestDist = dMeters;
+                bestTraveled = cum + t * footSegLen[i];
+            }
+            cum += footSegLen[i];
+        }
+        return bestTraveled;
+    }
+
+    // v322: recompute the walk capsule from footTraveled. Line 1
+    // is the next turn + distance ("左转 50米" / "直行 120米"),
+    // line 2 is remaining distance + time ("剩1.9公里 · 32分钟").
+    // Only pops when the text changed, so a dismissed capsule
+    // does not re-pop on every fix.
+    private void updateFootCapsule() {
+        if (footPtsLat == null || footPtsLat.length < 2) {
+            return;
+        }
+        double remain = footTotalLen - footTraveled;
+        if (remain < 0) {
+            remain = 0;
+        }
+        String turnText = nextTurnText();
+        String remainText = formatRemain(remain);
+        String title;
+        String text;
+        if (remain <= 5) {
+            title = "即将到达";
+            text = remainText;
+        } else {
+            title = turnText;
+            text = remainText;
+        }
+        String shown = title + "|" + text;
+        if (shown.equals(footLastShownText)) {
+            return;
+        }
+        footLastShownText = shown;
+        final NotifData data = new NotifData("navi:footnavi",
+                "com.autonavi.minimap", title, text,
+                System.currentTimeMillis(), null, null);
+        data.isLive = true;
+        data.isNavi = true;
+        onNotification(data);
+    }
+
+    // v322: next turn from the polyline. Starting at the segment
+    // containing the projected position, find the first segment
+    // whose bearing differs from the current bearing by more than
+    // 30 degrees; that is the next turn. Direction from the sign
+    // of the bearing change (clockwise = right). Returns
+    // "直行 X米" when no turn is found within the route.
+    private String nextTurnText() {
+        if (footPtsLat == null || footPtsLat.length < 2) {
+            return "正在导航";
+        }
+        int segIdx = segmentAtTraveled(footTraveled);
+        if (segIdx < 0 || segIdx >= footPtsLat.length - 1) {
+            return "正在导航";
+        }
+        double curBearing = bearing(footPtsLat[segIdx],
+                footPtsLng[segIdx], footPtsLat[segIdx + 1],
+                footPtsLng[segIdx + 1]);
+        double distToTurn = footSegLen[segIdx]
+                - (footTraveled - cumLenTo(segIdx));
+        for (int i = segIdx + 1; i < footPtsLat.length - 1; i++) {
+            double b = bearing(footPtsLat[i], footPtsLng[i],
+                    footPtsLat[i + 1], footPtsLng[i + 1]);
+            double diff = normAngle(b - curBearing);
+            if (diff > 30) {
+                return "右转 " + formatDist(distToTurn);
+            }
+            if (diff < -30) {
+                return "左转 " + formatDist(distToTurn);
+            }
+            distToTurn += footSegLen[i];
+            curBearing = b;
+        }
+        return "直行 " + formatDist(distToTurn);
+    }
+
+    private int segmentAtTraveled(double traveled) {
+        double cum = 0;
+        for (int i = 0; i < footSegLen.length; i++) {
+            if (traveled <= cum + footSegLen[i]) {
+                return i;
+            }
+            cum += footSegLen[i];
+        }
+        return footSegLen.length - 1;
+    }
+
+    private double cumLenTo(int segIdx) {
+        double cum = 0;
+        for (int i = 0; i < segIdx && i < footSegLen.length; i++) {
+            cum += footSegLen[i];
+        }
+        return cum;
+    }
+
+    private static double bearing(double lat1, double lng1,
+            double lat2, double lng2) {
+        double dLng = Math.toRadians(lng2 - lng1);
+        double la1 = Math.toRadians(lat1);
+        double la2 = Math.toRadians(lat2);
+        double y = Math.sin(dLng) * Math.cos(la2);
+        double x = Math.cos(la1) * Math.sin(la2)
+                - Math.sin(la1) * Math.cos(la2) * Math.cos(dLng);
+        double brg = Math.toDegrees(Math.atan2(y, x));
+        return (brg + 360) % 360;
+    }
+
+    private static double normAngle(double a) {
+        a = (a + 540) % 360 - 180;
+        return a;
+    }
+
+    private String formatRemain(double remainMeters) {
+        String dist = formatDist(remainMeters);
+        int remainSec = -1;
+        if (footTotalTime > 0 && footTotalLen > 0) {
+            remainSec = (int) Math.round(footTotalTime
+                    * (remainMeters / footTotalLen));
+        }
+        if (remainSec >= 0) {
+            int min = (remainSec + 59) / 60;
+            return "剩" + dist + " · " + min + "分钟";
+        }
+        return "剩" + dist;
+    }
+
+    private static String formatDist(double meters) {
+        if (meters >= 1000) {
+            double km = meters / 1000.0;
+            return String.format(java.util.Locale.ROOT, "%.1f公里", km);
+        }
+        return ((int) Math.round(meters)) + "米";
+    }
+
+    // v322: foot navigation ended — drop the walk capsule and stop
+    // tracking the route.
+    public void onFootEnd() {
+        footPtsLat = null;
+        footPtsLng = null;
+        footSegLen = null;
+        footTotalLen = 0;
+        footTotalTime = 0;
+        footTraveled = 0;
+        footLastShownText = null;
+        stopFootLocation();
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey("navi:footnavi");
+                rebuildDock();
+            }
+        });
+    }
+
     public void onNotificationRemoved(final String key) {
         if (key == null || app == null) {
             return;
@@ -1137,6 +1934,18 @@ public class BubbleWindow {
         // 2026-11-21 "识别了就放大钉住") — verification and
         // pickup alike — so it stays out instead of docking.
         if (data.code != null && data.key != null
+                && !group.pinnedAtByKey.containsKey(data.key)) {
+            boolean firstPin = group.pinnedAtByKey.isEmpty();
+            group.pinnedAtByKey.put(data.key, System.currentTimeMillis());
+            group.sortItems();
+            if (firstPin) {
+                group.pinned = true;
+                group.pinnedAt = System.currentTimeMillis();
+            }
+        }
+        // v311: a nav capsule auto-pins like a download/code so it
+        // stays out showing live turn info while navigating.
+        if ((data.isNavi || data.isBus) && data.key != null
                 && !group.pinnedAtByKey.containsKey(data.key)) {
             boolean firstPin = group.pinnedAtByKey.isEmpty();
             group.pinnedAtByKey.put(data.key, System.currentTimeMillis());
@@ -1770,11 +2579,34 @@ public class BubbleWindow {
                                     CapsuleView cap =
                                             (CapsuleView) cv;
                                     NotifData dd = cap.getData();
+                                    // v319: lenient completion guard.
+                                    // The old exact-equals check
+                                    // ("下载完成"/"安装完成") failed
+                                    // whenever the hook re-posted the
+                                    // completion notification with a
+                                    // different text (filename, "已下载"
+                                    // ...) after completed=true arrived
+                                    // but before this 3s check ran, so
+                                    // the capsule got stuck. Accept any
+                                    // completion-like text, or a full
+                                    // bar (pct 100 was set by the
+                                    // completed broadcast). A new
+                                    // download reusing the key has
+                                    // pct < 100 and non-completion
+                                    // text, so it stays safe.
+                                    String dt = dd != null ? dd.text : null;
+                                    boolean doneText = dt != null
+                                            && (dt.contains("下载完成")
+                                                    || dt.contains("安装完成")
+                                                    || dt.contains("已完成")
+                                                    || dt.contains("下载完毕")
+                                                    || dt.contains("已下载")
+                                                    || dt.contains("下载成功"));
                                     if (dd != null
                                             && ckey.equals(dd.key)
-                                            && ("下载完成".equals(dd.text)
-                                                    || "安装完成"
-                                                            .equals(dd.text))) {
+                                            && dd.isDownload
+                                            && (doneText
+                                                    || dd.downloadPct >= 100)) {
                                         onNotificationRemoved(ckey);
                                         break;
                                     }
@@ -3111,8 +3943,19 @@ public class BubbleWindow {
             long durationMs, boolean playing, boolean favorite,
             boolean hasFavorite) {
         try {
-            if (cardKey == null || key == null
-                    || !cardKey.equals(key)) {
+            // v332: the old cardKey gate ("only update while a card
+            // is open") starved the COLLAPSED music capsule — with
+            // no card open cardKey is null, so updateMusicProgress
+            // was never called and the capsule's volume bars sat at
+            // minimum ("....", user 2026-11-21 "音量条没动" three
+            // times, across the Handler and the ValueAnimator
+            // rewrites — the animator was never the problem). The
+            // capsule's motion (notes F, volume bars, breathing C)
+            // lives on the collapsed capsule and needs the 1s tick
+            // whether a card is open or not. Find the music capsule
+            // by key and update it either way; the card UI (seek /
+            // time) is harmless when the card is closed.
+            if (key == null) {
                 return;
             }
             if (dock == null) {

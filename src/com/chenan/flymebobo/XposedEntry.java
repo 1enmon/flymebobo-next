@@ -61,6 +61,13 @@ public class XposedEntry extends XposedModule {
             // shows (its two answer buttons), and the system's
             // earpiece route overrides our setSpeakerphoneOn.
             tryInitInCallUiNow();
+        } else if ("com.autonavi.minimap".equals(pkg)) {
+            // v311: Amap live navigation (foot/ride only, user
+            // "不写驾车"). The notification never carries turn
+            // data, so hook Amap's own Ajx bridge
+            // (ModuleRoute.notifyNaviInfo) for turn + distance.
+            log(4, TAG, "flymebobo 2.0 loaded in Amap");
+            hookAppOnCreateAmap();
         }
     }
 
@@ -118,6 +125,63 @@ public class XposedEntry extends XposedModule {
             Object appObj = m.invoke(null);
             if (appObj instanceof Application) {
                 tryInitInCallUi((Application) appObj);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static volatile boolean amapInitialized = false;
+
+    private void hookAppOnCreateAmap() {
+        try {
+            Method onCreate = Application.class.getMethod("onCreate");
+            hook(onCreate).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        Object thisObj = chain.getThisObject();
+                        if (thisObj instanceof Application) {
+                            tryInitAmap((Application) thisObj);
+                        }
+                    } catch (Throwable t) {
+                        log(6, TAG, "flymebobo amap init error", t);
+                    }
+                    return result;
+                }
+            });
+        } catch (Throwable t) {
+            log(6, TAG, "flymebobo failed to hook Application.onCreate (amap)", t);
+        }
+        // Amap may already be running when the module loads.
+        tryInitAmapNow();
+    }
+
+    private void tryInitAmap(Application app) {
+        if (amapInitialized) {
+            return;
+        }
+        amapInitialized = true;
+        try {
+            new AmapNaviHook(this, app).install();
+        } catch (Throwable t) {
+            log(6, TAG, "AmapNaviHook install failed", t);
+        }
+        // v320: Amap bus live navigation (no voice announcements).
+        try {
+            new BusNaviHook(this, app).install();
+        } catch (Throwable t) {
+            log(6, TAG, "BusNaviHook install failed", t);
+        }
+    }
+
+    private void tryInitAmapNow() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Method m = at.getMethod("currentApplication");
+            Object appObj = m.invoke(null);
+            if (appObj instanceof Application) {
+                tryInitAmap((Application) appObj);
             }
         } catch (Throwable ignored) {
         }
@@ -188,6 +252,22 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_CALL_RESULT);
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
+        filter.addAction(NotificationService.ACTION_NAVI_INFO);
+        filter.addAction(NotificationService.ACTION_NAVI_END);
+        filter.addAction(NotificationService.ACTION_NAVI_HOOK_STATUS);
+        filter.addAction(NotificationService.ACTION_NAVI_REMAIN);
+        // v320: Amap bus live navigation.
+        filter.addAction(NotificationService.ACTION_BUS_INFO);
+        filter.addAction(NotificationService.ACTION_BUS_ROUTE);
+        filter.addAction(NotificationService.ACTION_BUS_HOOK_STATUS);
+        // v322: Amap foot navigation route (compute-it-yourself).
+        filter.addAction(NotificationService.ACTION_FOOT_ROUTE);
+        filter.addAction(NotificationService.ACTION_FOOT_DIAG);
+        filter.addAction(NotificationService.ACTION_FOOT_HOOK_STATUS);
+        // v326: route details JSON diagnostic.
+        filter.addAction(NotificationService.ACTION_ROUTE_DIAG);
+        filter.addAction(
+                NotificationService.ACTION_ROUTE_HOOK_STATUS);
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -317,6 +397,177 @@ public class XposedEntry extends XposedModule {
                 // key, popCapsule's dedup (same key = update, never
                 // a second pop) absorbs the duplicate, so restoring
                 // the broadcast cannot double-pop.
+                // v311: Amap live navigation (foot/ride) — the
+                // hook in the Amap process forwards turn + distance.
+                if (NotificationService.ACTION_NAVI_INFO.equals(
+                        intent.getAction())) {
+                    String bizType = intent.getStringExtra("bizType");
+                    String nTitle = intent.getStringExtra("title");
+                    String nContent = intent.getStringExtra("content");
+                    int nStatus = intent.getIntExtra("status", 0);
+                    int nIcon = intent.getIntExtra("icon", 0);
+                    BubbleWindow.getInstance().onNaviInfo(
+                            bizType, nTitle, nContent, nStatus, nIcon);
+                    return;
+                }
+                // v312: Amap hook install status — FileLog it so
+                // the user can see from BubbleNotify.log whether the
+                // hook got into the Amap process at all.
+                if (NotificationService.ACTION_NAVI_HOOK_STATUS.equals(
+                        intent.getAction())) {
+                    String st = intent.getStringExtra("status");
+                    String err = intent.getStringExtra("error");
+                    try {
+                        FileLog.i("NaviHook status=" + st
+                                + (err != null ? " error=" + err : ""));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v318 (diagnostic): remaining nav data from the
+                // engine's PerfOptimization store — FileLog it so
+                // the user can see whether foot/ride populate
+                // remainDistance/remainTime and in what format.
+                if (NotificationService.ACTION_NAVI_REMAIN.equals(
+                        intent.getAction())) {
+                    String rd = intent.getStringExtra("remainDistance");
+                    String rt = intent.getStringExtra("remainTime");
+                    String d = intent.getStringExtra("distance");
+                    String ct = intent.getStringExtra("costTime");
+                    String src = intent.getStringExtra("src");
+                    try {
+                        FileLog.i("NaviRemain src=" + src
+                                + " remainDistance=" + rd
+                                + " remainTime=" + rt
+                                + " distance=" + d
+                                + " costTime=" + ct);
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v311: Amap navigation ended (its notification was
+                // removed) — drop the nav capsule for this type.
+                if (NotificationService.ACTION_NAVI_END.equals(
+                        intent.getAction())) {
+                    String bizType = intent.getStringExtra("bizType");
+                    BubbleWindow.getInstance().onNaviEnd(bizType);
+                    return;
+                }
+                // v320: Amap bus live navigation. BUS_INFO (mode A,
+                // real-time arrival) and BUS_ROUTE (mode B station
+                // list) come from BusNaviHook in the Amap process.
+                if (NotificationService.ACTION_BUS_INFO.equals(
+                        intent.getAction())) {
+                    BubbleWindow.getInstance().onBusInfo(
+                            intent.getStringExtra("line"),
+                            intent.getStringExtra("station"),
+                            intent.getStringExtra("stationLeft"),
+                            intent.getStringExtra("arrival"),
+                            intent.getStringExtra("busX"),
+                            intent.getStringExtra("busY"));
+                    return;
+                }
+                if (NotificationService.ACTION_BUS_ROUTE.equals(
+                        intent.getAction())) {
+                    BubbleWindow.getInstance().onBusRoute(
+                            intent.getStringExtra("busname"),
+                            intent.getStringExtra("direction"),
+                            intent.getStringExtra("startName"),
+                            intent.getStringExtra("endName"),
+                            intent.getStringExtra("passNames"),
+                            intent.getStringExtra("passCoords"));
+                    return;
+                }
+                if (NotificationService.ACTION_BUS_HOOK_STATUS.equals(
+                        intent.getAction())) {
+                    String st = intent.getStringExtra("status");
+                    String err = intent.getStringExtra("error");
+                    try {
+                        FileLog.i("BusHook status=" + st
+                                + (err != null ? " error=" + err : ""));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v322: Amap foot navigation route (compute-it-
+                // yourself) — store the polyline and start
+                // position tracking.
+                if (NotificationService.ACTION_FOOT_ROUTE.equals(
+                        intent.getAction())) {
+                    BubbleWindow.getInstance().onFootRoute(
+                            intent.getIntExtra("totalLength", -1),
+                            intent.getIntExtra("totalTime", -1),
+                            intent.getStringExtra("points"));
+                    return;
+                }
+                // v322 (diagnostic): foot route JSON structure —
+                // FileLog it so the user can report whether the JS
+                // route JSON carries a polyline at all.
+                if (NotificationService.ACTION_FOOT_DIAG.equals(
+                        intent.getAction())) {
+                    try {
+                        FileLog.i("FootDiag jsonKeys="
+                                + intent.getStringExtra("jsonKeys")
+                                + " hasPolyline="
+                                + intent.getBooleanExtra(
+                                        "hasPolyline", false)
+                                + " jsonLen="
+                                + intent.getIntExtra("jsonLen", -1));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v323: foot route hook install status.
+                // v325: detail now lists WHICH hooks installed
+                // (jumpFootNavi/startFootNaviPage/onPageCreated).
+                if (NotificationService.ACTION_FOOT_HOOK_STATUS.equals(
+                        intent.getAction())) {
+                    String st = intent.getStringExtra("status");
+                    String dt = intent.getStringExtra("detail");
+                    try {
+                        FileLog.i("FootHook status=" + st
+                                + (dt != null ? " detail=" + dt
+                                        : ""));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v326 (diagnostic): route details JSON structure
+                // — the JSON JS renders as route options + the
+                // "路线详情" step list. Log it so the user can
+                // report the top-level keys and whether a steps
+                // array exists.
+                if (NotificationService.ACTION_ROUTE_DIAG.equals(
+                        intent.getAction())) {
+                    try {
+                        FileLog.i("RouteDiag mode="
+                                + intent.getStringExtra("mode")
+                                + " action="
+                                + intent.getStringExtra("action")
+                                + " jsonKeys="
+                                + intent.getStringExtra("jsonKeys")
+                                + " hasSteps="
+                                + intent.getBooleanExtra(
+                                        "hasSteps", false)
+                                + " jsonLen="
+                                + intent.getIntExtra("jsonLen", -1));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v327: route jump hook install status.
+                if (NotificationService.ACTION_ROUTE_HOOK_STATUS
+                        .equals(intent.getAction())) {
+                    String st = intent.getStringExtra("status");
+                    String dt = intent.getStringExtra("detail");
+                    try {
+                        FileLog.i("RouteHook status=" + st
+                                + (dt != null ? " detail=" + dt
+                                        : ""));
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
                 String key = intent.getStringExtra("key");
                 boolean isMusic = intent.getBooleanExtra("isMusic", false);
                 // v194 (smart guard): v190 removed the v176 guard
@@ -370,9 +621,27 @@ public class XposedEntry extends XposedModule {
                     albumArt = intent.getParcelableExtra("album_art");
                 } catch (Throwable ignored) {
                 }
+                // v328: push-service delegation (same as the hook
+                // path) — when a push service posts on an app's
+                // behalf, the key's 2nd field is the real app
+                // package. Use it for display so the capsule shows
+                // the real app (BOSS直聘) instead of "推送服务".
+                // Guards above already ran on the original pkg.
+                String displayPkg = pkg;
+                if (key != null) {
+                    String[] parts = key.split("\\|");
+                    if (parts.length >= 2) {
+                        String keyPkg = parts[1];
+                        if (keyPkg != null && !keyPkg.isEmpty()
+                                && !keyPkg.equals(pkg)
+                                && isInstalledApp(keyPkg)) {
+                            displayPkg = keyPkg;
+                        }
+                    }
+                }
                 NotifData data = new NotifData(
-                        key, pkg, title, text, postTime, null, albumArt,
-                        isMusic, lyrics, isDownload);
+                        key, displayPkg, title, text, postTime, null,
+                        albumArt, isMusic, lyrics, isDownload);
                 // v239: download percent for the capsule bar.
                 try {
                     data.downloadPct = intent.getIntExtra(
@@ -415,5 +684,21 @@ public class XposedEntry extends XposedModule {
         // match what the user left them at (defaults are all on).
         FeatureFlags.load(app);
         log(4, TAG, "flymebobo bubble window ready");
+    }
+
+    /** v328: true when the package is installed (has an
+     * ApplicationInfo), used to validate the real app package
+     * parsed out of a push-delegated notification key. */
+    private static boolean isInstalledApp(String pkg) {
+        if (pkg == null || bubbleReceiverContext == null) {
+            return false;
+        }
+        try {
+            bubbleReceiverContext.getPackageManager()
+                    .getApplicationInfo(pkg, 0);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 }

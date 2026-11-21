@@ -283,6 +283,18 @@ public class CapsuleView extends FrameLayout {
     private TextView musicTotalTime;
     private boolean musicPlaying;
     private boolean musicFavorite;
+    /** v329: floating music notes overlay (user picked option F
+     * "音符粒子") — ♪ ♫ ♩ drift up out of the capsule while music
+     * plays. Only for music capsules; GONE otherwise. */
+    private NoteParticleView noteParticles;
+    /** v329: bouncing volume bars on the right end of the music
+     * capsule (user "右边加上跳动的音量条"). Only for music
+     * capsules; GONE otherwise. */
+    private VolumeBarView volumeBars;
+    /** v329: breathing pulse animators for the music title/artist
+     * (option C) — gentle alpha 0.8 ↔ 1.0 while playing. */
+    private android.animation.ObjectAnimator breatheTitle;
+    private android.animation.ObjectAnimator breatheText;
     /** Music control callback (command, seekMs): BubbleWindow sends
      * the ACTION_MUSIC_CONTROL broadcast to the module process. */
     public interface OnMusicControlListener {
@@ -371,6 +383,16 @@ public class CapsuleView extends FrameLayout {
         LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(
                 0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         pill.addView(texts, textsLp);
+
+        // v329: bouncing volume bars on the right end of the music
+        // capsule (user "右边加上跳动的音量条") — 4 bars, 20dp wide,
+        // 28dp tall, centred vertically. GONE unless music.
+        volumeBars = new VolumeBarView(context);
+        volumeBars.setVisibility(GONE);
+        LinearLayout.LayoutParams volLp =
+                new LinearLayout.LayoutParams(dp(20), dp(28));
+        volLp.leftMargin = dp(6);
+        pill.addView(volumeBars, volLp);
 
         titleView = new TextView(context);
         titleView.setSingleLine(true);
@@ -1081,11 +1103,29 @@ public class CapsuleView extends FrameLayout {
                 return swiping;
             }
         });
+        // v329: floating music notes overlay (option F) — added last
+        // so it draws above the pill content; transparent and not
+        // clickable, so it never intercepts the capsule's swipe/tap.
+        noteParticles = new NoteParticleView(context);
+        noteParticles.setVisibility(GONE);
+        addView(noteParticles, new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
     }
 
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        // v329: stop the music motion so nothing keeps ticking
+        // after the capsule is gone (the particle / volume views
+        // also stop themselves, but the breathing animators live
+        // here).
+        setMusicBreathing(false);
+        if (noteParticles != null) {
+            noteParticles.stop();
+        }
+        if (volumeBars != null) {
+            volumeBars.stop();
+        }
         // Never leave the window full-screen if the view is removed
         // mid-drag — a stuck full-screen overlay swallows the swipe-up
         // system gesture.
@@ -1274,6 +1314,37 @@ public class CapsuleView extends FrameLayout {
         }
         this.lyricsView.setText(
                 notifData.lyrics != null ? notifData.lyrics : "");
+        // v329: floating notes overlay only exists on music
+        // capsules; it starts/stops with the playing state in
+        // updateMusicProgress (1s tick). Paused or non-music =
+        // hidden and stopped.
+        if (noteParticles != null) {
+            if (notifData.isMusic) {
+                noteParticles.setVisibility(VISIBLE);
+            } else {
+                noteParticles.setVisibility(GONE);
+                noteParticles.stop();
+            }
+        }
+        // v329: volume bars only on music capsules, and never on a
+        // pinned (locked) one (v330, user "胶囊锁定后就不要显示这个
+        // 音量条了").
+        if (volumeBars != null) {
+            if (notifData.isMusic && !pinned) {
+                volumeBars.setVisibility(VISIBLE);
+                if (musicPlaying) {
+                    volumeBars.start();
+                }
+            } else {
+                volumeBars.setVisibility(GONE);
+                volumeBars.stop();
+            }
+        }
+        // v329: title entrance (option A) — slide + fade in when a
+        // music capsule pops with a new song.
+        if (notifData.isMusic) {
+            playMusicTitleEntrance();
+        }
         // v239: download bar from the first-pop percent.
         downloadBarPct = notifData.downloadPct;
         syncDownloadBar();
@@ -1728,6 +1799,21 @@ public class CapsuleView extends FrameLayout {
         } else {
             pinView.setVisibility(pinned ? VISIBLE : GONE);
         }
+        // v330: a pinned (locked) music capsule hides the volume
+        // bars (user 2026-11-21 "胶囊锁定后就不要显示这个音量条
+        // 了") — the pinned capsule shows the lyric, no bars.
+        // Unpinning brings them back (if still playing).
+        if (data != null && data.isMusic && volumeBars != null) {
+            if (pinned) {
+                volumeBars.setVisibility(GONE);
+                volumeBars.stop();
+            } else {
+                volumeBars.setVisibility(VISIBLE);
+                if (musicPlaying) {
+                    volumeBars.start();
+                }
+            }
+        }
         updateMusicDisplay();
     }
 
@@ -2076,6 +2162,31 @@ public class CapsuleView extends FrameLayout {
     public void updateMusicProgress(long positionMs, long durationMs,
             boolean playing) {
         musicPlaying = playing;
+        // v329: music capsule motion follows the playing state —
+        // notes (F) + volume bars + breathing (C) run only while
+        // playing; paused = everything rests, text back to full
+        // opacity. The 1s tick fires even when paused (with
+        // playing=false), so this is reliable.
+        if (data != null && data.isMusic) {
+            if (playing) {
+                if (noteParticles != null) {
+                    noteParticles.start();
+                }
+                // v330: no volume bars on a pinned capsule.
+                if (volumeBars != null && !pinned) {
+                    volumeBars.start();
+                }
+                setMusicBreathing(true);
+            } else {
+                if (noteParticles != null) {
+                    noteParticles.stop();
+                }
+                if (volumeBars != null) {
+                    volumeBars.stop();
+                }
+                setMusicBreathing(false);
+            }
+        }
         if (musicSeek != null) {
             if (durationMs > 0) {
                 musicSeek.setMax((int) durationMs);
@@ -2090,6 +2201,74 @@ public class CapsuleView extends FrameLayout {
             musicTotalTime.setText(formatMusicTime(durationMs));
         }
         updateMusicPlayIcon();
+    }
+
+    /** v329: title entrance (option A) — the music title/artist
+     * slide in from the left + fade in when a new song arrives.
+     * Animates the texts container (both lines together), 300ms.
+     * Safe to call repeatedly: it cancels any in-flight entrance. */
+    private void playMusicTitleEntrance() {
+        if (texts == null) {
+            return;
+        }
+        texts.animate().cancel();
+        texts.setAlpha(0f);
+        texts.setTranslationX(-dp(16));
+        texts.animate().alpha(1f).translationX(0f)
+                .setDuration(300)
+                .setInterpolator(
+                        new android.view.animation.DecelerateInterpolator())
+                .start();
+    }
+
+    /** v329: breathing pulse (option C) — the music title/artist
+     * gently breathe (alpha 0.8 ↔ 1.0, 2.6s) while playing.
+     * Stopping restores full opacity. */
+    private void setMusicBreathing(boolean on) {
+        if (on) {
+            if (breatheTitle == null && titleView != null) {
+                breatheTitle = android.animation.ObjectAnimator
+                        .ofFloat(titleView, "alpha", 0.8f, 1f);
+                breatheTitle.setDuration(1300);
+                breatheTitle.setRepeatMode(
+                        android.animation.ValueAnimator.REVERSE);
+                breatheTitle.setRepeatCount(
+                        android.animation.ValueAnimator.INFINITE);
+                breatheTitle.setInterpolator(
+                        new android.view.animation.AccelerateDecelerateInterpolator());
+            }
+            if (breatheText == null && textView != null) {
+                breatheText = android.animation.ObjectAnimator
+                        .ofFloat(textView, "alpha", 0.8f, 1f);
+                breatheText.setDuration(1300);
+                breatheText.setRepeatMode(
+                        android.animation.ValueAnimator.REVERSE);
+                breatheText.setRepeatCount(
+                        android.animation.ValueAnimator.INFINITE);
+                breatheText.setInterpolator(
+                        new android.view.animation.AccelerateDecelerateInterpolator());
+                breatheText.setStartDelay(300);
+            }
+            if (breatheTitle != null && !breatheTitle.isRunning()) {
+                breatheTitle.start();
+            }
+            if (breatheText != null && !breatheText.isRunning()) {
+                breatheText.start();
+            }
+        } else {
+            if (breatheTitle != null) {
+                breatheTitle.cancel();
+            }
+            if (breatheText != null) {
+                breatheText.cancel();
+            }
+            if (titleView != null) {
+                titleView.setAlpha(1f);
+            }
+            if (textView != null) {
+                textView.setAlpha(1f);
+            }
+        }
     }
 
     /** v171: live lyric line on the open music card. */
@@ -2247,6 +2426,11 @@ public class CapsuleView extends FrameLayout {
      * ("正在下载 45%"), and keep the stored data in sync so a rebuild
      * shows the latest percent instead of the stale one. */
     public void updateTitle(String title) {
+        // v329: a changed music title = a new song — replay the
+        // entrance (option A). Only when the title actually
+        // changed, so progress refreshes don't re-trigger it.
+        boolean musicTitleChanged = data != null && data.isMusic
+                && title != null && !title.equals(data.title);
         if (titleView != null) {
             titleView.setText(title != null ? title : "");
         }
@@ -2258,6 +2442,9 @@ public class CapsuleView extends FrameLayout {
         }
         if (data != null) {
             data.title = title;
+        }
+        if (musicTitleChanged) {
+            playMusicTitleEntrance();
         }
     }
 

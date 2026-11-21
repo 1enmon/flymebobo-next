@@ -225,6 +225,60 @@ public final class NotifCollectionHook {
                 }
             }
         }
+        // v313: Amap navigation starts (user 2026-11-21 "启动了之后就
+        // 应该弹出弹窗啊") — the Ajx engine does not push
+        // notifyNaviInfo on start (only on turn/distance changes,
+        // if at all), so a nav capsule must pop as soon as the
+        // navigation notification posts (99910002 foot / 99910003
+        // ride). The notification carries no turn data, so pop with
+        // the static status text; the first real NaviInfo push
+        // updates it in place (same key, isLive). The ongoing
+        // filter below would drop this notification, so intercept
+        // it here. requestNaviInfo is car-page only — no pull for
+        // foot/ride, pop-on-notification is the only start signal.
+        if ("com.autonavi.minimap".equals(pkg)) {
+            int nid = 0;
+            try {
+                nid = sbn.getId();
+            } catch (Throwable ignored) {
+            }
+            String naviBiz = null;
+            String naviTitle = null;
+            if (nid == 99910002) {
+                naviBiz = "footnavi";
+                naviTitle = "步行导航";
+            } else if (nid == 99910003) {
+                naviBiz = "ridenavi";
+                naviTitle = "骑行导航";
+            }
+            if (naviBiz != null) {
+                // v315: the turn instruction rides in android.title
+                // (e.g. "左转,随后四十米右转,进入三钢二路"), NOT in
+                // android.text (which is just "高德地图" after the
+                // first post). The title is only the generic label
+                // ("高德地图持续为您导航" / "高德地图") on the very
+                // first post — then fall back to the text.
+                String naviContent = getText(extras, "android.title");
+                if (naviContent == null || naviContent.isEmpty()
+                        || "高德地图持续为您导航".equals(naviContent)
+                        || "高德地图".equals(naviContent)) {
+                    naviContent = getText(extras, "android.text");
+                }
+                if (naviContent == null || naviContent.isEmpty()) {
+                    naviContent = "正在导航";
+                }
+                try {
+                    // v317: placeholder status 1 (was 0) — the
+                    // notification-triggered pop is a live navigation,
+                    // not an idle state; the icon stays 0 because the
+                    // notification carries no turn-action code.
+                    BubbleWindow.getInstance().onNaviInfo(naviBiz,
+                            naviTitle, naviContent, 1, 0);
+                } catch (Throwable ignored) {
+                }
+                return;
+            }
+        }
         // v222: a live activity is ongoing by flags (the timer),
         // but it is not a background-service notification — it must
         // pop, so it is exempt from the ongoing filter.
@@ -511,6 +565,27 @@ public final class NotifCollectionHook {
                     + " type=" + liveType + " title=" + title
                     + " text=" + text);
         }
+        // v328: push-service delegation — when a notification is
+        // posted by a push service (e.g. com.meizu.cloud) on behalf
+        // of another app, the key's 2nd field is the real app
+        // package (e.g. com.hpbr.bosszhipin for BOSS). Use it for
+        // display so the capsule shows the real app (BOSS直聘)
+        // instead of "推送服务". Live activities keep their
+        // delegated pkg (set above). Only when the key package
+        // differs from the posting pkg and is an installed app
+        // (appLabel resolves) — normal notifications have
+        // keyPkg == pkg, so nothing changes for them.
+        if (!isLive && displayPkg.equals(pkg)) {
+            String keyPkg = keyPackage(sbn.getKey());
+            if (keyPkg != null && !keyPkg.isEmpty()
+                    && !keyPkg.equals(pkg)
+                    && appLabel(keyPkg) != null) {
+                displayPkg = keyPkg;
+                log("HookPushDelegated pkg=" + pkg
+                        + " displayPkg=" + displayPkg
+                        + " key=" + sbn.getKey());
+            }
+        }
         Bitmap largeIcon = null;
         // v218: art status for the HookMusic log, so the Qishui /
         // Flyme Icon path can be diagnosed from the log instead of
@@ -704,6 +779,19 @@ public final class NotifCollectionHook {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    /** v328: the owning app package from a notification key.
+     * Key format: "0|com.hpbr.bosszhipin|-1439767870|null|10105"
+     * — the 2nd field is the app the notification is for, which
+     * differs from the posting package when a push service posts
+     * on the app's behalf. Null when the key has no such field. */
+    private static String keyPackage(String key) {
+        if (key == null) {
+            return null;
+        }
+        String[] parts = key.split("\\|");
+        return parts.length >= 2 ? parts[1] : null;
     }
 
     // --- MediaSession metadata (v182, Flyme Island style) ---

@@ -77,6 +77,86 @@ public class NotificationService extends NotificationListenerService {
      * "key" (notif/music/dl/code/live), "enabled" (boolean). */
     public static final String ACTION_FEATURE_TOGGLE =
             "com.chenan.flymebobo.FEATURE_TOGGLE";
+    /** v311: Amap live navigation (foot/ride) — Amap process ->
+     * SystemUI, turn + distance from ModuleRoute.notifyNaviInfo.
+     * Extras: "bizType" (footnavi/ridenavi), "title", "content",
+     * "status", "icon". */
+    public static final String ACTION_NAVI_INFO =
+            "com.chenan.flymebobo.NAVI_INFO";
+    /** v311: Amap navigation ended — service -> SystemUI, drop
+     * the nav capsule. Extra: "bizType". */
+    public static final String ACTION_NAVI_END =
+            "com.chenan.flymebobo.NAVI_END";
+    /** v312: Amap hook install status — Amap process -> SystemUI,
+     * so the result lands in BubbleNotify.log (the Amap process
+     * cannot write the module's FileLog itself). Extras:
+     * "status" (installed/failed), "error" (failure only). */
+    public static final String ACTION_NAVI_HOOK_STATUS =
+            "com.chenan.flymebobo.NAVI_HOOK_STATUS";
+    /** v318 (diagnostic): remaining nav data — Amap process ->
+     * SystemUI. Extras: "remainDistance", "remainTime",
+     * "distance", "costTime" (all strings, may be null), and
+     * "src" (notifyNaviInfo / onNotifyChange-foot / -ride). */
+    public static final String ACTION_NAVI_REMAIN =
+            "com.chenan.flymebobo.NAVI_REMAIN";
+    /** v320: Amap bus live navigation — Amap process -> SystemUI.
+     * ACTION_BUS_INFO (real-time arrival, mode A): extras "line",
+     * "station", "stationLeft", "arrival", "busX", "busY" (all
+     * strings). ACTION_BUS_ROUTE (station list, mode B): extras
+     * "busname", "direction", "startName", "endName", "passNames"
+     * (space-separated intermediate stations), "passCoords"
+     * (comma-separated lng,lat pairs). ACTION_BUS_HOOK_STATUS:
+     * extras "status" (installed/failed), "error". */
+    public static final String ACTION_BUS_INFO =
+            "com.chenan.flymebobo.BUS_INFO";
+    public static final String ACTION_BUS_ROUTE =
+            "com.chenan.flymebobo.BUS_ROUTE";
+    public static final String ACTION_BUS_HOOK_STATUS =
+            "com.chenan.flymebobo.BUS_HOOK_STATUS";
+    /** v322: Amap foot navigation "compute it yourself" — Amap
+     * process -> SystemUI. The foot JS never pushes notifyNaviInfo
+     * and the foot notification never updates, so the route
+     * (polyline + total length/time) is captured at nav start and
+     * the capsule is computed from the live position projected
+     * onto the polyline. Extras: "totalLength" (int, meters),
+     * "totalTime" (int, seconds), "points" (String, compact
+     * "lat,lng;lat,lng;..." polyline). */
+    public static final String ACTION_FOOT_ROUTE =
+            "com.chenan.flymebobo.FOOT_ROUTE";
+    /** v322 (diagnostic): foot route JSON structure — Amap process
+     * -> SystemUI. The Java OnFootNaviPath is a legacy empty shell
+     * (mAllPoints never populated), so the only hope is the route
+     * JSON JS passes to ModuleFoot.jumpFootNavi(String). Extras:
+     * "jsonKeys" (top-level keys), "hasPolyline" (boolean),
+     * "jsonLen" (int). FileLogged so the user can report whether
+     * the JSON carries a polyline at all. */
+    public static final String ACTION_FOOT_DIAG =
+            "com.chenan.flymebobo.FOOT_DIAG";
+    /** v323: foot route hook install status — Amap process ->
+     * SystemUI. Extras: "status" (installed/failed), "error".
+     * The FootDiag never appeared even after a fresh nav start,
+     * so the hook itself may have failed to install (its failure
+     * only went to logcat). */
+    public static final String ACTION_FOOT_HOOK_STATUS =
+            "com.chenan.flymebobo.FOOT_HOOK_STATUS";
+    /** v326: route details JSON diagnostic — Amap process ->
+     * SystemUI. Extras: "mode" (foot/ride), "action" (the jump
+     * str, e.g. footPreview/footNavi/ridePreview/rideNavi, or
+     * "ajxMessage" for handleAjxMessage), "jsonKeys" (top-level
+     * keys), "hasSteps" (a steps-like array exists),
+     * "jsonLen". The jump(String, String) hook: str2 is the
+     * complete route JSON that JS renders as the route options
+     * + "路线详情" step list. */
+    public static final String ACTION_ROUTE_DIAG =
+            "com.chenan.flymebobo.ROUTE_DIAG";
+    /** v327: route jump hook install status — Amap process ->
+     * SystemUI. Extras: "status" (installed/failed), "detail"
+     * (which of jumpFoot/jumpRide/ajxFoot/ajxRide installed).
+     * v326 had no status for the jump hook, so a missing
+     * RouteDiag could not tell a failed install from a
+     * never-called jump. */
+    public static final String ACTION_ROUTE_HOOK_STATUS =
+            "com.chenan.flymebobo.ROUTE_HOOK_STATUS";
 
     /** Full 1.x notification dedup + recognition (user 2026-11-19
      * "直接套用版本1的全部通知去重，识别"), ported to 2.0:
@@ -922,7 +1002,7 @@ public class NotificationService extends NotificationListenerService {
     // it is really gone (finished/cancelled), not a re-post
     // gap — then the capsule is removed.
     private int downloadGoneTicks = 0;
-    private static final long DOWNLOAD_TICK_MS = 1000;
+    private static final long DOWNLOAD_TICK_MS = 500;
     /** v171 (1.x fixed150, QQ Music Flyme): the Flyme edition
      * re-posts on every lyric line but carries no MediaSession
      * token and no TRANSPORT category, so it was never recognised
@@ -2481,11 +2561,21 @@ public class NotificationService extends NotificationListenerService {
         return (title != null
                 && (title.contains("下载完成")
                         || title.contains("安装完成")
-                        || title.contains("已完成")))
+                        || title.contains("已完成")
+                        || title.contains("下载完毕")
+                        || title.contains("已下载")
+                        || title.contains("下载成功")
+                        || title.toLowerCase(java.util.Locale.ROOT)
+                                .contains("download complete")))
                 || (text != null
                         && (text.contains("下载完成")
                                 || text.contains("安装完成")
-                                || text.contains("已完成")));
+                                || text.contains("已完成")
+                                || text.contains("下载完毕")
+                                || text.contains("已下载")
+                                || text.contains("下载成功")
+                                || text.toLowerCase(java.util.Locale.ROOT)
+                                        .contains("download complete")));
     }
 
     /** v242: tell SystemUI to drop the download capsule. */
@@ -3892,6 +3982,21 @@ public class NotificationService extends NotificationListenerService {
                     lastDownloadSpeed = -1;
                     lastDownloadEta = -1;
                     startDownloadTick();
+                } else if (downloadPct < 0
+                        && hasDownloadSignal(sbn.getPackageName(),
+                                n.getChannelId(), title, text)
+                        && isDownloadComplete(title, text)) {
+                    // v319: small file that finished before any
+                    // progress-bearing post was seen — the hook may
+                    // already have popped its capsule, but the tick
+                    // never started (isDownloadType needs pct >= 0),
+                    // so nothing would ever remove it. Track it so
+                    // the tick's completed/gone path drops it.
+                    downloadKey = sbn.getKey();
+                    lastDownloadPct = 100;
+                    lastDownloadSpeed = -1;
+                    lastDownloadEta = -1;
+                    startDownloadTick();
                 }
             }
             String lyrics = null;
@@ -4407,8 +4512,39 @@ public class NotificationService extends NotificationListenerService {
     @Override
     public void onNotificationRemoved(StatusBarNotification sbn) {
         try {
+            // v311: Amap navigation ended — its nav notification
+            // (foot 99910002 / ride 99910003) was removed. Tell
+            // SystemUI to drop the nav capsule for this type.
+            if (sbn != null
+                    && "com.autonavi.minimap".equals(sbn.getPackageName())) {
+                String bizType = null;
+                if (sbn.getId() == 99910002) {
+                    bizType = "footnavi";
+                } else if (sbn.getId() == 99910003) {
+                    bizType = "ridenavi";
+                }
+                if (bizType != null) {
+                    try {
+                        android.content.Intent intent =
+                                new android.content.Intent(ACTION_NAVI_END);
+                        intent.putExtra("bizType", bizType);
+                        sendBroadcast(intent);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
             if (sbn != null && downloadKey != null
                     && downloadKey.equals(sbn.getKey())) {
+                // v321: Coolapk removes its download notification
+                // the instant the download finishes (never posts a
+                // "下载完成" state) — the tick's gone path never got
+                // to run because this stopped the tick first, so
+                // the capsule was left stuck at the last progress.
+                // Tell SystemUI to drop the capsule before stopping
+                // the tick. (A download that completed via the
+                // "下载完成" update already cleared downloadKey, so
+                // this only fires for a download still in progress.)
+                sendDownloadRemove(downloadKey);
                 stopDownloadTick();
                 downloadKey = null;
             }
