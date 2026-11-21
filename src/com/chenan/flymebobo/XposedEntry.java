@@ -68,6 +68,68 @@ public class XposedEntry extends XposedModule {
             // (ModuleRoute.notifyNaviInfo) for turn + distance.
             log(4, TAG, "flymebobo 2.0 loaded in Amap");
             hookAppOnCreateAmap();
+        } else if ("com.meizu.media.music".equals(pkg)) {
+            // v334: QQ音乐 Flyme 版免费听（自动补时长到 4 小时）。
+            // 开关在 APP 里，只有一个，叫“QQ音乐flyme版免费听”。
+            log(4, TAG, "flymebobo 2.0 loaded in QQ Music Flyme");
+            qqFreeClassLoader = param.getDefaultClassLoader();
+            hookAppOnCreateQQFree();
+        }
+    }
+
+    // v334: QQ音乐 Flyme 版免费听。跟 Amap 一个套路：hook
+    // Application.onCreate + 立即从当前 Application 初始化（进程
+    // 可能已经跑起来了，onCreate 早过了）。
+    private static volatile boolean qqFreeInitialized = false;
+    // v337: standalone qqfreemode 用 param 的 classloader；app.getClassLoader()
+    // 在某些进程里拿到的不是 QQ 音乐的 loader，这里直接用 param 的。
+    private static ClassLoader qqFreeClassLoader;
+
+    private void hookAppOnCreateQQFree() {
+        try {
+            Method onCreate = Application.class.getMethod("onCreate");
+            hook(onCreate).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        Object thisObj = chain.getThisObject();
+                        if (thisObj instanceof Application) {
+                            tryInitQQFree((Application) thisObj);
+                        }
+                    } catch (Throwable t) {
+                        log(6, TAG, "flymebobo qqfree init error", t);
+                    }
+                    return result;
+                }
+            });
+        } catch (Throwable t) {
+            log(6, TAG, "flymebobo failed to hook Application.onCreate (qqfree)", t);
+        }
+        tryInitQQFreeNow();
+    }
+
+    private void tryInitQQFree(Application app) {
+        if (qqFreeInitialized) {
+            return;
+        }
+        qqFreeInitialized = true;
+        try {
+            new QQFreeMode(this, app, qqFreeClassLoader).install();
+        } catch (Throwable t) {
+            log(6, TAG, "QQFreeMode install failed", t);
+        }
+    }
+
+    private void tryInitQQFreeNow() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Method m = at.getMethod("currentApplication");
+            Object appObj = m.invoke(null);
+            if (appObj instanceof Application) {
+                tryInitQQFree((Application) appObj);
+            }
+        } catch (Throwable ignored) {
         }
     }
 

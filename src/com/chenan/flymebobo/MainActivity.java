@@ -24,6 +24,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.InputStream;
 
@@ -53,14 +54,32 @@ public class MainActivity extends Activity {
         final String body;
         final int color;
         final String icon;
+        // v336: def = 默认开/关；parent = 嵌进哪个顶层卡片（null = 自己就是顶层卡片）。
+        final boolean def;
+        final String parent;
+        // v346: noSwitch = 只展示、不设开关（一直开着，点一下展开介绍）。
+        final boolean noSwitch;
 
         Feature(String key, String title, String subtitle, String body, int color, String icon) {
+            this(key, title, subtitle, body, color, icon, true, null);
+        }
+
+        Feature(String key, String title, String subtitle, String body, int color, String icon,
+                boolean def, String parent) {
+            this(key, title, subtitle, body, color, icon, def, parent, false);
+        }
+
+        Feature(String key, String title, String subtitle, String body, int color, String icon,
+                boolean def, String parent, boolean noSwitch) {
             this.key = key;
             this.title = title;
             this.subtitle = subtitle;
             this.body = body;
             this.color = color;
             this.icon = icon;
+            this.def = def;
+            this.parent = parent;
+            this.noSwitch = noSwitch;
         }
     }
 
@@ -83,6 +102,9 @@ public class MainActivity extends Activity {
             new Feature("card", "展开卡片", "点胶囊展开卡片（不含音乐）",
                     "点一下胶囊，展开成卡片看全文。\n关掉后点胶囊不再展开卡片。\n音乐胶囊不受这个开关管，\n由“音乐卡片”开关单独控制。",
                     Color.rgb(20, 184, 166), "卡"),
+            new Feature("bigCard", "大卡片模式", "通知直接弹大卡片，不经过小胶囊",
+                    "通知一来直接以大卡片依次排列，\n不用先点小胶囊再展开。\n点空白处大卡片自动右滑消散成图标。\n音乐弹的是播放器卡片；\n来电还是胶囊（没有大卡片）。",
+                    Color.rgb(99, 102, 241), "大", false, null),
             new Feature("scroll", "胶囊滚动", "内容太长滚动显示",
                     "胶囊里的标题和正文太长时，\n会左右滚动显示完整内容。\n关掉后超长内容用 … 截断。",
                     Color.rgb(217, 70, 239), "滚"),
@@ -92,10 +114,27 @@ public class MainActivity extends Activity {
             new Feature("blankDissipate", "点击空白自动消散", "点空白处胶囊自动消散",
                     "点一下屏幕空白处，所有胶囊逐条向右消散。\n关掉后点空白处胶囊留在屏幕上，\n只能手动右滑消散或左滑收进扇子。",
                     Color.rgb(249, 115, 22), "散"),
+            // v336: 音乐卡片开关嵌进“音乐胶囊”卡片里，不再单独占一行。
+            // v345: QQ 免费听开关已去掉，永远打开。
+            // v346: 介绍留着、胶囊留着、不设开关——QQ 免费听只展示、不设开关。
             new Feature("musicCard", "音乐卡片", "点音乐胶囊展开播放器卡片",
                     "点一下音乐胶囊，展开成播放器卡片：\n专辑圆盘、歌词、进度条和播放控制。\n关掉后点音乐胶囊直接打开音乐 App，\n不再展开播放器卡片。",
-                    Color.rgb(219, 39, 119), "音"),
+                    Color.rgb(219, 39, 119), "音", true, "music"),
+            new Feature("qqFree", "QQ音乐flyme版免费听", "低于2小时自动补时长到4小时",
+                    "打开 QQ 音乐 Flyme 版，自动查剩余免费时长，\n低于 2 小时自动领奖励补到 4 小时。\n两次领取间隔不少于 4 小时。\n领满会弹提示；本来就 ≥2 小时也会提示。\n不支持主动领取，免费听一直开着。",
+                    Color.rgb(190, 18, 60), "免", true, "music", true),
     };
+
+    // v336: 顶层卡片（parent == null 的开关）。嵌套开关不单独占行，
+    // 渲染和功能引导都只走这个列表；开关记忆和 isOn 仍走全部 FEATURES。
+    private static final Feature[] TOP_FEATURES;
+    static {
+        java.util.ArrayList<Feature> tops = new java.util.ArrayList<>();
+        for (Feature f : FEATURES) {
+            if (f.parent == null) tops.add(f);
+        }
+        TOP_FEATURES = tops.toArray(new Feature[0]);
+    }
 
     private SharedPreferences prefs;
     private LinearLayout list;
@@ -106,24 +145,27 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        // v273: 功能默认全打开 — one-time reset: every feature
-        // switch is ON unless the user turns it off afterwards.
-        // (Older prefs could hold an OFF left over from testing,
-        // e.g. "card" was toggled off while testing v266, and a
-        // brand-new key would otherwise inherit a stale value.)
-        if (!prefs.getBoolean("defaults_v274_applied", false)) {
-            SharedPreferences.Editor e = prefs.edit();
-            for (int i = 0; i < FEATURES.length; i++) {
-                e.putBoolean(FEATURES[i].key, true);
+        // v345: QQ 免费听开关已去掉，永远打开，不再写它的默认值/同步状态。
+        // v335 开关记忆：只给还没有保存过的开关写各自的默认值，
+        // 已保存的开关一律不动——更新 App 不会改动当前开关状态。
+        java.util.ArrayList<Feature> missing = new java.util.ArrayList<>();
+        for (int i = 0; i < FEATURES.length; i++) {
+            if (!prefs.contains(FEATURES[i].key)) {
+                missing.add(FEATURES[i]);
             }
-            e.putBoolean("defaults_v274_applied", true);
-            e.apply();
-            // Tell SystemUI at once so the live flags match.
-            for (int i = 0; i < FEATURES.length; i++) {
+        }
+        if (!missing.isEmpty()) {
+            SharedPreferences.Editor e = prefs.edit();
+            for (Feature f : missing) {
+                e.putBoolean(f.key, f.def);
+            }
+            e.commit();
+            // 只把新补默认值的开关同步给 SystemUI。
+            for (Feature f : missing) {
                 Intent t = new Intent(
                         "com.chenan.flymebobo.FEATURE_TOGGLE");
-                t.putExtra("key", FEATURES[i].key);
-                t.putExtra("enabled", true);
+                t.putExtra("key", f.key);
+                t.putExtra("enabled", f.def);
                 sendBroadcast(t);
             }
         }
@@ -149,6 +191,29 @@ public class MainActivity extends Activity {
         gap1.setWidth(dp(8));
         statusRow.addView(gap1);
         statusRow.addView(statusPill("通知权限", isNotifEnabled()));
+        // v354: 右上角“重启系统界面”按钮（用户 2026-11-22）。
+        // 占位把按钮推到最右；点一下弹确认，确认后 root 杀掉
+        // SystemUI 进程，系统会自动把它拉起来（等于重启系统界面，
+        // 不用整机重启就能让模块新版生效）。
+        View spacer = new View(this);
+        LinearLayout.LayoutParams splp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        spacer.setLayoutParams(splp);
+        statusRow.addView(spacer);
+        TextView restartBtn = new TextView(this);
+        restartBtn.setText("↻ 重启系统界面");
+        restartBtn.setTextSize(12);
+        restartBtn.setTextColor(Color.rgb(22, 163, 74));
+        restartBtn.setGravity(Gravity.CENTER);
+        restartBtn.setPadding(dp(12), dp(7), dp(12), dp(7));
+        restartBtn.setBackground(rounded(Color.rgb(220, 252, 231), dp(999)));
+        restartBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                restartSystemUI();
+            }
+        });
+        statusRow.addView(restartBtn);
 
         // ---- Header capsule ----
         LinearLayout header = new LinearLayout(this);
@@ -179,7 +244,7 @@ public class MainActivity extends Activity {
         hTexts.setLayoutParams(htlp);
 
         TextView hName = new TextView(this);
-        hName.setText("煤气泡 2.0");
+        hName.setText("煤气泡 2.2");
         hName.setTextSize(20);
         hName.setTextColor(Color.WHITE);
         hName.setTypeface(hName.getTypeface(), android.graphics.Typeface.BOLD);
@@ -212,8 +277,8 @@ public class MainActivity extends Activity {
         llp.topMargin = dp(8);
         list.setLayoutParams(llp);
         root.addView(list);
-        for (int i = 0; i < FEATURES.length; i++) {
-            list.addView(buildFeatureCard(FEATURES[i]));
+        for (int i = 0; i < TOP_FEATURES.length; i++) {
+            list.addView(buildFeatureCard(TOP_FEATURES[i]));
         }
 
         // ---- Footer links ----
@@ -484,12 +549,12 @@ public class MainActivity extends Activity {
     }
 
     private void showGuideStep(int idx) {
-        if (idx >= FEATURES.length) {
+        if (idx >= TOP_FEATURES.length) {
             dismissGuide();
             return;
         }
         guideIdx = idx;
-        final Feature f = FEATURES[idx];
+        final Feature f = TOP_FEATURES[idx];
         final View card = list.getChildAt(idx);
         if (card == null) {
             dismissGuide();
@@ -521,7 +586,7 @@ public class MainActivity extends Activity {
                 guideHl.setScaleY(0.96f);
                 guideHl.animate().scaleX(1f).scaleY(1f)
                         .setDuration(180).start();
-                guideStep.setText((guideIdx + 1) + " / " + FEATURES.length);
+                guideStep.setText((guideIdx + 1) + " / " + TOP_FEATURES.length);
                 guideTip.setText(f.title + " — " + f.subtitle);
             }
         }, 320);
@@ -633,15 +698,112 @@ public class MainActivity extends Activity {
         body.setVisibility(View.GONE);
         card.addView(body);
 
+        // v336: 嵌套子开关（音乐胶囊里放音乐卡片 + QQ免费听）。
+        // 点开卡片后和说明一起显示在卡片里面。
+        final LinearLayout subBox = new LinearLayout(this);
+        subBox.setOrientation(LinearLayout.VERTICAL);
+        subBox.setVisibility(View.GONE);
+        for (Feature s : FEATURES) {
+            if (f.key.equals(s.parent)) {
+                subBox.addView(buildSubSwitch(s));
+            }
+        }
+        if (subBox.getChildCount() > 0) {
+            subBox.setPadding(0, 0, 0, dp(12));
+            card.addView(subBox);
+        }
+
         final boolean[] expanded = new boolean[]{false};
         head.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 expanded[0] = !expanded[0];
                 body.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+                subBox.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
             }
         });
         return card;
+    }
+
+    /** 卡片里嵌套的一行子开关（小图标 + 标题/副标题 + 开关）。
+     * v346: noSwitch 的行不设开关（一直开着），点一下展开/收起介绍。 */
+    private View buildSubSwitch(final Feature sub) {
+        final LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.topMargin = dp(8);
+        wlp.leftMargin = dp(12);
+        wlp.rightMargin = dp(12);
+        wrap.setLayoutParams(wlp);
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        if (!sub.noSwitch && !isOn(sub.key)) row.setAlpha(0.45f);
+
+        TextView icon = new TextView(this);
+        icon.setText(sub.icon);
+        icon.setTextSize(13);
+        icon.setTextColor(sub.color);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(30), dp(30));
+        icon.setLayoutParams(ilp);
+        row.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+
+        TextView title = new TextView(this);
+        title.setText(sub.title);
+        title.setTextSize(14);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        texts.addView(title);
+
+        TextView sub2 = new TextView(this);
+        sub2.setText(sub.subtitle);
+        sub2.setTextSize(11);
+        sub2.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub2);
+        row.addView(texts);
+
+        if (sub.noSwitch) {
+            // v346: 不设开关。点行展开/收起介绍（body）。
+            final TextView intro = new TextView(this);
+            intro.setText(sub.body);
+            intro.setTextSize(12);
+            intro.setTextColor(Color.argb(242, 255, 255, 255));
+            intro.setLineSpacing(0, 1.6f);
+            intro.setPadding(dp(12), dp(4), dp(12), dp(10));
+            intro.setVisibility(View.GONE);
+            wrap.addView(row);
+            wrap.addView(intro);
+            final boolean[] expanded = new boolean[]{false};
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    expanded[0] = !expanded[0];
+                    intro.setVisibility(expanded[0] ? View.VISIBLE : View.GONE);
+                }
+            });
+            return wrap;
+        }
+        final View sw = buildSwitch(sub, row);
+        LinearLayout.LayoutParams swlp = new LinearLayout.LayoutParams(dp(48), dp(28));
+        swlp.leftMargin = dp(8);
+        sw.setLayoutParams(swlp);
+        row.addView(sw);
+        wrap.addView(row);
+        return wrap;
     }
 
     private View buildSwitch(final Feature f, final LinearLayout card) {
@@ -660,7 +822,9 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 boolean now = !isOn(f.key);
-                prefs.edit().putBoolean(f.key, now).apply();
+                // v343: commit() 同步落盘——apply() 异步，拨完立刻杀进程会丢，
+                // 下次打开开关就回到旧值。
+                prefs.edit().putBoolean(f.key, now).commit();
                 // v259: tell SystemUI at once so the switch is
                 // real-time (no restart needed).
                 Intent i = new Intent(
@@ -682,12 +846,61 @@ public class MainActivity extends Activity {
     }
 
     private boolean isOn(String key) {
-        return prefs.getBoolean(key, true);
+        return prefs.getBoolean(key, defaultFor(key));
+    }
+
+    private boolean defaultFor(String key) {
+        for (Feature f : FEATURES) {
+            if (f.key.equals(key)) return f.def;
+        }
+        return true;
     }
 
     private int dp(int value) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value,
                 getResources().getDisplayMetrics());
+    }
+
+    // v354: 重启系统界面。弹确认，确认后 root 杀掉 SystemUI 进程，
+    // 系统会自动把它拉起来（状态栏/导航栏黑几秒后恢复），不用整机重启。
+    private void restartSystemUI() {
+        new AlertDialog.Builder(MainActivity.this)
+                .setTitle("重启系统界面")
+                .setMessage("状态栏和导航栏会黑几秒后恢复。确定重启吗？")
+                .setPositiveButton("重启", new android.content.DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        new Thread(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    Process p = Runtime.getRuntime().exec(
+                                            new String[]{"su", "-c",
+                                                    "pkill -f com.android.systemui"});
+                                    p.waitFor();
+                                    if (p.exitValue() != 0) {
+                                        Runtime.getRuntime().exec(
+                                                new String[]{"su", "-c",
+                                                        "killall com.android.systemui"});
+                                    }
+                                } catch (Throwable e) {
+                                    runOnUiThread(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            Toast.makeText(MainActivity.this,
+                                                    "重启失败：没有拿到 root 权限",
+                                                    Toast.LENGTH_SHORT).show();
+                                        }
+                                    });
+                                }
+                            }
+                        }).start();
+                        Toast.makeText(MainActivity.this, "正在重启系统界面…",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private GradientDrawable rounded(int color, int radius) {

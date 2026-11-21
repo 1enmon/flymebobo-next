@@ -30,6 +30,13 @@ public class FeatureFlags {
     public static volatile boolean miniwindow = true;
     public static volatile boolean blankDissipate = true;
     public static volatile boolean musicCard = true;
+    // v334: QQ音乐 Flyme 版免费听（自动补时长到 4 小时）。
+    // v345: 开关已去掉，永远打开。
+    public static volatile boolean qqFree = true;
+    // v357: 大卡片模式——通知直接弹卡片，不经过小胶囊。
+    // 默认关（保持原来的胶囊行为）；开着时 popCapsule 里直接
+    // 调 openCard。来电不走卡片（openCard 本来就 return）。
+    public static volatile boolean bigCard = false;
 
     public static void set(String key, boolean enabled) {
         if (key == null) {
@@ -55,7 +62,10 @@ public class FeatureFlags {
             blankDissipate = enabled;
         } else if ("musicCard".equals(key)) {
             musicCard = enabled;
+        } else if ("bigCard".equals(key)) {
+            bigCard = enabled;
         }
+        // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
 
     /** Read the APP's saved switches (best effort; on any failure
@@ -77,6 +87,9 @@ public class FeatureFlags {
             miniwindow = prefs.getBoolean("miniwindow", true);
             blankDissipate = prefs.getBoolean("blankDissipate", true);
             musicCard = prefs.getBoolean("musicCard", true);
+            // v345: qqFree 开关已去掉，永远打开，不读旧的 prefs 值。
+            qqFree = true;
+            bigCard = prefs.getBoolean("bigCard", false);
         } catch (Throwable ignored) {
             // Defaults (all on) stand.
         }

@@ -1,8 +1,8 @@
-# flymebobo 2.1
+# flymebobo 2.2
 
 LSPosed 模块，把通知变成贴在屏幕左边的悬浮气泡（胶囊）——音乐、下载、验证码 / 取件码、来电、实况都有。
 
-包名 `com.chenan.flymebobo`，versionName `2.1`。在 Flyme（MEIZU 20 Pro）上验证过；核心是通用 Android，但小窗打开用 Flyme WindowManagerExt，有些 hook 针对 SystemUI 内部。
+包名 `com.chenan.flymebobo`，versionName `2.2`。在 Flyme（MEIZU 20 Pro）上验证过；核心是通用 Android，但小窗打开用 Flyme WindowManagerExt，有些 hook 针对 SystemUI 内部。
 
 ## 功能
 
@@ -17,7 +17,17 @@ LSPosed 模块，把通知变成贴在屏幕左边的悬浮气泡（胶囊）—
 - 设置 App（MainActivity），功能开关实时生效，拨动后不用重启 SystemUI。
 - 设置 App 底部的链接：源码仓库、酷安主页、"请我喝咖啡"微信收款码。
 
-当前版本：v2.1（versionCode 333）。
+当前版本：v2.2（versionCode 369）。
+
+## v2.2 更新
+
+- 大卡片模式：普通通知放大成卡片依次排列，点它开 App；轻左滑钉住、重左滑只缩被滑的那一张进扇子；右滑消散带拖尾，点空白自动消散。
+- 左滑缩进改成压扁进左边缘，不再往上飞；大卡片左滑不再顶出屏幕卡住。
+- 拖尾：点空白自动消散每张卡也带拖尾；拖尾和卡片之间零重叠、没缝。
+- 大卡片模式里钉住后仍是一张大卡片，不缩成小胶囊。
+- 扇子图标：缩进扇子后小图标左半被窗口裁掉修好了。
+- 平板适配：胶囊 260dp、卡片 380dp，进度条改细，手势按胶囊宽等比，窗口防截断，两行字纵向显示修复；APP 右上角加了“重启系统界面”按钮。
+- APP 内标题改成 2.2。
 
 ## v2.1 更新（自 v310）
 

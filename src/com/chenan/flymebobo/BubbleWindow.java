@@ -224,16 +224,30 @@ public class BubbleWindow {
     private String frozenCardKey = null;
     /** True while the card grow/shrink animation is running. */
     private boolean cardAnimating;
+    // v358: 大卡片模式自动开卡时用直接弹出（淡入+放大），不用从左滑入。
+    // 从左滑入看着像先弹胶囊再变卡片（用户 2026-11-22 “还是先弹
+    // 的胶囊，再弹得大卡片”）。popCapsule 里调 openCard 前置 true，
+    // openCard 读到后用直接弹出并清掉；点胶囊开卡片不受影响。
+    private boolean bigCardDirectEntrance;
     /** v151: the card's transparent trailing tail (the gradient strip
      * that stretches from the screen's left edge to the card while
      * it right-swipes away). Null when no close is running. */
     private View cardTail;
+    /** v364: which capsule the tail currently belongs to (the manual
+     * drag sets it in ensureCardTail; the auto swipe sets it in
+     * beginAutoSwipeTail). The staggered auto-dissipate overlaps
+     * swipes by ~40ms, so the end only drops the tail if it still
+     * belongs to that capsule. */
+    private CapsuleView cardTailOwner;
     /** v156: the open card's left edge sits this far in from the
      * screen's left edge (its pop-out from the left lands here).
      * v150–v155 used 20dp; user 2026-11-19 "让他贴合左边屏幕啊" —
      * the card is an enlarged capsule and capsules hug the left
      * edge with no gap, so the card lands flush at 0. */
     private static final int CARD_LEFT_OFFSET_DP = 0;
+    // v366: 拖尾的固定布局宽（dp）。拖尾不再用 LayoutParams 改宽，
+    // 改用这 100dp 宽 + scaleX 拉伸到卡片左边缘（见 setCardTailWidth）。
+    private static final int TAIL_BASE_WIDTH_DP = 100;
     // Incoming / ongoing call (v103). One call at a time; the call
     // capsule is a green NotifData (isCall) in its own group.
     private static final String CALL_PKG = "com.android.incallui";
@@ -344,6 +358,13 @@ public class BubbleWindow {
     private final java.util.Set<NotifGroup> dockingGroups =
             new java.util.HashSet<>();
 
+    /** v363: keys currently being docked one-by-one (dockOneCapsule).
+     * dockGroup guards by group; a single big capsule needs a
+     * per-key guard so a second heavy swipe during its 300ms
+     * animation can't gather a second fan icon for it. */
+    private final java.util.Set<String> dockingKeys =
+            new java.util.HashSet<>();
+
     public static BubbleWindow getInstance() {
         return INSTANCE;
     }
@@ -389,7 +410,14 @@ public class BubbleWindow {
                     // tap still triggers the normal auto-dissipate
                     // for the OTHER notifications below it.
                     if (!isCardPinned()) {
-                        closeCard();
+                        // v360: 大卡片模式点空白——卡片自动右滑消散
+                        // 成扇子图标，不再缩回胶囊（用户 “别再回到
+                        // 胶囊了”）。
+                        if (FeatureFlags.bigCard) {
+                            dissipateOpenCard();
+                        } else {
+                            closeCard();
+                        }
                     } else if (FeatureFlags.blankDissipate) {
                         dissipateAllOneByOne();
                     }
@@ -419,7 +447,14 @@ public class BubbleWindow {
                 // still dissipates the OTHER notifications below it.
                 if (cardKey != null) {
                     if (!isCardPinned()) {
-                        closeCard();
+                        // v360: 大卡片模式点空白——卡片自动右滑消散
+                        // 成扇子图标，不再缩回胶囊（用户 “别再回到
+                        // 胶囊了”）。
+                        if (FeatureFlags.bigCard) {
+                            dissipateOpenCard();
+                        } else {
+                            closeCard();
+                        }
                     } else if (FeatureFlags.blankDissipate) {
                         dissipateAllOneByOne();
                     }
@@ -2079,14 +2114,89 @@ public class BubbleWindow {
         boolean throttled = (lastPkgPop != null
                 && now - lastPkgPop < SAME_APP_POP_WINDOW_MS)
                 || (lastPopAt != 0 && now - lastPopAt < REPOP_GUARD_MS);
-        if (!throttled) {
+        CapsuleView cap = topCapsule(group);
+        // v360: 大卡片模式重做（用户 2026-11-22 “重新做一套”）——
+        // 普通通知不再走 openCard，直接以放大胶囊（卡片内容）依次
+        // 排列（rebuildDock 里按卡片宽/高渲染）；音乐仍用展开卡片
+        // （用户 “音乐卡的大卡片就用展开卡片”）。v359 的自成一体
+        // 不变：不依赖“展开卡片”/音乐卡片开关。节流、已有卡片开
+        // 着都不挡；来电不走卡片，照常弹胶囊。
+        if (FeatureFlags.bigCard && cap != null
+                && (data == null || !data.isCall)) {
             lastPopByPkg.put(data.pkg, now);
             lastPopAt = now;
-            // New notifications pop out from the docked direction too
-            // (user 2026-11-19 "新通知也是这么弹出来"): the capsule
-            // slides in from the left edge, not scaling in place.
-            CapsuleView cap = topCapsule(group);
+            if (data != null && data.isMusic) {
+                // 音乐：展开卡片（播放器卡片），左滑弹入。
+                if (!cardAnimating) {
+                    bigCardDirectEntrance = true;
+                    openCard(cap, data);
+                } else {
+                    // 卡片动画进行中：先把胶囊藏起来（不弹胶囊），等
+                    // 动画结束再开卡片；还打不开就恢复显示，别丢通知。
+                    final CapsuleView pendingCap = cap;
+                    final NotifData pendingData = data;
+                    pendingCap.setAlpha(0f);
+                    if (dock != null) {
+                        dock.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (cardAnimating) {
+                                    pendingCap.setAlpha(1f);
+                                    return;
+                                }
+                                bigCardDirectEntrance = true;
+                                openCard(pendingCap, pendingData);
+                            }
+                        }, 350);
+                    } else {
+                        pendingCap.setAlpha(1f);
+                    }
+                }
+            } else {
+                // 普通通知：放大胶囊，左滑弹入。已有卡片（音乐卡）
+                // 开着时先把它收回成胶囊，再弹新的大胶囊。
+                if (!cardAnimating) {
+                    if (cardKey != null) {
+                        closeCardInstant();
+                        cap = topCapsule(group);
+                    }
+                    popInBigCapsule(cap);
+                } else {
+                    final CapsuleView pendingCap = cap;
+                    final NotifData pendingData = data;
+                    pendingCap.setAlpha(0f);
+                    if (dock != null) {
+                        dock.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (cardAnimating) {
+                                    pendingCap.setAlpha(1f);
+                                    return;
+                                }
+                                if (cardKey != null) {
+                                    closeCardInstant();
+                                }
+                                if (pendingData == null
+                                        || pendingData.key == null) {
+                                    return;
+                                }
+                                CapsuleView fresh = findCapsuleByKey(
+                                        pendingData.key);
+                                popInBigCapsule(fresh);
+                            }
+                        }, 350);
+                    } else {
+                        pendingCap.setAlpha(1f);
+                    }
+                }
+            }
+        } else if (!throttled) {
+            lastPopByPkg.put(data.pkg, now);
+            lastPopAt = now;
             if (cap != null) {
+                // New notifications pop out from the docked direction too
+                // (user 2026-11-19 "新通知也是这么弹出来"): the capsule
+                // slides in from the left edge, not scaling in place.
                 cap.setTranslationX(-dp(200));
                 cap.setAlpha(0f);
                 cap.animate().translationX(0f).alpha(1f)
@@ -2788,8 +2898,15 @@ public class BubbleWindow {
             // shrink it back to a capsule.
             final boolean isCardPinned = isCardKey(d.key)
                     || pinnedCardKeys.contains(d.key);
+            // v365: 大卡片模式钉住不要变成胶囊 —— 钉住的大卡片
+            // 还是大卡片（不是小胶囊）。用户 2026-11-22 05:14
+            // "大卡片模式钉住不要变成胶囊"。只有普通通知放大，
+            // 音乐/来电/下载/实况仍是小胶囊。
+            final boolean isBigPinned = !isCardPinned
+                    && isBigCapsule(d);
             // v237: this pinned card's own measured height.
             int pinnedCardH = 0;
+            int bigPinnedH = 0;
             if (isCardPinned) {
                 cap.setCardExpanded(true);
                 bindCardCapsule(cap, d, group);
@@ -2802,9 +2919,18 @@ public class BubbleWindow {
                 // card left behind would be squeezed to a 44dp
                 // strip (video 01:27).
                 pinnedCardH = cap.cardHeightForWidth(
-                        dp(CapsuleView.CARD_WIDTH_DP));
+                        dp(CapsuleView.cardWidthDp(app)));
                 cap.setLayoutParams(cardLp(y, pinnedCardH));
                 // Left edge starts after the retracted slivers.
+                cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
+            } else if (isBigPinned) {
+                // v365: 钉住的大卡片按自己量出来的高度排，
+                // 和 Phase 2 的大卡片同一套（bindBigCapsule）。
+                cap.setCardExpanded(true);
+                bindBigCapsule(cap, d, group);
+                bigPinnedH = cap.cardHeightForWidth(
+                        dp(CapsuleView.cardWidthDp(app)));
+                cap.setLayoutParams(cardLp(y, bigPinnedH));
                 cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
             } else {
                 // Pinned capsules sit below the card (when there is
@@ -2818,7 +2944,7 @@ public class BubbleWindow {
             // here any more. The card sits ABOVE the pinned capsules
             // below it (z 1) so its content is never covered by them
             // — they show as slivers at the left edge behind it.
-            if (isCardPinned) {
+            if (isCardPinned || isBigPinned) {
                 cap.setTranslationZ(1f);
             }
             // (v150: no vertical connector, no edge fade.)
@@ -2855,6 +2981,13 @@ public class BubbleWindow {
                     if (d.isCall) {
                         return;
                     }
+                    // v365: 钉住的大卡片已经是卡片内容，点它就是
+                    // 打开 App（和 Phase 2 的大卡片一致），不
+                    // 再长成展开卡片。
+                    if (isBigPinned) {
+                        openCardApp(d);
+                        return;
+                    }
                     // Tap a pinned capsule: it grows into its card.
                     openCard(cap, d);
                 }
@@ -2874,11 +3007,14 @@ public class BubbleWindow {
                     rebuildDock();
                 }
             });
-            // v279: heavy left swipe docks the group into the fan.
+            // v279: heavy left swipe docks into the fan.
+            // v367: 胶囊模式也只缩被滑的那一张（用户 2026-11-22
+            // 05:28 “同应用不同通知缩小怎么又变成一起缩小了”）——
+            // 不再整组收进扇子，钉住的、没钉住的都一样。
             cap.setOnDockSwipe(new Runnable() {
                 @Override
                 public void run() {
-                    dockGroup(group);
+                    dockOneCapsule(cap, d, group);
                 }
             });
             cap.setOnSwipeLeft(new Runnable() {
@@ -2909,6 +3045,9 @@ public class BubbleWindow {
                     cardTopY = y;
                 }
                 y += pinnedCardH + dp(CAPSULE_GAP_DP);
+            } else if (isBigPinned) {
+                // v365: 钉住的大卡片按自己量出来的高度占行。
+                y += bigPinnedH + dp(CAPSULE_GAP_DP);
             } else {
                 y += dp(CapsuleView.DEFAULT_HEIGHT_DP
                         + CAPSULE_GAP_DP);
@@ -2934,7 +3073,10 @@ public class BubbleWindow {
             if (items.isEmpty()) {
                 continue;
             }
-            if (items.size() > 1 && !group.expanded) {
+            // v360: 大卡片模式不叠加——每个通知都是自己的大胶囊，
+            // 依次排列（用户 “通知来了就依次排列”）。
+            if (items.size() > 1 && !group.expanded
+                    && !FeatureFlags.bigCard) {
                 // Cascade stack: oldest first (drawn under), newest last
                 // (drawn on top). Each capsule sits 6dp below the one
                 // above it, so the older ones peek out by a 6dp edge.
@@ -2994,11 +3136,13 @@ public class BubbleWindow {
                             rebuildDock();
                         }
                     });
-                    // v279: heavy left swipe docks the group into the fan.
+                    // v279: heavy left swipe docks into the fan.
+                    // v367: 级联叠加里的重滑也只缩被滑的那一张
+                    // （同应用其他通知留着），不再整组收进扇子。
                     cap.setOnDockSwipe(new Runnable() {
                         @Override
                         public void run() {
-                            dockGroup(group);
+                            dockOneCapsule(cap, d, group);
                         }
                     });
                     cap.setOnSwipeLeft(new Runnable() {
@@ -3039,12 +3183,23 @@ public class BubbleWindow {
                 // already 6dp above the card; the one below is moved
                 // to 6dp below the card's bottom edge, and every row
                 // under it shifts down by the same amount.
+                // v360: 大卡片模式的放大胶囊占自己的行高（卡片高），
+                // 下面的行从它底下开始；普通胶囊仍是 44dp 行高。
                 int[] tops = new int[items.size()];
+                int[] heights = new int[items.size()];
                 int ty = groupTop;
                 for (int i = 0; i < items.size(); i++) {
+                    int h = dp(CapsuleView.DEFAULT_HEIGHT_DP);
+                    if (isBigCapsule(items.get(i))) {
+                        CapsuleView scratch = new CapsuleView(app);
+                        scratch.bind(items.get(i));
+                        scratch.setCardExpanded(true);
+                        h = scratch.cardHeightForWidth(
+                                dp(CapsuleView.cardWidthDp(app)));
+                    }
+                    heights[i] = h;
                     tops[i] = ty;
-                    ty += dp(CapsuleView.DEFAULT_HEIGHT_DP)
-                            + dp(CAPSULE_GAP_DP);
+                    ty += h + dp(CAPSULE_GAP_DP);
                 }
                 // v148: the card does NOT push anything down (user
                 // 2026-11-19 "都说了不挤通知") — the rows below keep
@@ -3063,6 +3218,9 @@ public class BubbleWindow {
                     }
                     cap.setStacked(false);
                     final boolean isCard = isCardKey(d.key);
+                    // v360: 大卡片模式的放大胶囊（卡片内容长在胶囊上）。
+                    final boolean isBig =
+                            !isCard && isBigCapsule(d);
                     int placeTop = tops[idx];
                     if (isCard) {
                         cap.setCardExpanded(true);
@@ -3083,6 +3241,13 @@ public class BubbleWindow {
                         }
                         cap.setLayoutParams(cardLp(cardTop));
                         // Left edge starts after the retracted slivers.
+                        cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
+                    } else if (isBig) {
+                        cap.setCardExpanded(true);
+                        bindBigCapsule(cap, d, group);
+                        cap.setLayoutParams(
+                                cardLp(placeTop, heights[idx]));
+                        // Left edge flush, like the card.
                         cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
                     } else {
                         cap.setLayoutParams(capsuleLp(placeTop));
@@ -3105,6 +3270,12 @@ public class BubbleWindow {
                             if (d.isCall) {
                                 return;
                             }
+                            // v360: 放大胶囊已经是卡片内容，点它就是
+                            // 打开 App（和点开着的卡片一样）。
+                            if (isBig) {
+                                openCardApp(d);
+                                return;
+                            }
                             // Tap a capsule: it grows into its card.
                             // (Single notification, or one item of an
                             // expanded group — the group stays expanded
@@ -3115,17 +3286,24 @@ public class BubbleWindow {
                     cap.setOnSwipeRight(new Runnable() {
                         @Override
                         public void run() {
+                            // v363: 轻滑钉住（用户 “左滑轻滑钉住，重滑
+                            // 缩小”）——v361 的轻滑整组收进扇子已撤掉。
+                            // 钉住后放大胶囊变回小钉住胶囊；重滑缩进
+                            // 扇子走下面的 onDockSwipe。
                             togglePin(group, d);
                             // v180: pinning a card rebuilds the dock
                             // so it jumps to first position immediately.
                             rebuildDock();
                         }
                     });
-                    // v279: heavy left swipe docks the group into the fan.
+                    // v279: heavy left swipe docks into the fan.
+                    // v367: 胶囊模式也只缩被滑的那一张（用户 2026-11-22
+                    // 05:28 “同应用不同通知缩小怎么又变成一起缩小了”）——
+                    // 大卡片和胶囊都走 dockOneCapsule，不再整组收进扇子。
                     cap.setOnDockSwipe(new Runnable() {
                         @Override
                         public void run() {
-                            dockGroup(group);
+                            dockOneCapsule(cap, d, group);
                         }
                     });
                     final NotifData item = d;
@@ -3196,7 +3374,7 @@ public class BubbleWindow {
 
     private FrameLayout.LayoutParams capsuleLp(int y) {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                dp(CapsuleView.DEFAULT_WIDTH_DP),
+                dp(CapsuleView.capsuleWidthDp(app)),
                 dp(CapsuleView.DEFAULT_HEIGHT_DP),
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
         lp.topMargin = y;
@@ -3213,7 +3391,7 @@ public class BubbleWindow {
     // card's height and is reset to 0 when it closes).
     private FrameLayout.LayoutParams cardLp(int y, int heightPx) {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                dp(CapsuleView.CARD_WIDTH_DP),
+                dp(CapsuleView.cardWidthDp(app)),
                 Math.max(heightPx, dp(CapsuleView.DEFAULT_HEIGHT_DP)),
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
         lp.topMargin = y;
@@ -3307,12 +3485,13 @@ public class BubbleWindow {
         if (!hadCard) {
             CapsuleView cap = findCapsuleByKey(d.key);
             if (cap != null) {
+                // v364: 点开 App 的自动右滑也带拖尾（和自动消散同一套）。
                 cap.playAutoSwipeRight(new Runnable() {
                     @Override
                     public void run() {
                         dissipateOne(data);
                     }
-                });
+                }, true);
             } else {
                 dissipateOne(data);
             }
@@ -3361,10 +3540,26 @@ public class BubbleWindow {
         // capsule and removes + rebuilds after its 310ms delay.
     }
 
+    /** v360: 大卡片模式的放大胶囊弹出——左滑弹入（和胶囊的弹出
+     * 动画一样，从左滑入 200dp，240ms）。 */
+    private void popInBigCapsule(CapsuleView cap) {
+        if (cap == null) {
+            return;
+        }
+        cap.setTranslationX(-dp(200));
+        cap.setAlpha(0f);
+        cap.animate().translationX(0f).alpha(1f)
+                .setDuration(240).withLayer().start();
+    }
+
     public void openCard(CapsuleView cap, NotifData d) {
         if (cap == null || d == null || d.isCall || cardAnimating) {
             return;
         }
+        // v358: 大卡片模式直接弹出——这里就把标记读走清掉，避免中途
+        // return 导致标记残留，下次点胶囊开卡片也被当成直接弹出。
+        boolean directEntrance = bigCardDirectEntrance;
+        bigCardDirectEntrance = false;
         // v278: log the tap decision (isMusic / card / musicCard)
         // so a "music card won't open" report can be diagnosed
         // from the log instead of guessed at.
@@ -3381,24 +3576,29 @@ public class BubbleWindow {
         // switch), so the capsule stays useful with the card off.
         // v274: the card switch does NOT control music — music
         // capsules are governed ONLY by the musicCard switch.
-        if (d.isMusic) {
-            // v278: safety net — if the in-memory musicCard flag
-            // is off, re-read the APP's prefs once in case the
-            // toggle broadcast was missed (stale flag). If the
-            // prefs also say off, then open the App directly.
-            if (!FeatureFlags.musicCard) {
-                try {
-                    FeatureFlags.load(app);
-                } catch (Throwable ignored) {
+        // v359: 大卡片模式下不认这两个开关——开着大卡片就要能弹卡、
+        // 能展开（用户 2026-11-22 “开大卡片之后就不能展开卡片了”）。
+        // 开关关着时点胶囊本来是直接开 App，这里大卡片优先。
+        if (!FeatureFlags.bigCard) {
+            if (d.isMusic) {
+                // v278: safety net — if the in-memory musicCard flag
+                // is off, re-read the APP's prefs once in case the
+                // toggle broadcast was missed (stale flag). If the
+                // prefs also say off, then open the App directly.
+                if (!FeatureFlags.musicCard) {
+                    try {
+                        FeatureFlags.load(app);
+                    } catch (Throwable ignored) {
+                    }
                 }
-            }
-            if (!FeatureFlags.musicCard) {
+                if (!FeatureFlags.musicCard) {
+                    openCardApp(d);
+                    return;
+                }
+            } else if (!FeatureFlags.card) {
                 openCardApp(d);
                 return;
             }
-        } else if (!FeatureFlags.card) {
-            openCardApp(d);
-            return;
         }
         if (isCardKey(d.key)) {
             // v263: tapping the open card opens the App — small
@@ -3412,6 +3612,16 @@ public class BubbleWindow {
         cardAnimating = true;
         if (dock == null) {
             cardAnimating = false;
+            return;
+        }
+        // v358: 大卡片模式直接弹出——不播涟漪消散、不等 280ms，
+        // 卡片立刻出现。否则新通知的胶囊会在涟漪期间先露出来
+        // （用户 2026-11-22 "还是先弹的胶囊"）。其他胶囊由
+        // showCardAfterRipple 里的 rebuildDock 收回边缘。
+        // v360: 入口改回左滑弹入（用户 “大卡片的动画还是左滑弹入”），
+        // 不再淡入+放大。
+        if (directEntrance) {
+            showCardAfterRipple(d);
             return;
         }
         // Ripple participants, in visual (top-to-bottom) order: the
@@ -3522,7 +3732,7 @@ public class BubbleWindow {
         scratch.bind(d);
         scratch.setCardExpanded(true);
         int h = scratch.cardHeightForWidth(
-                dp(CapsuleView.CARD_WIDTH_DP));
+                dp(CapsuleView.cardWidthDp(app)));
         cardKey = d.key;
         cardHeightPx = h;
         rebuildDock();
@@ -3543,8 +3753,21 @@ public class BubbleWindow {
         // the card bounce past its slot and spring back (one extra
         // bounce); a plain DecelerateInterpolator lands exactly on
         // the slot and stops.
+        // v351: 卡片滑入前先把窗口加宽到卡片宽 + 余量，否则滑入动画
+        // 被窗口截断（用户 2026-11-22 平板视频：卡片左边被切掉）。
+        // updateWindowSize() 靠 measure，卡片刚重建时量不准；这里直接定宽。
+        try {
+            int cw = dp(CapsuleView.cardWidthDp(app)) + dp(PIN_OVERHANG_DP);
+            if (params != null && params.width < cw) {
+                params.width = cw;
+                wm.updateViewLayout(root, params);
+            }
+        } catch (Throwable ignored) {
+        }
         final int finalX = dp(CARD_LEFT_OFFSET_DP);
-        cardCap.setTranslationX(-dp(CapsuleView.CARD_WIDTH_DP));
+        // v360: 入口一律左滑弹入（用户 “大卡片的动画还是左滑弹入”）——
+        // v358 的淡入+放大不要了。
+        cardCap.setTranslationX(-dp(CapsuleView.cardWidthDp(app)));
         cardCap.setScaleX(1f);
         cardCap.setScaleY(1f);
         cardCap.setAlpha(1f);
@@ -3576,6 +3799,13 @@ public class BubbleWindow {
         if (cardTail != null && cardTail.getParent() != dock) {
             cardTail = null;
         }
+        // v367: 拖尾归属变了（上次拖的卡片没清掉、这次是另一张卡）
+        // 也要丢掉重建 —— 否则新卡片复用旧拖尾，行不对、颜色不
+        // 对，看起来就是拖尾和卡片之间有条缝。
+        if (cardTail != null && cardTailOwner != null
+                && cardTailOwner != cardCap) {
+            removeCardTail();
+        }
         if (cardTail != null || cardCap == null || dock == null) {
             return;
         }
@@ -3595,21 +3825,45 @@ public class BubbleWindow {
                         .LEFT_RIGHT);
         tailBg.setColors(new int[]{tailTransparent, tailColor});
         final View tail = new View(app);
-        // v155: round UP and tuck 1px under the card's left edge —
-        // the tail sits behind the card, so the overlap is
-        // invisible, and (int) truncation can no longer leave a
-        // sub-pixel gap between tail and card.
-        int w = Math.max(0,
-                (int) Math.ceil(cardCap.getTranslationX()) + 1);
+        // v366: 拖尾和卡片不重叠 —— 拖尾右端正好顶到卡片左边缘，
+        // 不再往卡片底下塞重叠（v364 的 24dp 撤掉，用户 2026-11-22
+        // 05:18 "拖尾和卡片的重叠 / 别重叠啊"）。拖尾也不再用
+        // LayoutParams 改宽（走 layout 会比卡片的 translationX
+        // 慢一帧、快拖出缝）：固定 100dp 宽 + scaleX 拉伸，
+        // scaleX 和 translationX 都是渲染属性，同一帧生效，
+        // 既没缝也不重叠。
+        // v362: the tail sits on the dragged card's OWN row — read
+        // top/height from the card's LayoutParams, not the open
+        // card's shared cardTopY/cardHeightPx (a big capsule in big
+        // card mode is on its own row with its own height; for the
+        // open card the LayoutParams hold the same values).
+        int tailTop = cardTopY;
+        int tailHeight = cardHeightPx;
+        if (cardCap.getLayoutParams()
+                instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams clp =
+                    (FrameLayout.LayoutParams)
+                            cardCap.getLayoutParams();
+            tailTop = clp.topMargin;
+            if (clp.height > 0) {
+                tailHeight = clp.height;
+            }
+        }
+        int baseW = dp(TAIL_BASE_WIDTH_DP);
         FrameLayout.LayoutParams tlp =
-                new FrameLayout.LayoutParams(w, cardHeightPx);
-        tlp.topMargin = cardTopY;
+                new FrameLayout.LayoutParams(baseW, tailHeight);
+        tlp.topMargin = tailTop;
         tlp.leftMargin = 0;
         tail.setLayoutParams(tlp);
         tail.setBackground(tailBg);
+        tail.setPivotX(0f);
+        tail.setScaleX(baseW > 0
+                ? Math.max(0f, cardCap.getTranslationX()) / baseW
+                : 0f);
         tail.setClickable(false);
         dock.addView(tail, 0);
         cardTail = tail;
+        cardTailOwner = cardCap;
     }
 
     /** Drop the card's trailing tail, if one is showing. */
@@ -3622,22 +3876,54 @@ public class BubbleWindow {
             } catch (Throwable ignored) {
             }
             cardTail = null;
+            cardTailOwner = null;
         }
     }
 
-    /** Stretch (or shrink) the tail to the given width. The tail
-     * is made 1px wider than the card's left edge so it tucks under
-     * the card (v155, no gap from rounding). */
-    private void setCardTailWidth(int w) {
+    /** v364: the auto right-slide's trailing tail (user “自动消散也
+     * 没有加拖尾”) — the same gradient strip as the manual drag,
+     * but driven by the auto swipe. A new swipe steals the tail
+     * from the previous capsule; the end only drops it if it still
+     * belongs to that capsule. */
+    public void beginAutoSwipeTail(CapsuleView cap) {
+        if (cap == null || dock == null) {
+            return;
+        }
+        if (cardTail != null && cardTailOwner != cap) {
+            removeCardTail();
+        }
+        ensureCardTail(cap);
+        cardTailOwner = cap;
+    }
+
+    public void updateAutoSwipeTail(CapsuleView cap) {
+        if (cap == null || cardTail == null || cardTailOwner != cap) {
+            return;
+        }
+        setCardTailWidth(cap.getTranslationX());
+    }
+
+    public void endAutoSwipeTail(CapsuleView cap) {
+        if (cap != null && cardTail != null && cardTailOwner == cap) {
+            removeCardTail();
+        }
+    }
+
+    /** v366/v367: 把拖尾右端拉到卡片左边缘（translationX），零重叠。
+     * 改宽用 scaleX（渲染属性，和卡片的 translationX 同一帧生效）。
+     * v367: w 用 float，不再 (int) 截断 —— 截断会丢掉小数部分，
+     * 拖尾右端比卡片左边缘短不到 1px，快拖时就是一条细缝。 */
+    private void setCardTailWidth(float w) {
+        // v366: 拖尾右端 = 卡片左边缘（translationX），不加任何重叠。
+        // 改宽用 scaleX（渲染属性，和卡片的 translationX 同一帧
+        // 生效），不再走 LayoutParams（会慢一帧出缝）。
         if (cardTail == null) {
             return;
         }
-        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams)
-                cardTail.getLayoutParams();
-        int target = w + 1;
-        if (lp.width != target) {
-            lp.width = target;
-            cardTail.setLayoutParams(lp);
+        int baseW = dp(TAIL_BASE_WIDTH_DP);
+        float s = baseW > 0 ? Math.max(0f, w) / baseW : 0f;
+        if (cardTail.getScaleX() != s) {
+            cardTail.setScaleX(s);
         }
     }
 
@@ -3660,7 +3946,7 @@ public class BubbleWindow {
         }
         ensureCardTail(cardCap);
         cardCap.setTranslationX(startX + dx);
-        setCardTailWidth((int) cardCap.getTranslationX());
+        setCardTailWidth(cardCap.getTranslationX());
     }
 
     /** v153: the manual card drag ended below the dissipate
@@ -3693,7 +3979,7 @@ public class BubbleWindow {
                         float f = (Float) a.getAnimatedValue();
                         float x = fromX + (startX - fromX) * f;
                         cardCap.setTranslationX(x);
-                        setCardTailWidth((int) x);
+                        setCardTailWidth(x);
                     }
                 });
         anim.addListener(
@@ -3770,7 +4056,7 @@ public class BubbleWindow {
                         // the card keep the same opacity throughout.
                         // The tail stretches from the left edge to
                         // the card's left edge as it slides right.
-                        setCardTailWidth((int) cardCap.getTranslationX());
+                        setCardTailWidth(cardCap.getTranslationX());
                     }
                 });
         anim.addListener(
@@ -3918,6 +4204,47 @@ public class BubbleWindow {
             @Override
             public void onMusicControl(String command, long seekMs) {
                 sendMusicControl(command, seekMs);
+            }
+        });
+    }
+
+    /** v360: 大卡片模式的放大胶囊——普通通知（非音乐/来电/下载/
+     * 实况）直接以卡片内容显示，不经过展开卡片。 */
+    private boolean isBigCapsule(NotifData d) {
+        return FeatureFlags.bigCard && d != null
+                && !d.isMusic && !d.isCall && !d.isDownload
+                && !d.isLive;
+    }
+
+    /** v360: 给放大胶囊接卡片头的钉住开关（只在钉住时显示）。
+     * v362: 接上和展开卡片同一套手动拖拽（带透明渐变拖尾）——
+     * 用户 “大卡片模式也要有透明渐变拖尾”。updateCardDrag /
+     * endCardDrag 只认卡片自己的位置（translationX 和
+     * LayoutParams 的 topMargin、height），不认展开卡片的共享
+     * 字段，所以放大胶囊的拖尾长在自己那一行。左滑仍走胶囊自己
+     * 的 onSwipeRight（v361 收进扇子）。 */
+    private void bindBigCapsule(final CapsuleView cap,
+            final NotifData d, final NotifGroup group) {
+        // v362: 手动右拖带透明渐变拖尾（和展开卡片同一套）。
+        cap.setOnCardDragListener(
+                new CapsuleView.OnCardDragListener() {
+                    @Override
+                    public void onCardDrag(float dx) {
+                        updateCardDrag(cap, dx);
+                    }
+
+                    @Override
+                    public void onCardDragEnd(float dx) {
+                        endCardDrag(cap, dx);
+                    }
+                });
+        cap.setCardPinned(group != null && d != null && d.key != null
+                && group.pinnedAtByKey.containsKey(d.key));
+        cap.setOnCardPinToggle(new Runnable() {
+            @Override
+            public void run() {
+                togglePin(group, d);
+                rebuildDock();
             }
         });
     }
@@ -4091,6 +4418,40 @@ public class BubbleWindow {
         }
         removeNotifByKey(d.key);
         closeCard();
+    }
+
+    /** v360: 大卡片模式点空白——把开着的卡片自动右滑消散成扇子
+     * 图标，不缩回胶囊（用户 2026-11-22 “别再回到胶囊了”）。
+     * 复用 closeCard 的右滑+爆掉动画；先把通知从组里拿掉（和
+     * dismissOpenCard 一样），这样卡片关掉后它不会再弹回成胶囊；
+     * 等动画收尾（滑走 240ms + 310ms）后再把这条通知收进扇子，
+     * 图标位置才算得准。系统通知不取消——消散不是消通知。 */
+    private void dissipateOpenCard() {
+        if (cardKey == null || cardAnimating || dock == null) {
+            return;
+        }
+        final CapsuleView cardCap = findCapsuleByKey(cardKey);
+        if (cardCap == null) {
+            closeCardInstant();
+            return;
+        }
+        final NotifData d = cardCap.getData();
+        if (d == null || d.key == null) {
+            closeCard();
+            return;
+        }
+        removeNotifByKey(d.key);
+        final String pkg = d.pkg;
+        final NotifData removed = d;
+        closeCard();
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                NotifGroup docked = new NotifGroup(pkg);
+                docked.add(removed);
+                addPileIconForGroup(docked);
+            }
+        }, 600);
     }
 
     /** Remove one notification (by key) from the bubble groups,
@@ -4845,11 +5206,21 @@ public class BubbleWindow {
         // on top), not an exact overlap where you can't see the
         // individual notifications (user 2026-11-19 "叠加成同应用那种
         // 啊" / "别搞个不伦不类的").
+        // v363: the step is the view's OWN height — a big capsule
+        // slides up by its full card height ("全缩 / 别只缩一半"),
+        // not the 44dp nudge. For a 44dp capsule this is unchanged.
+        int step = dp(CapsuleView.DEFAULT_HEIGHT_DP);
+        if (v.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            int h = ((FrameLayout.LayoutParams)
+                    v.getLayoutParams()).height;
+            if (h > 0) {
+                step = h;
+            }
+        }
         android.animation.ObjectAnimator anim =
                 android.animation.ObjectAnimator.ofFloat(v, "translationY",
                         v.getTranslationY(),
-                        v.getTranslationY()
-                                - dp(CapsuleView.DEFAULT_HEIGHT_DP));
+                        v.getTranslationY() - step);
         anim.setDuration(240);
         anim.start();
     }
@@ -4956,6 +5327,15 @@ public class BubbleWindow {
      * icon, or null. */
     private PileIcon gatherIconBelowCapsule(NotifGroup target,
             int capsuleTop) {
+        return gatherIconBelowCapsule(target, capsuleTop,
+                dp(CapsuleView.DEFAULT_HEIGHT_DP));
+    }
+
+    /** v363: capsuleHeight is the capsule's own height — the icon
+     * gathers below the capsule's BOTTOM edge. (A big capsule's icon
+     * must sit below its ~200dp body, not 44dp below its top.) */
+    private PileIcon gatherIconBelowCapsule(NotifGroup target,
+            int capsuleTop, int capsuleHeight) {
         if (pile == null || target == null) {
             return null;
         }
@@ -5000,8 +5380,8 @@ public class BubbleWindow {
             }
         }
         int fanTop = (pileParams != null) ? pileParams.y : 0;
-        int belowTop = capsuleTop
-                + dp(CapsuleView.DEFAULT_HEIGHT_DP + CAPSULE_GAP_DP);
+        int belowTop = capsuleTop + capsuleHeight
+                + dp(CAPSULE_GAP_DP);
         icon.setTranslationY(belowTop - fanTop);
         // Stretch the pile window up to the icon so it is not clipped
         // ("残缺") while it waits above the fan.
@@ -5061,8 +5441,11 @@ public class BubbleWindow {
                 }
             }
         }
+        // v368: 去掉 withLayer()—— 硬件层按 22dp 的框裁，图标 34dp
+        // 溢出的 12dp 会被层裁掉（v111 同款教训）。只滑 translationY，
+        // 不用硬件层，图标不再缺一块。
         icon.animate().translationY(0f)
-                .setDuration(350).withLayer().start();
+                .setDuration(350).start();
         // (Fan stack animation deleted, user 2026-11-19 "删了": the
         // column sweep made the icons fly around. Only the slide into
         // the fan remains.)
@@ -5202,6 +5585,77 @@ public class BubbleWindow {
                 // Phase 2 (user 2026-11-19 "然后再叠加图标"): the icon
                 // slides down to stack onto the fan, and at the same
                 // time the other notifications slide up to fill the gap.
+                stackIconToFan(icon);
+                slideSurvivorsUp(oldTops);
+            }
+        }, 300);
+    }
+
+    /** v363: 大卡片模式重左滑——只缩被滑的那一张，全缩进扇子图标
+     * （用户 “左滑轻滑钉住，重滑缩小” + “只缩被滑的那一张，其他的
+     * 留着” + “全缩 / 别只缩一半”）。轻滑仍走 onSwipeRight 钉住；
+     * 重滑走这里。v364: 卡片不再往上滑——一边滑回左边缘、一边横
+     * 向压扁进左边缘（用户 “左滑动画 / 没有缩到屏幕边缘去”），
+     * 300ms 后只把这一条通知从组里拿掉、单独收进扇子，其他通知
+     * 原地不动、依次前顶补位。图标聚在被滑大卡片的下沿（不是
+     * 44dp 处）。 */
+    private void dockOneCapsule(final CapsuleView cap, final NotifData d,
+            final NotifGroup group) {
+        if (cap == null || d == null || d.key == null || group == null
+                || dock == null || !dockingKeys.add(d.key)) {
+            return;
+        }
+        // Old tops of the surviving capsules, by key, so they can
+        // slide up to fill the gap (same as dockGroup — but here the
+        // survivors include the same group's OTHER capsules).
+        // v367: 这是“只缩被滑的那一张”的通用实现 —— 大卡片和
+        // 普通胶囊都走这里（胶囊模式同应用也不再整组收）。
+        final Map<String, Integer> oldTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c != cap && c.getData() != null
+                        && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+            }
+        }
+        int capTop = (int) cap.getY();
+        int capHeight = dp(CapsuleView.DEFAULT_HEIGHT_DP);
+        if (cap.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            int h = ((FrameLayout.LayoutParams)
+                    cap.getLayoutParams()).height;
+            if (h > 0) {
+                capHeight = h;
+            }
+        }
+        // Gather the icon below the big card's BOTTOM edge first, so
+        // as the card slides up it visibly becomes the icon. The icon
+        // is built from a single-item group for this notification, so
+        // only it goes into the fan (it merges into the app's docked
+        // group if that app already has docked notifications).
+        final NotifGroup docked = new NotifGroup(group.pkg);
+        docked.add(d);
+        final PileIcon icon =
+                gatherIconBelowCapsule(docked, capTop, capHeight);
+        // v364: 滑缩到屏幕边缘——卡片滑回左边缘（translationX 回 0，
+        // 左拖的 -80dp 顶出也一并收回来），同时以左边缘为轴心横向
+        // 压扁到 0（scaleX），240ms，和其他消散动画同速。图标在
+        // 下沿等着，卡片缩进边缘后图标再沉进扇子。
+        cap.setPivotX(0f);
+        cap.animate().translationX(0f).scaleX(0f).setDuration(240)
+                .setInterpolator(
+                        new android.view.animation.DecelerateInterpolator())
+                .withLayer()
+                .start();
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey(d.key);
+                dockingKeys.remove(d.key);
+                holdWindowHeight = true;
+                rebuildDock();
                 stackIconToFan(icon);
                 slideSurvivorsUp(oldTops);
             }
@@ -5348,7 +5802,7 @@ public class BubbleWindow {
         if (pillW <= 0) {
             pillW = capsule.getWidth();
         }
-        int baseW = dp(CapsuleView.DEFAULT_WIDTH_DP);
+        int baseW = dp(CapsuleView.capsuleWidthDp(app));
         int count = 16;
         if (baseW > 0 && pillW > baseW) {
             count = Math.round(16f * pillW / baseW);
@@ -5541,6 +5995,9 @@ public class BubbleWindow {
         if (data == null || dock == null) {
             return;
         }
+        // v362: 右滑消散的放大胶囊可能正拖着拖尾（手动右拖）——
+        // 拖尾和胶囊一起消散，别让它残留到 310ms 后的 rebuild。
+        removeCardTail();
         // v302: user dismissed a Migu song (right-swipe) — remember
         // it so a lyric update for the same song doesn't re-pop it.
         if (data.isMusic
@@ -5785,20 +6242,35 @@ public class BubbleWindow {
             // never shrink the window to 1px and hide every icon.
             int h = Math.max(pileRoot.getMeasuredHeight(), dp(34));
             int y = pileTargetY;
+            // v368: 扇子图标左半被裁（用户 “小图标都有一半被窗口裁掉
+            // 了” / “我记得之前是修好了的”）—— 扇子窗口的 x 从来没
+            // 被显式定过，窗口一旦被重加/改宽就可能留在负 x 上，整排
+            // 图标跟着左移半个图标。钉死在左边缘（dock 固定在左），
+            // 让窗口永远从 x=0 起。
+            int x = 0;
+            // v368 diagnostic: if the window ever sits off the edge,
+            // log it so the real shift source shows in BubbleNotify.log.
+            if (pileParams.x != 0) {
+                FileLog.i("PileWin x=" + pileParams.x
+                        + " fixed to 0 w=" + w + " h=" + h + " y=" + y);
+            }
             if (pileYAnimating) {
                 // The animator owns Y right now; only fix the size.
-                if (pileParams.width != w || pileParams.height != h) {
+                if (pileParams.width != w || pileParams.height != h
+                        || pileParams.x != x) {
                     pileParams.width = w;
                     pileParams.height = h;
+                    pileParams.x = x;
                     wm.updateViewLayout(pileRoot, pileParams);
                 }
                 return;
             }
             if (pileParams.width != w || pileParams.height != h
-                    || pileParams.y != y) {
+                    || pileParams.y != y || pileParams.x != x) {
                 pileParams.width = w;
                 pileParams.height = h;
                 pileParams.y = y;
+                pileParams.x = x;
                 wm.updateViewLayout(pileRoot, pileParams);
             }
         } catch (Throwable ignored) {
@@ -5877,7 +6349,16 @@ public class BubbleWindow {
         }
         dragWindowGen++;
         try {
-            int w = dp(CapsuleView.DEFAULT_WIDTH_DP + 200 + PIN_OVERHANG_DP);
+            // v352: 卡片关时向右滑 200dp，窗口得按卡片宽算（380dp），
+            // 不能只按胶囊宽（260dp）——否则卡片右滑出 92dp 被窗口截掉。
+            // 手动拖拽用全屏窗口所以能拉到最右边，自动动画也得够宽
+            // （用户 2026-11-22 “手动倒是可以拉到屏幕最右边”）。
+            // v360: 大卡片模式的放大胶囊也是卡片宽（300/380dp），
+            // 右滑 200dp 时窗口得按卡片宽算，不然右沿被截掉。
+            int baseW = (cardKey != null || FeatureFlags.bigCard)
+                    ? CapsuleView.cardWidthDp(app)
+                    : CapsuleView.capsuleWidthDp(app);
+            int w = dp(baseW + 200 + PIN_OVERHANG_DP);
             if (params.width != w) {
                 params.width = w;
                 wm.updateViewLayout(root, params);
@@ -6130,7 +6611,12 @@ public class BubbleWindow {
         // normally (the queue skips pinned notifications and calls,
         // so the pinned card stays out).
         if (cardKey != null && !isCardPinned()) {
-            closeCard();
+            // v360: 大卡片模式下卡片不缩回胶囊——直接消散成图标。
+            if (FeatureFlags.bigCard) {
+                dissipateOpenCard();
+            } else {
+                closeCard();
+            }
             return;
         }
         isDissipatingAll = true;
@@ -6220,12 +6706,20 @@ public class BubbleWindow {
                 // topMargin is set synchronously by rebuildDock.
                 int ta = topOf(a);
                 int tb = topOf(b);
+                // v362: 大卡片模式下自动消散由上而下依次（用户
+                // “自动消散也是由上而下依次”）——胶囊模式保持由下
+                // 往上（用户 2026-11-19 “由下往上依次消散”）。
+                if (FeatureFlags.bigCard) {
+                    return Integer.compare(ta, tb);
+                }
                 return Integer.compare(tb, ta);
             }
         });
         // Dissipate one by one, bottom to top (user 2026-11-19
         // "改成全展开后由下往上依次消散" / "去除叠加了"): NO stacking
-        // any more. After the expand, each capsule bursts into
+        // any more. v362: in big card mode the sort above flips
+        // this to top-to-bottom (user "自动消散也是由上而下依次").
+        // After the expand, each capsule bursts into
         // particles IN PLACE, starting from the bottom-most one and
         // going up. caps is already sorted bottom-to-top, so caps[0]
         // is the bottom-most. Stagger 200ms (v94, user "间隔时间让他
@@ -6256,13 +6750,16 @@ public class BubbleWindow {
                     // Auto right-swipe, then burst at the end of the
                     // swipe (user 2026-11-19 "展开后逐条自动右滑消散").
                     if (cap instanceof CapsuleView) {
+                        // v364: 自动消散的右滑带拖尾（用户 “自动消散
+                        // 也没有加拖尾”）——普通胶囊走自己的长胶囊，
+                        // 放大胶囊走共享拖尾。
                         ((CapsuleView) cap).playAutoSwipeRight(
                                 new Runnable() {
                                     @Override
                                     public void run() {
                                         burstParticles(cap);
                                     }
-                                });
+                                }, true);
                     } else {
                         burstParticles(cap);
                     }

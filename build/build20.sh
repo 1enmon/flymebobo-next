@@ -10,7 +10,7 @@ export BT=$HOME/workspace/tools/android/build-tools-34
 export PATH=$JDK/bin:$BT:$PATH
 SRC=$HOME/workspace/flymebobo2/src
 APKTOOL_DIR=$HOME/workspace/flymebobo2/build/apktool
-OUT=flymebobo-2.1-v333.apk
+OUT=flymebobo-2.2-v344.apk
 
 # 1. Compile (javac must use -source 17 -target 17; JDK 21 default is
 # class version 65 which d8 cannot eat).

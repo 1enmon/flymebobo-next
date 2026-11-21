@@ -29,7 +29,38 @@ import android.widget.TextView;
  */
 public class CapsuleView extends FrameLayout {
     public static final int DEFAULT_WIDTH_DP = 180;
+    /** v347: 平板（最小宽度 >= 600dp）胶囊加宽到 260dp，否则 180dp 里
+     * 标题/正文显示不全（用户 2026-11-22 平板截图：文字被截断）。 */
+    public static final int TABLET_WIDTH_DP = 260;
+    /** v347: 平板卡片同步加宽到 380dp（手机 300dp）。 */
+    public static final int TABLET_CARD_WIDTH_DP = 380;
     public static final int DEFAULT_HEIGHT_DP = 44;
+    /** 平板判定：最小宽度 >= 600dp 即平板。 */
+    public static boolean isTablet(Context ctx) {
+        return ctx.getResources().getConfiguration().smallestScreenWidthDp >= 600;
+    }
+    /** 当前设备的胶囊宽度（dp）：平板 260，手机 180。 */
+    public static int capsuleWidthDp(Context ctx) {
+        return isTablet(ctx) ? TABLET_WIDTH_DP : DEFAULT_WIDTH_DP;
+    }
+    /** 当前设备的卡片宽度（dp）：平板 380，手机 300。 */
+    public static int cardWidthDp(Context ctx) {
+        return isTablet(ctx) ? TABLET_CARD_WIDTH_DP : CARD_WIDTH_DP;
+    }
+    /** v350: 手势阈值按胶囊宽度等比缩放（平板胶囊 260dp、手机 180dp）。
+     * 右滑消散 = 胶囊宽的 2/3（手机 120dp、平板约 173dp）；左轻滑钉住
+     * = 1/3～7/9（手机 60～140dp、平板约 87～202dp）；左重滑收纳 =
+     * 超过 7/9。写死 dp 的话，平板上消散太容易误触（用户 2026-11-22
+     * “还有自动消除的距离”）。 */
+    public int dissipateDp() {
+        return capsuleWidthDp(getContext()) * 2 / 3;
+    }
+    public int pinMinDp() {
+        return capsuleWidthDp(getContext()) / 3;
+    }
+    public int pinMaxDp() {
+        return capsuleWidthDp(getContext()) * 7 / 9;
+    }
     /** Card (v143): the capsule grown into a card. Same view, same
      * background tint — only bigger. Width 300dp; height snaps to the
      * capsule grid (k*50-6dp) so the bottom lands one gap above the
@@ -333,7 +364,13 @@ public class CapsuleView extends FrameLayout {
         pill.setGravity(Gravity.CENTER_VERTICAL);
         // Left padding 2dp (user 2026-11-19 "贴近屏幕这边"): the
         // notification icon sits close to the screen edge.
-        pill.setPadding(dp(2), dp(6), dp(14), dp(6));
+        // v356: 平板上把上下内边距从 6dp 减到 2dp（用户 2026-11-22
+        // 照片：第二行字被胶囊底边切掉，只剩上半截）。胶囊高 44dp，
+        // 上下各 6dp 内边距只剩 32dp 给两行字（13sp+12sp 要 ~35dp），
+        // 第二行就被切了；减到 2dp 后剩 40dp，两行放得下。胶囊本身
+        // 高度不动，行距和卡片高度都不受影响。手机保持 6dp 不变。
+        int vPad = isTablet(context) ? dp(2) : dp(6);
+        pill.setPadding(dp(2), vPad, dp(14), vPad);
         pillBg = new GradientDrawable();
         pillBg.setShape(GradientDrawable.RECTANGLE);
         // The end against the screen edge (left) is NOT rounded — it
@@ -344,7 +381,7 @@ public class CapsuleView extends FrameLayout {
         pillBg.setColor(Color.argb(191, 30, 32, 38));
         // No border on the capsule (user 2026-11-19 "胶囊描边去掉").
         pill.setBackground(pillBg);
-        pillWidthPx = dp(DEFAULT_WIDTH_DP);
+        pillWidthPx = dp(capsuleWidthDp(context));
         addView(pill, new LayoutParams(
                 LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         // v239: download progress bar (track + fill), bottom
@@ -403,6 +440,12 @@ public class CapsuleView extends FrameLayout {
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         titleView.setTypeface(titleView.getTypeface(), android.graphics.Typeface.BOLD);
         titleView.setTextColor(Color.WHITE);
+        // v355: 宽必须 MATCH_PARENT（用户 2026-11-22 平板“字被截断了”）。
+        // WRAP_CONTENT 时长标题量出来比 texts 宽，直接被父容器裁掉，
+        // 跑马灯根本不启动；定宽后超长才滚动。
+        titleView.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
         texts.addView(titleView);
 
         textView = new TextView(context);
@@ -410,6 +453,9 @@ public class CapsuleView extends FrameLayout {
         // v268: MARQUEE from the start, same as titleView.
         textView.setEllipsize(TextUtils.TruncateAt.MARQUEE);
         textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        textView.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
         // v249: was a muted gray (170,178,189) — unreadable on a
         // saturated dark pill (user 2026-11-21 "灰色字体看不清").
         // Near-white now, same as the card body.
@@ -867,8 +913,11 @@ public class CapsuleView extends FrameLayout {
         musicCurTime.setText("0:00");
         musicProg.addView(musicCurTime);
         musicSeek = new android.widget.SeekBar(context);
+        // v349: 平板上进度条改细（24dp->18dp 高，轨道 5dp->3dp）。
+        // v348 加粗是改反了，用户说“太宽了”——要的是细，不是粗。
+        int seekH = isTablet(context) ? 18 : 24;
         LinearLayout.LayoutParams seekLp =
-                new LinearLayout.LayoutParams(0, dp(24), 1f);
+                new LinearLayout.LayoutParams(0, dp(seekH), 1f);
         seekLp.leftMargin = dp(6);
         seekLp.rightMargin = dp(6);
         musicProg.addView(musicSeek, seekLp);
@@ -941,9 +990,13 @@ public class CapsuleView extends FrameLayout {
                             // "the card has no left-swipe pin") — the
                             // old code sent it to onCardDrag too, so
                             // the card slid off-screen and the pin
-                            // never fired. Left just nudges the card
-                            // toward the edge; ACTION_UP past -60dp
-                            // pins it via onSwipeRight.
+                            // never fired.
+                            // v367: 左滑不再把卡片往左顶 —— 顶到
+                            // -80dp 就被窗口左边缘截住，看起来像
+                            // “划到这里就划不动了”（用户 2026-11-22
+                            // 05:25）。卡片留在原位不动，钉住/收进
+                            // 扇子只看松手时手指划的距离（ACTION_UP
+                            // 里 -60dp 钉住、-140dp 收进扇子）。
                             if (cardExpanded && dx > 0
                                     && onCardDragListener != null) {
                                 if (!dragWindowOpen) {
@@ -955,7 +1008,21 @@ public class CapsuleView extends FrameLayout {
                                 break;
                             }
                             if (cardExpanded && dx < 0) {
-                                setTranslationX(Math.max(dx, -dp(80)));
+                                // v367: 卡片不跟手往左移（见上面注释）。
+                                break;
+                            }
+                            // v360: 放大胶囊没有 cardDragListener——
+                            // 右拖时整张卡片跟手向右平移（pill 藏着，
+                            // 长胶囊动画看不见），否则拖了半天卡片
+                            // 一动不动，松手才突然消散。先开全屏拖拽
+                            // 窗口，不然卡片右移会被窗口截掉。
+                            if (cardExpanded && dx > 0) {
+                                if (!dragWindowOpen) {
+                                    dragWindowOpen = true;
+                                    BubbleWindow.getInstance()
+                                            .beginDragWindow();
+                                }
+                                setTranslationX(dx);
                                 break;
                             }
                             if (data != null && data.isCall && dx > 0) {
@@ -1007,7 +1074,7 @@ public class CapsuleView extends FrameLayout {
                             // dissipate (mirrored, user 2026-11-18
                             // "你改成靠左边的").
                             if (data != null && data.isCall
-                                    && dx > dp(120)
+                                    && dx > dp(dissipateDp())
                                     && onHangup != null) {
                                 // Call right swipe = hang up.
                                 endDragWindowIfOpen();
@@ -1022,7 +1089,7 @@ public class CapsuleView extends FrameLayout {
                             // v279: split by distance — a LIGHT left
                             // swipe (60–140dp) pins; a HEAVY left
                             // swipe (past 140dp) docks into the fan.
-                            if (dx < -dp(60) && dx > -dp(140)
+                            if (dx < -dp(pinMinDp()) && dx > -dp(pinMaxDp())
                                     && onSwipeRight != null) {
                                 endDragWindowIfOpen();
                                 onSwipeRight.run();
@@ -1037,15 +1104,15 @@ public class CapsuleView extends FrameLayout {
                                             .setDuration(200).start();
                                 }
                                 return true;
-                            } else if (dx <= -dp(140)
+                            } else if (dx <= -dp(pinMaxDp())
                                     && onDockSwipe != null) {
                                 endDragWindowIfOpen();
                                 onDockSwipe.run();
                                 return true;
-                            } else if (dx > dp(120)
+                            } else if (dx > dp(dissipateDp())
                                     && onSwipeLeft != null) {
                                 // Dissipate: drag it out a LONG way
-                                // (120dp) and then it dissipates
+                                // (2/3 胶囊宽) and then it dissipates
                                 // (user 2026-11-18 "拉出去一长截后
                                 // 消散"). A short drag springs back.
                                 // The tail bursts together with the
@@ -1140,6 +1207,16 @@ public class CapsuleView extends FrameLayout {
      * pill grows, exactly like the manual swipe. 240ms, same feel.
      */
     public void playAutoSwipeRight(final Runnable onDone) {
+        playAutoSwipeRight(onDone, false);
+    }
+
+    /** v364: withTail — the auto right-slide drags the transparent
+     * gradient tail too (user “自动消散也没有加拖尾”). Only the
+     * dissipate paths pass true (auto-dissipate, tap-to-open); the
+     * card-open ripple passes false — several cards swipe at once
+     * there and one shared tail can't sit on all their rows. */
+    public void playAutoSwipeRight(final Runnable onDone,
+            final boolean withTail) {
         if (pill == null) {
             if (onDone != null) {
                 onDone.run();
@@ -1150,8 +1227,56 @@ public class CapsuleView extends FrameLayout {
         // touches pass through to the screen during the auto-dissipate
         // (user 2026-11-19 "能不能做穿透").
         BubbleWindow.getInstance().beginAutoSwipeWindow();
+        // v360: 放大胶囊（卡片内容）——pill 藏起来了，长胶囊动画
+        // 看不见；改成整张卡片向右平移 200dp 再爆掉，和关卡片的
+        // 右滑一致。窗口加宽是异步的，post 到下一帧再启动（v353）。
+        if (cardExpanded) {
+            final float tx = dp(200);
+            post(new Runnable() {
+                @Override
+                public void run() {
+                    if (withTail) {
+                        BubbleWindow.getInstance()
+                                .beginAutoSwipeTail(CapsuleView.this);
+                    }
+                    animate().translationX(tx).setDuration(240)
+                            .setInterpolator(
+                                    new android.view.animation.DecelerateInterpolator())
+                            .setUpdateListener(
+                                    new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                                        @Override
+                                        public void onAnimationUpdate(
+                                                android.animation.ValueAnimator a) {
+                                            if (withTail) {
+                                                BubbleWindow.getInstance()
+                                                        .updateAutoSwipeTail(
+                                                                CapsuleView.this);
+                                            }
+                                        }
+                                    })
+                            .withLayer()
+                            .withEndAction(new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (withTail) {
+                                        BubbleWindow.getInstance()
+                                                .endAutoSwipeTail(
+                                                        CapsuleView.this);
+                                    }
+                                    BubbleWindow.getInstance()
+                                            .endDragWindowDelayed();
+                                    if (onDone != null) {
+                                        onDone.run();
+                                    }
+                                }
+                            })
+                            .start();
+                }
+            });
+            return;
+        }
         final float target = dp(200);
-        android.animation.ValueAnimator anim =
+        final android.animation.ValueAnimator anim =
                 android.animation.ValueAnimator.ofFloat(0f, target);
         anim.setDuration(240);
         anim.addUpdateListener(
@@ -1172,7 +1297,16 @@ public class CapsuleView extends FrameLayout {
                 }
             }
         });
-        anim.start();
+        // v353: 窗口加宽是异步生效的（updateViewLayout 下一帧才起作用），
+        // 动画立刻启动的话前几帧窗口还是窄的，胶囊一长就被截掉
+        // （用户 2026-11-22 “自动消除右滑的时候”截断）。post 到下一帧
+        // 再启动，让窗口先加宽。
+        pill.post(new Runnable() {
+            @Override
+            public void run() {
+                anim.start();
+            }
+        });
     }
 
     /** Shrink the window back to content size after a drag ends. */
@@ -1192,7 +1326,7 @@ public class CapsuleView extends FrameLayout {
         if (pill == null) {
             return;
         }
-        int w = dp(DEFAULT_WIDTH_DP) + (int) dx;
+        int w = dp(capsuleWidthDp(getContext())) + (int) dx;
         pillWidthPx = w;
         // One reusable background — no new bitmap per frame (that was
         // the swipe jank). The drawable reads its bounds and only
@@ -1200,7 +1334,7 @@ public class CapsuleView extends FrameLayout {
         // changes, so the swipe is just a cheap width + translation.
         if (longBg == null) {
             longBg = new LongCapsuleDrawable(pillColor, dp(22),
-                    dp(DEFAULT_WIDTH_DP));
+                    dp(capsuleWidthDp(getContext())));
         }
         longBg.setTintColor(pillColor);
         if (pill.getBackground() != longBg) {
@@ -1239,7 +1373,7 @@ public class CapsuleView extends FrameLayout {
         if (pill == null) {
             return;
         }
-        pillWidthPx = dp(DEFAULT_WIDTH_DP);
+        pillWidthPx = dp(capsuleWidthDp(getContext()));
         lastGrowW = -1;
         longGrown = false;
         LayoutParams lp = (LayoutParams) pill.getLayoutParams();
@@ -1751,7 +1885,7 @@ public class CapsuleView extends FrameLayout {
         if (pill != null && pill.getWidth() > 0) {
             return pill.getWidth();
         }
-        return dp(DEFAULT_WIDTH_DP);
+        return dp(capsuleWidthDp(getContext()));
     }
 
     public int getPillColor() {
@@ -2019,16 +2153,17 @@ public class CapsuleView extends FrameLayout {
         int trackC = pillLight ? Color.argb(70, 26, 26, 26)
                 : Color.argb(70, 255, 255, 255);
         int fillC = pillLight ? Color.rgb(26, 26, 26) : Color.WHITE;
+        int trackH = isTablet(getContext()) ? 3 : 5;
         GradientDrawable bg = new GradientDrawable();
         bg.setShape(GradientDrawable.RECTANGLE);
         bg.setCornerRadius(dp(3));
         bg.setColor(trackC);
-        bg.setSize(dp(1), dp(5));
+        bg.setSize(dp(1), dp(trackH));
         GradientDrawable fg = new GradientDrawable();
         fg.setShape(GradientDrawable.RECTANGLE);
         fg.setCornerRadius(dp(3));
         fg.setColor(fillC);
-        fg.setSize(dp(1), dp(5));
+        fg.setSize(dp(1), dp(trackH));
         android.graphics.drawable.ClipDrawable clip =
                 new android.graphics.drawable.ClipDrawable(fg,
                         Gravity.LEFT,
@@ -2446,6 +2581,9 @@ public class CapsuleView extends FrameLayout {
         if (musicTitleChanged) {
             playMusicTitleEntrance();
         }
+        // v355: 换歌词/标题后重新选中，跑马灯才继续滚（否则长标题
+        // 只显示前半截就停住，看着像被截断）。
+        applyScrollFlag();
     }
 
     /** Live text update (v95, downloads): replace line 2 in place,
@@ -2464,6 +2602,8 @@ public class CapsuleView extends FrameLayout {
         if (data != null) {
             data.text = text;
         }
+        // v355: 同 updateTitle，换正文后重新选中，跑马灯才继续滚。
+        applyScrollFlag();
     }
 
     public void updateLyrics(String lyric) {
