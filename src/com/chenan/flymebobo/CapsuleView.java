@@ -35,6 +35,10 @@ public class CapsuleView extends FrameLayout {
     /** v347: 平板卡片同步加宽到 380dp（手机 300dp）。 */
     public static final int TABLET_CARD_WIDTH_DP = 380;
     public static final int DEFAULT_HEIGHT_DP = 44;
+    /** v376: 来电胶囊放大（预览 A 案 240×60：头像 40dp、名字 16sp、
+     * 接听钮 40dp、计时 16sp）。 */
+    public static final int CALL_WIDTH_DP = 240;
+    public static final int CALL_HEIGHT_DP = 60;
     /** 平板判定：最小宽度 >= 600dp 即平板。 */
     public static boolean isTablet(Context ctx) {
         return ctx.getResources().getConfiguration().smallestScreenWidthDp >= 600;
@@ -52,14 +56,33 @@ public class CapsuleView extends FrameLayout {
      * = 1/3～7/9（手机 60～140dp、平板约 87～202dp）；左重滑收纳 =
      * 超过 7/9。写死 dp 的话，平板上消散太容易误触（用户 2026-11-22
      * “还有自动消除的距离”）。 */
+    /** v376: this capsule's effective width (dp) — the call capsule
+     * is bigger (240dp, variant A) than a regular capsule. The
+     * swipe thresholds and the long tail scale with it. */
+    private int baseWidthDp() {
+        if (data != null && data.isCall) {
+            return CALL_WIDTH_DP;
+        }
+        return capsuleWidthDp(getContext());
+    }
+
+    /** v376: the pill's rounded-end radius (dp) — half the capsule
+     * height (30dp for the 60dp call capsule, 22dp otherwise). */
+    private int cornerRadiusDp() {
+        if (data != null && data.isCall) {
+            return CALL_HEIGHT_DP / 2;
+        }
+        return DEFAULT_HEIGHT_DP / 2;
+    }
+
     public int dissipateDp() {
-        return capsuleWidthDp(getContext()) * 2 / 3;
+        return baseWidthDp() * 2 / 3;
     }
     public int pinMinDp() {
-        return capsuleWidthDp(getContext()) / 3;
+        return baseWidthDp() / 3;
     }
     public int pinMaxDp() {
-        return capsuleWidthDp(getContext()) * 7 / 9;
+        return baseWidthDp() * 7 / 9;
     }
     /** Card (v143): the capsule grown into a card. Same view, same
      * background tint — only bigger. Width 300dp; height snaps to the
@@ -85,6 +108,10 @@ public class CapsuleView extends FrameLayout {
     private LongCapsuleDrawable longBg;
     private boolean longGrown;
     private int lastGrowW = -1;
+    /** v409: the running spring-back animator for a call capsule
+     * (see springBackCallCapsule). Cancelled on a new touch so a
+     * fresh drag never fights the tail retraction. */
+    private android.animation.ValueAnimator callSpringBackAnim;
 
     /** One background for the whole long capsule (one element, one
      * gradient, no seam): transparent at the screen edge, fading to
@@ -110,6 +137,19 @@ public class CapsuleView extends FrameLayout {
         private final int bodyW;
         private int lastW, lastH, lastTint;
         private float lastFade = -1f;
+        /** v376: mirror the tail for a right-edge capsule — the
+         * rounded end and the fade go on the LEFT (toward the
+         * centre), the flat end on the RIGHT (the screen edge). */
+        private boolean mirror;
+        private boolean lastMirror;
+
+        void setMirror(boolean mirror) {
+            if (this.mirror != mirror) {
+                this.mirror = mirror;
+                shader = null;
+                invalidateSelf();
+            }
+        }
 
         LongCapsuleDrawable(int tint, float cornerR, int bodyW) {
             this.tint = tint;
@@ -141,16 +181,32 @@ public class CapsuleView extends FrameLayout {
             float fade = w > bodyW ? (float) (w - bodyW) / w : 0f;
             if (shader == null || w != lastW || h != lastH
                     || Math.abs(fade - lastFade) > 0.01f
-                    || tint != lastTint) {
+                    || tint != lastTint || mirror != lastMirror) {
                 rect.set(0, 0, w, h);
                 path.reset();
                 path.addRoundRect(rect,
-                        new float[]{0, 0, cornerR, cornerR,
-                                cornerR, cornerR, 0, 0},
+                        mirror
+                                // v377: same corner bug as
+                                // applyPillShape — {r,r,r,r,0,0,0,0}
+                                // rounds the TOP, not the LEFT. A
+                                // proper left-right mirror rounds the
+                                // LEFT end and flats the RIGHT end.
+                                ? new float[]{cornerR, cornerR,
+                                        0, 0, 0, 0, cornerR, cornerR}
+                                : new float[]{0, 0, cornerR, cornerR,
+                                        cornerR, cornerR, 0, 0},
                         android.graphics.Path.Direction.CW);
                 if (fade < 0.02f) {
                     paint.setShader(null);
                     paint.setColor(tint);
+                } else if (mirror) {
+                    shader = new android.graphics.LinearGradient(
+                            0, 0, w, 0,
+                            new int[]{tint, tint,
+                                    android.graphics.Color.TRANSPARENT},
+                            new float[]{0f, 1f - fade, 1f},
+                            android.graphics.Shader.TileMode.CLAMP);
+                    paint.setShader(shader);
                 } else {
                     shader = new android.graphics.LinearGradient(
                             0, 0, w, 0,
@@ -165,6 +221,7 @@ public class CapsuleView extends FrameLayout {
                 lastH = h;
                 lastFade = fade;
                 lastTint = tint;
+                lastMirror = mirror;
             }
             canvas.save();
             canvas.translate(b.left, b.top);
@@ -222,6 +279,10 @@ public class CapsuleView extends FrameLayout {
     private boolean callRed;
     private boolean callAnswered;
     private boolean callSpeaker;
+    // v415 (preview): after answering, the capsule collapses to
+    // just the timer. True once collapseToTimer() has run for this
+    // call; reset in bind() so a new call starts full-size.
+    private boolean collapsedToTimer;
     private android.graphics.Bitmap iconCallBmp;
     private android.graphics.Bitmap iconCallEndBmp;
     private android.graphics.Bitmap iconVolumeBmp;
@@ -262,6 +323,126 @@ public class CapsuleView extends FrameLayout {
             + "11.54L12 21.35z";
     private boolean pinned;
     private NotifData data;
+    /** v376: false = this capsule is docked on the RIGHT edge (the
+     * call capsule when the "来电放右边" switch is on). Swipe
+     * directions mirror: toward the right edge = pin/dock, toward
+     * the centre (left) = hang up / dissipate. Set once when the
+     * capsule is created, before bind(). Default true (left). */
+    private boolean dockLeft = true;
+
+    public void setDockLeft(boolean dockLeft) {
+        this.dockLeft = dockLeft;
+        applyPillShape();
+        applyDockMirror();
+    }
+
+    /** v376: the pill's corner radii follow the capsule size and
+     * the dock side — the edge against the screen is flat, the end
+     * toward the centre is rounded (radius = half the height). */
+    private void applyPillShape() {
+        if (pillBg == null) {
+            return;
+        }
+        float r = dp(cornerRadiusDp());
+        if (dockLeft) {
+            pillBg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+        } else {
+            // v377: the right-dock radii were wrong — {r,r,r,r,0,0,0,0}
+            // rounds the TOP and flats the BOTTOM (a top-bottom
+            // distortion, not a left-right mirror), which is the
+            // "左右翻转" the user saw in the screenshot. A proper
+            // left-right mirror rounds the LEFT end (toward the
+            // centre) and flats the RIGHT end (the screen edge):
+            // {r,r, 0,0, 0,0, r,r}.
+            pillBg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
+        }
+    }
+
+    /** v382: 横滑一律拦截——不管按在胶囊的哪里（号码、图标、
+     * 接听钮）都能左右滑动。之前只有按在胶囊身上才滑得动，
+     * 按在可点击的接听钮上滑不动：按钮吞了触摸，胶囊的
+     * OnTouchListener 收不到 MOVE。DOWN 时记下起点、暂不拦截
+     * （按钮还能点）；MOVE 一到横滑阈值（24dp 且横向为主）
+     * 就拦截，触摸交给胶囊的 OnTouchListener，按钮收不到
+     * UP、不会误触发接听。轻点（没滑够）照常走按钮的点击。 */
+    @Override
+    public boolean onInterceptTouchEvent(android.view.MotionEvent e) {
+        switch (e.getActionMasked()) {
+            case android.view.MotionEvent.ACTION_DOWN:
+                downX = e.getRawX();
+                downY = e.getRawY();
+                swiping = false;
+                return false;
+            case android.view.MotionEvent.ACTION_MOVE: {
+                float dx = e.getRawX() - downX;
+                float dy = e.getRawY() - downY;
+                if (Math.abs(dx) > dp(24)
+                        && Math.abs(dx) > Math.abs(dy) * 2) {
+                    return true;
+                }
+                return false;
+            }
+            default:
+                return false;
+        }
+    }
+
+    /** v379: right-dock mirror — when the capsule lives on the
+     * right (the call capsule in the right window), the pill's
+     * contents mirror: the answer button moves to the left (toward
+     * the centre, reachable) and the app icon to the right (toward
+     * the screen edge). Left dock keeps [icon][texts][answer].
+     * The gaps follow the swap (icon's 8dp gap moves to its left,
+     * the answer's 6dp gap to its right). Idempotent — safe to call
+     * from setDockLeft and from bind(). */
+    private void applyDockMirror() {
+        if (pill == null || iconView == null || answerBtn == null) {
+            return;
+        }
+        boolean mirror = !dockLeft;
+        int iconIdx = pill.indexOfChild(iconView);
+        int ansIdx = pill.indexOfChild(answerBtn);
+        if (iconIdx < 0 || ansIdx < 0) {
+            return;
+        }
+        if (mirror && iconIdx < ansIdx) {
+            // [icon][texts]...[answer] -> [answer][texts]...[icon].
+            pill.removeView(answerBtn);
+            pill.removeView(iconView);
+            pill.addView(answerBtn, 0);
+            pill.addView(iconView);
+            LinearLayout.LayoutParams iconLp =
+                    (LinearLayout.LayoutParams)
+                            iconView.getLayoutParams();
+            iconLp.rightMargin = 0;
+            iconLp.leftMargin = dp(8);
+            iconView.setLayoutParams(iconLp);
+            LinearLayout.LayoutParams ansLp =
+                    (LinearLayout.LayoutParams)
+                            answerBtn.getLayoutParams();
+            ansLp.leftMargin = 0;
+            ansLp.rightMargin = dp(6);
+            answerBtn.setLayoutParams(ansLp);
+        } else if (!mirror && ansIdx < iconIdx) {
+            // Restore [icon][texts]...[answer].
+            pill.removeView(answerBtn);
+            pill.removeView(iconView);
+            pill.addView(iconView, 0);
+            pill.addView(answerBtn);
+            LinearLayout.LayoutParams iconLp =
+                    (LinearLayout.LayoutParams)
+                            iconView.getLayoutParams();
+            iconLp.leftMargin = 0;
+            iconLp.rightMargin = dp(8);
+            iconView.setLayoutParams(iconLp);
+            LinearLayout.LayoutParams ansLp =
+                    (LinearLayout.LayoutParams)
+                            answerBtn.getLayoutParams();
+            ansLp.rightMargin = 0;
+            ansLp.leftMargin = dp(6);
+            answerBtn.setLayoutParams(ansLp);
+        }
+    }
     /** Card mode (v143): the SAME view grown into a card. The pill
      * (compact content) hides and cardView shows; the background tint
      * does NOT change (user 2026-11-19 "长大不改变底色") — cardBg is
@@ -352,6 +533,9 @@ public class CapsuleView extends FrameLayout {
     private float downX;
     private float downY;
     private boolean swiping;
+    /** v393: drag diagnosis — true once the drag-start line is
+     * logged for the current touch, so the log is not flooded. */
+    private boolean dragStartLogged;
     /** True while the window is widened for the current drag. */
     private boolean dragWindowOpen;
 
@@ -547,6 +731,9 @@ public class CapsuleView extends FrameLayout {
         answerTimerText.setTypeface(answerTimerText.getTypeface(),
                 android.graphics.Typeface.BOLD);
         answerTimerText.setTextColor(Color.WHITE);
+        // v416: never wrap the timer to a second line (the v415
+        // 96dp capsule wrapped "0:27" as "0:2" / "7").
+        answerTimerText.setSingleLine(true);
         answerTimerText.setVisibility(GONE);
         LinearLayout.LayoutParams ttLp =
                 new LinearLayout.LayoutParams(
@@ -969,6 +1156,14 @@ public class CapsuleView extends FrameLayout {
                         downX = e.getRawX();
                         downY = e.getRawY();
                         swiping = false;
+                        dragStartLogged = false;
+                        // v409: a fresh touch cancels a running
+                        // spring-back tail so the new drag never
+                        // fights the tail retraction.
+                        if (callSpringBackAnim != null) {
+                            callSpringBackAnim.cancel();
+                            callSpringBackAnim = null;
+                        }
                         break;
                     case android.view.MotionEvent.ACTION_MOVE: {
                         float dx = e.getRawX() - downX;
@@ -979,6 +1174,32 @@ public class CapsuleView extends FrameLayout {
                         if (Math.abs(dx) > dp(24)
                                 && Math.abs(dx) > Math.abs(dy) * 2) {
                             swiping = true;
+                            // v393: drag diagnosis — log the first
+                            // threshold-hit MOVE for a right-dock
+                            // call capsule, so a "jump" can be
+                            // traced to real dx values.
+                            if (!dockLeft && data != null && data.isCall
+                                    && !dragStartLogged) {
+                                dragStartLogged = true;
+                                FileLog.i("CallDrag start downX="
+                                        + downX + " rawX=" + e.getRawX()
+                                        + " dx=" + dx + " dy=" + dy
+                                        + " transX=" + getTranslationX()
+                                        + " pos=" + screenPos());
+                            }
+                            // v386: a right-dock capsule lives in
+                            // its own small window; widen that
+                            // window for the drag so the finger
+                            // cannot drift out of it mid-swipe
+                            // (that broke the touch stream and left
+                            // the capsule stuck halfway, never
+                            // springing back). Only the window size
+                            // changes — never its position or the
+                            // capsule's margins — so nothing jumps.
+                            if (!dockLeft) {
+                                BubbleWindow.getInstance()
+                                        .beginCallDragWindow();
+                            }
                             // v153: the open card is an enlarged
                             // capsule — its drag goes to BubbleWindow
                             // (live tail + card move), not to the
@@ -1025,39 +1246,32 @@ public class CapsuleView extends FrameLayout {
                                 setTranslationX(dx);
                                 break;
                             }
-                            if (data != null && data.isCall && dx > 0) {
-                                // Call right swipe = hang up: the
-                                // capsule turns red as it slides
-                                // (user 2026-11-19 "手动右滑为挂断颜色
-                                // 变成红色") AND grows the long tail
-                                // like a regular dissipate (user
-                                // 2026-11-19 "手动右滑你没发现没有拖尾
-                                // 吗"). The tail is hang-up red.
-                                if (!dragWindowOpen) {
+                            // v376: the swipe directions mirror with
+                            // the dock side. Left dock: right (toward
+                            // the centre) = hang up / dissipate,
+                            // left (toward the edge) = pin/dock.
+                            // Right dock: the reverse — left (toward
+                            // the centre) = hang up / dissipate,
+                            // right (toward the edge) = pin/dock.
+                            boolean towardCenter =
+                                    dockLeft ? dx > 0 : dx < 0;
+                            float adx = Math.abs(dx);
+                            if (towardCenter) {
+                                // Toward the centre: hang up (call,
+                                // the capsule turns red as it slides)
+                                // or the dissipate tail (regular).
+                                // The right-edge capsule's tail fits
+                                // its own window, so no drag window.
+                                if (dockLeft && !dragWindowOpen) {
                                     dragWindowOpen = true;
                                     BubbleWindow.getInstance()
                                             .beginDragWindow();
                                 }
-                                setCallRed(true);
-                                growLongCapsule(dx);
+                                if (data != null && data.isCall) {
+                                    setCallRed(true);
+                                }
+                                growLongCapsule(adx);
                                 break;
-                            }
-                            if (dx > 0) {
-                                // The capsule IS the long element: one
-                                // element, one background gradient —
-                                // no seam possible. The pill grows to
-                                // (180 + dx) wide, the gradient fades
-                                // smoothly from transparent at the
-                                // screen edge to the tint (80%) at dx,
-                                // then stays solid; the content is
-                                // pushed to the right end and the pin
-                                // moves along.
-                                if (!dragWindowOpen) {
-                                    dragWindowOpen = true;
-                                    BubbleWindow.getInstance()
-                                            .beginDragWindow();
-                                }
-                                growLongCapsule(dx);
                             } else {
                                 resetLongCapsule();
                                 setTranslationX(dx);
@@ -1066,50 +1280,96 @@ public class CapsuleView extends FrameLayout {
                         break;
                     }
                     case android.view.MotionEvent.ACTION_UP: {
+                        // v386: the drag is over — shrink the right
+                        // call window back to its idle size.
+                        if (!dockLeft) {
+                            BubbleWindow.getInstance()
+                                    .endCallDragWindow();
+                        }
                         float dx = e.getRawX() - downX;
                         float dy = e.getRawY() - downY;
+                        // v393: drag diagnosis — log the release so
+                        // a stuck / non-springing capsule can be
+                        // traced to the branch it took.
+                        if (!dockLeft && data != null && data.isCall) {
+                            FileLog.i("CallDrag up dx=" + dx
+                                    + " adx=" + Math.abs(dx)
+                                    + " transX=" + getTranslationX()
+                                    + " pos=" + screenPos()
+                                    + " dissipateDp=" + dissipateDp()
+                                    + " pinMinDp=" + pinMinDp()
+                                    + " pinMaxDp=" + pinMaxDp());
+                        }
                         if (Math.abs(dx) > Math.abs(dy) * 2) {
+                            // v376: mirror with the dock side (see
+                            // ACTION_MOVE). towardCenter = the hang-up
+                            // / dissipate direction; towardEdge = the
+                            // pin / dock direction.
+                            boolean towardCenter =
+                                    dockLeft ? dx > 0 : dx < 0;
+                            boolean towardEdge = !towardCenter;
+                            float adx = Math.abs(dx);
                             // Left dock: left (toward the edge) =
                             // dock, right (toward the centre) =
                             // dissipate (mirrored, user 2026-11-18
                             // "你改成靠左边的").
                             if (data != null && data.isCall
-                                    && dx > dp(dissipateDp())
+                                    && towardCenter
+                                    && adx > dp(dissipateDp())
                                     && onHangup != null) {
-                                // Call right swipe = hang up.
+                                // Call swipe toward the centre =
+                                // hang up.
                                 endDragWindowIfOpen();
                                 onHangup.run();
                                 return true;
                             }
-                            // Left swipe = pin/unpin, including on a
-                            // call capsule (user 2026-11-19 "左滑继续
-                            // 改回钉住和解除钉住"). The v108/v109
-                            // left-swipe speaker answer is gone;
-                            // speaker is via the timer tap mid-call.
-                            // v279: split by distance — a LIGHT left
-                            // swipe (60–140dp) pins; a HEAVY left
-                            // swipe (past 140dp) docks into the fan.
-                            if (dx < -dp(pinMinDp()) && dx > -dp(pinMaxDp())
+                            // Swipe toward the edge = pin/unpin,
+                            // including on a call capsule (user
+                            // 2026-11-19 "左滑继续改回钉住和解除钉
+                            // 住"). The v108/v109 left-swipe speaker
+                            // answer is gone; speaker is via the
+                            // timer tap mid-call.
+                            // v279: split by distance — a LIGHT swipe
+                            // toward the edge (60–140dp) pins; a
+                            // HEAVY one (past 140dp) docks into
+                            // the fan.
+                            if (towardEdge && adx > dp(pinMinDp())
+                                    && adx < dp(pinMaxDp())
                                     && onSwipeRight != null) {
                                 endDragWindowIfOpen();
                                 onSwipeRight.run();
-                                // v178: pinning the OPEN card via left
-                                // swipe must spring the card back to
-                                // its slot. The drag left it shifted
-                                // (up to -80dp) and onSwipeRight only
+                                // v387: pinning must spring the capsule
+                                // back to its slot. The drag left it
+                                // shifted right by dx (setTranslationX
+                                // in ACTION_MOVE) and onSwipeRight only
                                 // flips the pin state — without this
-                                // the card stays stuck off-slot.
-                                if (cardExpanded) {
+                                // the capsule stays stuck shifted
+                                // right ("右滑松手不弹出来"). The old
+                                // code only did this when cardExpanded
+                                // (v178, for the open card); a call
+                                // capsule is never a card, so it never
+                                // sprang back. Left slide was normal
+                                // because a short left drag falls
+                                // through to the "Not far enough"
+                                // spring-back below.
+                                // v409: a call capsule springs back
+                                // WITH a tail (springBackCallCapsule);
+                                // regular capsules keep the bare slide.
+                                if (data != null && data.isCall) {
+                                    springBackCallCapsule();
+                                } else {
                                     animate().translationX(0f)
                                             .setDuration(200).start();
                                 }
                                 return true;
-                            } else if (dx <= -dp(pinMaxDp())
+                            } else if (towardEdge
+                                    && adx >= dp(pinMaxDp())
                                     && onDockSwipe != null) {
                                 endDragWindowIfOpen();
                                 onDockSwipe.run();
                                 return true;
-                            } else if (dx > dp(dissipateDp())
+                            } else if (towardCenter
+                                    && adx > dp(dissipateDp())
                                     && onSwipeLeft != null) {
                                 // Dissipate: drag it out a LONG way
                                 // (2/3 胶囊宽) and then it dissipates
@@ -1141,19 +1401,42 @@ public class CapsuleView extends FrameLayout {
                             break;
                         }
                         endDragWindowIfOpen();
-                        resetLongCapsule();
                         if (data != null && data.isCall) {
                             setCallRed(false);
                             if (!callAnswered) {
                                 setAnswerIcon(0);
                             }
+                            // v409: spring back WITH a tail. Do NOT
+                            // resetLongCapsule() here — the animator
+                            // retracts the pill (tail) in sync with
+                            // the slide home, so the post-release
+                            // bounce has a tail instead of a bare
+                            // jump. Left-drag: the pill is already
+                            // grown, it retracts; right-drag: a tail
+                            // grows from the displacement and retracts.
+                            springBackCallCapsule();
+                        } else {
+                            resetLongCapsule();
+                            animate().translationX(0f)
+                                    .setDuration(200).start();
                         }
-                        animate().translationX(0f)
-                                .setDuration(200).start();
                         break;
                     }
                     case android.view.MotionEvent.ACTION_CANCEL:
                         swiping = false;
+                        // v393: drag diagnosis — a cancel mid-drag
+                        // snaps the capsule back; log it so a
+                        // broken touch stream shows up.
+                        if (!dockLeft && data != null && data.isCall) {
+                            FileLog.i("CallDrag cancel transX="
+                                    + getTranslationX());
+                        }
+                        // v386: drag aborted — shrink the right
+                        // call window back to its idle size.
+                        if (!dockLeft) {
+                            BubbleWindow.getInstance()
+                                    .endCallDragWindow();
+                        }
                         if (cardExpanded
                                 && onCardDragListener != null) {
                             dragWindowOpen = false;
@@ -1321,21 +1604,57 @@ public class CapsuleView extends FrameLayout {
     // background — no seam): the pill widens to (180 + dx), its
     // background becomes a single bitmap (smooth gradient + the
     // half-pill rounded corners), the content is pushed to the right
+    /** v399: capsule screen position for drag diagnosis —
+     * getLocationOnScreen gives the absolute screen x/y of the
+     * capsule's left-top corner. If the capsule is off-screen
+     * the numbers show it directly (x < 0, or x + width >
+     * screen width). The v396–v398 logs had transX (the offset)
+     * and the pill width, but not where the capsule actually
+     * sits on screen — that is what tells a "vanished" capsule
+     * (removed / invisible) apart from a "moved" one (still
+     * there, just off-screen). */
+    private String screenPos() {
+        int[] loc = new int[2];
+        try {
+            getLocationOnScreen(loc);
+        } catch (Throwable ignored) {
+        }
+        return loc[0] + "," + loc[1];
+    }
+
     // end, and the pin moves along with the capsule body.
-    private void growLongCapsule(float dx) {
+    /** v376: grow is the (positive) distance swiped toward the
+     * centre. Left dock: the pill extends right, content to the
+     * right end, tail fading at the left edge. Right dock: the
+     * pill extends left, content to the left end, tail fading at
+     * the right edge. */
+    private void growLongCapsule(float grow) {
         if (pill == null) {
             return;
         }
-        int w = dp(capsuleWidthDp(getContext())) + (int) dx;
+        // v398: growing (toward the centre) and translating
+        // (toward the edge) are mutually exclusive. A left-drag
+        // after a right-drag left a stale translationX (the
+        // 17:40 log: transX=149.80 at release — the capsule was
+        // shifted right by an earlier right-drag segment and the
+        // pill then grew from that shifted anchor, so the
+        // capsule sat partly off-screen and looked wrong). The
+        // pill must grow from the capsule's idle position, so
+        // clear any translation before growing.
+        if (getTranslationX() != 0f) {
+            setTranslationX(0f);
+        }
+        int w = dp(baseWidthDp()) + (int) grow;
         pillWidthPx = w;
         // One reusable background — no new bitmap per frame (that was
         // the swipe jank). The drawable reads its bounds and only
         // rebuilds its cached gradient shader when the width/fade
         // changes, so the swipe is just a cheap width + translation.
         if (longBg == null) {
-            longBg = new LongCapsuleDrawable(pillColor, dp(22),
-                    dp(capsuleWidthDp(getContext())));
+            longBg = new LongCapsuleDrawable(pillColor,
+                    dp(cornerRadiusDp()), dp(baseWidthDp()));
         }
+        longBg.setMirror(!dockLeft);
         longBg.setTintColor(pillColor);
         if (pill.getBackground() != longBg) {
             pill.setBackground(longBg);
@@ -1346,15 +1665,26 @@ public class CapsuleView extends FrameLayout {
             LayoutParams lp = (LayoutParams) pill.getLayoutParams();
             if (lp.width != w) {
                 lp.width = w;
+                // Right-edge capsule grows leftward (toward the
+                // centre): anchor the pill to the right end so the
+                // extra width extends left, not off the screen.
+                lp.gravity = dockLeft ? Gravity.START : Gravity.END;
                 pill.setLayoutParams(lp);
             }
         }
-        pill.setGravity(Gravity.CENTER_VERTICAL | Gravity.END);
+        pill.setGravity(Gravity.CENTER_VERTICAL
+                | (dockLeft ? Gravity.END : Gravity.START));
         // Lock the texts to its measured width so it doesn't stretch
         // — the whole content (icon + text) must move to the right
         // end together with the capsule front. Once per drag only.
         if (!longGrown) {
             longGrown = true;
+            // v396: drag diagnosis — first grow of this drag:
+            // the pill's target width and whether it is visible.
+            FileLog.i("CallDrag grow w=" + w + " pillVis="
+                    + pill.getVisibility() + " pillW=" + pill.getWidth()
+                    + " bgLong=" + (pill.getBackground() == longBg)
+                    + " pos=" + screenPos());
             if (texts != null) {
                 LinearLayout.LayoutParams tlp =
                         (LinearLayout.LayoutParams)
@@ -1365,7 +1695,7 @@ public class CapsuleView extends FrameLayout {
             }
         }
         if (pinView != null) {
-            pinView.setTranslationX(dx);
+            pinView.setTranslationX(dockLeft ? grow : -grow);
         }
     }
 
@@ -1373,7 +1703,7 @@ public class CapsuleView extends FrameLayout {
         if (pill == null) {
             return;
         }
-        pillWidthPx = dp(capsuleWidthDp(getContext()));
+        pillWidthPx = dp(baseWidthDp());
         lastGrowW = -1;
         longGrown = false;
         LayoutParams lp = (LayoutParams) pill.getLayoutParams();
@@ -1391,6 +1721,80 @@ public class CapsuleView extends FrameLayout {
         if (pinView != null) {
             pinView.setTranslationX(0f);
         }
+    }
+
+    /** v409: spring a call capsule back to its slot WITH a tail.
+     * The bare translationX spring-back (v387) slides the pill as
+     * a rigid body, so the post-release bounce reads as a bare
+     * jump with no tail (user 2026-11-22 "它异常弹动是没有拖尾的
+     * / 你加个拖尾就完事了"). This animates translationX AND the
+     * pill length together over the same 200ms: the pill stretches
+     * into a tail proportional to the remaining displacement and
+     * retracts as the capsule settles. Left-drag release: the pill
+     * is already grown (tail exists) — animate it retracting
+     * instead of an instant reset. Right-drag release: the pill
+     * is normal — grow a tail proportional to the displacement and
+     * retract it as the capsule slides home. The 250ms delayed
+     * window shrink (v405) covers the 200ms, so the tail is never
+     * clipped mid-flight. Call capsules only — regular capsules
+     * keep the old spring-back. */
+    private void springBackCallCapsule() {
+        if (pill == null) {
+            animate().translationX(0f).setDuration(200).start();
+            return;
+        }
+        if (callSpringBackAnim != null) {
+            callSpringBackAnim.cancel();
+            callSpringBackAnim = null;
+        }
+        final float startTx = getTranslationX();
+        final float startGrow = Math.max(0f,
+                pillWidthPx - dp(baseWidthDp()));
+        // Tail length at release: what is already grown plus the
+        // remaining slide distance (so a right-drag, whose pill is
+        // still normal, grows a tail as long as its displacement).
+        final float tailBase = startGrow + Math.abs(startTx);
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(200);
+        callSpringBackAnim = anim;
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+            @Override
+            public void onAnimationUpdate(
+                    android.animation.ValueAnimator a) {
+                float f = (Float) a.getAnimatedValue();
+                float tx = startTx * (1f - f);
+                float grow = tailBase * (1f - f);
+                // Grow the pill (tail) first — growLongCapsule
+                // clears translationX (v398), so re-apply it
+                // right after, in the same frame.
+                if (grow > 0.5f) {
+                    growLongCapsule(grow);
+                } else {
+                    resetLongCapsule();
+                }
+                setTranslationX(tx);
+            }
+        });
+        anim.addListener(
+                new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(
+                    android.animation.Animator animation) {
+                callSpringBackAnim = null;
+                resetLongCapsule();
+                setTranslationX(0f);
+            }
+
+            @Override
+            public void onAnimationCancel(
+                    android.animation.Animator animation) {
+                callSpringBackAnim = null;
+            }
+        });
+        anim.start();
     }
 
     public void bind(NotifData notifData) {
@@ -1431,6 +1835,9 @@ public class CapsuleView extends FrameLayout {
                 line2 += " · " + notifData.cabinet;
             }
             this.textView.setText(line2);
+            // v395: a reused view may have had the line hidden
+            // (empty text) — a code always shows.
+            this.textView.setVisibility(VISIBLE);
             this.textView.setTextSize(
                     TypedValue.COMPLEX_UNIT_SP, 20f);
             this.textView.setTypeface(
@@ -1438,6 +1845,16 @@ public class CapsuleView extends FrameLayout {
                     android.graphics.Typeface.BOLD);
         } else {
             this.textView.setText(notifData.text != null ? notifData.text : "");
+            // v395: an empty second line takes no space — a call
+            // with no name has text="" (only the number as the
+            // title), so hide the line and the title centres
+            // alone in the pill instead of sitting on top with a
+            // blank row under it. Non-call capsules with an empty
+            // body behave the same (title only).
+            this.textView.setVisibility(
+                    (notifData.text == null
+                            || notifData.text.isEmpty())
+                            ? GONE : VISIBLE);
             // v246: reset size/weight — a CapsuleView reused
             // after a code capsule must not keep 20sp bold.
             this.textView.setTextSize(
@@ -1486,29 +1903,99 @@ public class CapsuleView extends FrameLayout {
             // Call capsule (v103): green pill, answer button at the
             // right end, NO pin icon (auto-pinned but the badge is
             // replaced by the answer button).
+            // v376: bigger (preview A 240×60): 40dp icon, 16sp name,
+            // 40dp answer button, 16sp timer, 30dp corner radius.
             setCallTint(true);
             answerBtn.setVisibility(VISIBLE);
             pinView.setVisibility(GONE);
             callRed = false;
             callAnswered = false;
             callSpeaker = false;
+            // v415: a (re)bound call starts full-size, not collapsed
+            // to the timer. The pill width is restored in case this
+            // view was collapsed by a previous call.
+            collapsedToTimer = false;
+            if (iconView != null) {
+                iconView.setVisibility(VISIBLE);
+            }
+            if (texts != null) {
+                texts.setVisibility(VISIBLE);
+            }
+            if (pill != null) {
+                try {
+                    LayoutParams lp =
+                            (LayoutParams) pill.getLayoutParams();
+                    if (lp.width != LayoutParams.MATCH_PARENT) {
+                        lp.width = LayoutParams.MATCH_PARENT;
+                        lp.gravity = Gravity.CENTER_VERTICAL;
+                        pill.setLayoutParams(lp);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
             setAnswerIcon(0);
             answerTimerText.setVisibility(GONE);
             answerTimerText.setText("");
+            answerTimerText.setTextSize(
+                    TypedValue.COMPLEX_UNIT_SP, 16);
             answerBtnBg.setShape(GradientDrawable.OVAL);
             answerBtnBg.setCornerRadius(0);
             LinearLayout.LayoutParams ansLp =
                     (LinearLayout.LayoutParams)
                             answerBtn.getLayoutParams();
-            ansLp.width = dp(28);
+            ansLp.width = dp(40);
+            ansLp.height = dp(40);
             answerBtn.setLayoutParams(ansLp);
+            LinearLayout.LayoutParams aIconLp =
+                    (LinearLayout.LayoutParams)
+                            answerIcon.getLayoutParams();
+            aIconLp.width = dp(22);
+            aIconLp.height = dp(22);
+            answerIcon.setLayoutParams(aIconLp);
+            LinearLayout.LayoutParams iconLp =
+                    (LinearLayout.LayoutParams)
+                            iconView.getLayoutParams();
+            iconLp.width = dp(40);
+            iconLp.height = dp(40);
+            iconView.setLayoutParams(iconLp);
+            titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            // v381: the number is centred (user 2026-11-22 "号码显示居中").
+            titleView.setGravity(Gravity.CENTER);
+            // v388: the NUMBER is the second line (textView) when
+            // there is a contact name — make it bigger (16sp) and
+            // centred too (user 2026-11-22 "号码和字体都要居中" /
+            // "就号码加大居中"). When there is no name the number
+            // is the title itself, already 16sp centred above.
+            textView.setGravity(Gravity.CENTER);
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+            applyPillShape();
+            // v376: the 60dp pill has room for 8dp vertical padding;
+            // the horizontal padding mirrors with the dock side
+            // (icon near the edge on the left dock, near the centre
+            // on the right — the answer button stays at the edge).
+            // v381: right dock right padding 2dp -> 14dp — the app
+            // icon was clipped by the screen edge (user 2026-11-22
+            // "应用图标再出来一点").
+            pill.setPadding(dockLeft ? dp(2) : dp(14), dp(8),
+                    dockLeft ? dp(14) : dp(14), dp(8));
         } else {
             answerBtn.setVisibility(GONE);
             setCallTint(false);
+            // v381: non-call titles stay left-aligned (only the
+            // call number is centred).
+            titleView.setGravity(Gravity.LEFT);
+            // v388: reset the second line — a CapsuleView reused
+            // after a call capsule must not keep the 16sp centred
+            // number styling.
+            textView.setGravity(Gravity.LEFT);
+            textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            applyPillShape();
         }
         applyIconTint(tintBmp);
         updateMusicDisplay();
         applyScrollFlag();
+        // v379: right-dock call capsule mirrors its pill contents.
+        applyDockMirror();
     }
 
     /** Call pill tint (v103): green while ringing, red while the user
@@ -1568,13 +2055,74 @@ public class CapsuleView extends FrameLayout {
         answerTimerText.setText(timer != null ? timer : "");
         answerTimerText.setVisibility(VISIBLE);
         answerBtnBg.setShape(GradientDrawable.RECTANGLE);
-        answerBtnBg.setCornerRadius(dp(14));
+        // v376: the answered button is 40dp tall (was 28dp), so the
+        // pill radius is 20dp.
+        answerBtnBg.setCornerRadius(dp(20));
         LinearLayout.LayoutParams ansLp =
                 (LinearLayout.LayoutParams)
                         answerBtn.getLayoutParams();
         ansLp.width = LinearLayout.LayoutParams.WRAP_CONTENT;
         answerBtn.setLayoutParams(ansLp);
         answerBtn.setVisibility(VISIBLE);
+        // v415 (preview): shrink to just the timer once answered
+        // (user 2026-11-22 "要它缩成只剩计时器"). Runs once per
+        // call; a re-post that recreates the capsule re-collapses
+        // it the next time setCallTimer runs.
+        collapseToTimer();
+    }
+
+    /** v415 (preview): after answering, shrink the capsule to just
+     * the timer. Hides the app icon and the number/name texts, then
+     * animates the pill width down to fit only the answer button
+     * (timer). The pill anchors to the screen edge (START for the
+     * left dock, END for the right window) so the timer stays
+     *贴边. The CapsuleView itself stays 240dp wide (the window /
+     * dock layout is untouched); only the visible pill shrinks. */
+    public void collapseToTimer() {
+        if (pill == null || answerBtn == null) {
+            return;
+        }
+        if (collapsedToTimer) {
+            return;
+        }
+        collapsedToTimer = true;
+        if (iconView != null) {
+            iconView.setVisibility(GONE);
+        }
+        if (texts != null) {
+            texts.setVisibility(GONE);
+        }
+        if (pinView != null) {
+            pinView.setVisibility(GONE);
+        }
+        final int startW = pill.getWidth() > 0 ? pill.getWidth() : dp(240);
+        // v416: 120dp (was 96dp) — the v415 width wrapped "0:27"
+        // as "0:2" / "7"; the timer needs room for icon + 5 chars
+        // on one line.
+        final int endW = dp(120);
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofInt(startW, endW);
+        anim.setDuration(250);
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator.AnimatorUpdateListener() {
+            @Override
+            public void onAnimationUpdate(
+                    android.animation.ValueAnimator a) {
+                int w = (Integer) a.getAnimatedValue();
+                try {
+                    LayoutParams lp =
+                            (LayoutParams) pill.getLayoutParams();
+                    if (lp.width != w) {
+                        lp.width = w;
+                        lp.gravity = Gravity.CENTER_VERTICAL
+                                | (dockLeft ? Gravity.START : Gravity.END);
+                        pill.setLayoutParams(lp);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        anim.start();
     }
 
     /** Backwards-compatible single-arg timer (normal answer). */

@@ -37,6 +37,10 @@ public class FeatureFlags {
     // 默认关（保持原来的胶囊行为）；开着时 popCapsule 里直接
     // 调 openCard。来电不走卡片（openCard 本来就 return）。
     public static volatile boolean bigCard = false;
+    // v376: 来电胶囊放右边——开着时来电胶囊不在左贴边胶囊堆里，
+    // 而是单独放右手边、屏幕中间偏下一点，滑动方向镜像。
+    // 默认关（和其它胶囊一样在左边）。
+    public static volatile boolean callRight = false;
 
     public static void set(String key, boolean enabled) {
         if (key == null) {
@@ -64,6 +68,8 @@ public class FeatureFlags {
             musicCard = enabled;
         } else if ("bigCard".equals(key)) {
             bigCard = enabled;
+        } else if ("callRight".equals(key)) {
+            callRight = enabled;
         }
         // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
@@ -90,6 +96,7 @@ public class FeatureFlags {
             // v345: qqFree 开关已去掉，永远打开，不读旧的 prefs 值。
             qqFree = true;
             bigCard = prefs.getBoolean("bigCard", false);
+            callRight = prefs.getBoolean("callRight", false);
         } catch (Throwable ignored) {
             // Defaults (all on) stand.
         }

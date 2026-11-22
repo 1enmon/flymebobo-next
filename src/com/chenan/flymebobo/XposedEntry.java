@@ -318,6 +318,10 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_NAVI_END);
         filter.addAction(NotificationService.ACTION_NAVI_HOOK_STATUS);
         filter.addAction(NotificationService.ACTION_NAVI_REMAIN);
+        // v427: push-cancel diagnostic from the listener service
+        // (see ACTION_CANCEL_DIAG) — log it in SystemUI so it
+        // lands in the log the user sends.
+        filter.addAction(NotificationService.ACTION_CANCEL_DIAG);
         // v320: Amap bus live navigation.
         filter.addAction(NotificationService.ACTION_BUS_INFO);
         filter.addAction(NotificationService.ACTION_BUS_ROUTE);
@@ -330,10 +334,43 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_ROUTE_DIAG);
         filter.addAction(
                 NotificationService.ACTION_ROUTE_HOOK_STATUS);
+        // v374: screen on/off — hide the bubble windows while the
+        // screen is off so they never show on the AOD.
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (intent == null) {
+                    return;
+                }
+                // v374: screen off -> hide the bubble windows so
+                // they never show on top of the always-on display
+                // (息屏显示); screen on -> show them again (lock
+                // screen included, TYPE_SYSTEM_ERROR keeps them
+                // above the keyguard).
+                if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction())
+                        || Intent.ACTION_SCREEN_ON.equals(
+                                intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.setScreenOn(Intent.ACTION_SCREEN_ON.equals(
+                                intent.getAction()));
+                    }
+                    return;
+                }
+                // v427: push-cancel diagnostic from the listener
+                // service — the listener's own FileLog lines never
+                // reach the log the user sends, so the result is
+                // forwarded here (SystemUI process) to be visible.
+                if (NotificationService.ACTION_CANCEL_DIAG.equals(
+                        intent.getAction())) {
+                    FileLog.i("CancelDiag key=" + intent.getStringExtra("key")
+                            + " stillActive=" + intent.getBooleanExtra(
+                                    "stillActive", true)
+                            + " pkg=" + intent.getStringExtra("pkg")
+                            + " tag=" + intent.getStringExtra("tag")
+                            + " id=" + intent.getIntExtra("id", -1));
                     return;
                 }
                 // v259: APP feature switch flipped — update the
@@ -346,6 +383,11 @@ public class XposedEntry extends XposedModule {
                     // v262: scroll switch flips apply at once.
                     if ("scroll".equals(fkey)) {
                         BubbleWindow.getInstance().refreshLyricsScroll();
+                    }
+                    // v376: callRight flips move an active call
+                    // capsule between the dock and the right window.
+                    if ("callRight".equals(fkey)) {
+                        BubbleWindow.getInstance().onCallRightChanged();
                     }
                     return;
                 }

@@ -168,6 +168,18 @@ public class BubbleWindow {
     private FrameLayout pileRoot;
     private WindowManager.LayoutParams pileParams;
     private boolean pileWindowAdded;
+    /** v376: right-side call window (the "来电放右边" switch).
+     * A small transient window at the right edge, a little below
+     * the middle of the screen, holding only the call capsule.
+     * Created lazily on the first right-side call; hidden (GONE)
+     * when there is no right-side call. The capsule is the same
+     * 240×60 call capsule as in the dock, just docked right
+     * (dockLeft=false) so its swipe mirrors. */
+    private FrameLayout callRoot;
+    private WindowManager.LayoutParams callParams;
+    private boolean callWindowAdded;
+    private CapsuleView callCapView;
+    private String callCapKey;
     /** Target screen Y for the pile window; set in rebuildDock. */
     private int pileTargetY;
     /** True while the pile window Y is being animated. */
@@ -369,6 +381,43 @@ public class BubbleWindow {
         return INSTANCE;
     }
 
+    // v374: hide the bubble windows while the screen is off so
+    // they never show on top of the always-on display (息屏显示).
+    // TYPE_SYSTEM_ERROR sits above everything, including the AOD,
+    // so the windows are gated on screen on/off instead: visible
+    // on the lock screen (screen on) and hidden on the AOD
+    // (screen off). Capsules that pop while the screen is off are
+    // added to the hidden root and appear when the screen turns on.
+    public void setScreenOn(final boolean on) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (root != null) {
+                        root.setVisibility(on ? View.VISIBLE : View.GONE);
+                    }
+                } catch (Throwable ignored) {
+                }
+                try {
+                    if (pileRoot != null) {
+                        pileRoot.setVisibility(
+                                on ? View.VISIBLE : View.GONE);
+                    }
+                } catch (Throwable ignored) {
+                }
+                // v376: the right-side call window hides on the
+                // AOD too, like the main and pile windows.
+                try {
+                    if (callRoot != null) {
+                        callRoot.setVisibility(
+                                on ? View.VISIBLE : View.GONE);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
     public void init(Context app) {
         if (windowAdded || this.app != null) {
             return;
@@ -483,20 +532,22 @@ public class BubbleWindow {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END)));
         pileParams = new WindowManager.LayoutParams(1, 1,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
                 PixelFormat.TRANSLUCENT);
         pileParams.gravity = grav;
         pileParams.y = dp(DOCK_EDGE_DP);
         pileParams.setTitle("flymebobo-pile");
         params = new WindowManager.LayoutParams(1, 1,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                         | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                        | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
                 PixelFormat.TRANSLUCENT);
         params.gravity = grav;
         params.y = dp(DOCK_EDGE_DP);
@@ -509,6 +560,18 @@ public class BubbleWindow {
         try {
             wm.addView(pileRoot, pileParams);
             pileWindowAdded = true;
+        } catch (Throwable ignored) {
+        }
+        // v374: initial screen state — if SystemUI starts with the
+        // screen off, hide the windows at once so they never show
+        // on the AOD before the first SCREEN_OFF broadcast.
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager)
+                    this.app.getSystemService(Context.POWER_SERVICE);
+            if (pm != null && !pm.isInteractive()) {
+                root.setVisibility(View.GONE);
+                pileRoot.setVisibility(View.GONE);
+            }
         } catch (Throwable ignored) {
         }
         // Phone-state listener (v117, ported whole from 1.x
@@ -1802,6 +1865,34 @@ public class BubbleWindow {
                 return;
             }
         }
+        // v426 (user 2026-11-22 "改成一个胶囊吧"): WeChat/QQ
+        // same-person messages merge into ONE capsule. WeChat
+        // reuses the same notification key per conversation, so a
+        // new message from the same person arrives with the same
+        // key — update the on-screen capsule in place (title/text)
+        // instead of popping a new one. Different people have
+        // different keys, so they still get separate capsules.
+        // If the capsule is not on screen (docked/gone), fall
+        // through to a normal pop.
+        if (!data.isMusic && !data.isLive && data.key != null
+                && ("com.tencent.mm".equals(data.pkg)
+                        || "com.tencent.mobileqq".equals(data.pkg))) {
+            CapsuleView existingCap = findCapsuleByKey(data.key);
+            if (existingCap != null) {
+                NotifData oldData = existingCap.getData();
+                if (oldData != null) {
+                    oldData.largeIcon = data.largeIcon;
+                    oldData.contentIntent = data.contentIntent;
+                }
+                if (data.title != null) {
+                    existingCap.updateTitle(data.title);
+                }
+                if (data.text != null) {
+                    existingCap.updateText(data.text);
+                }
+                return;
+            }
+        }
         // Dedup by key: the same notification never pops twice.
         // EXCEPT music: a music notification keeps the SAME key across
         // song changes (one notification, updated — the player is a
@@ -2106,14 +2197,13 @@ public class BubbleWindow {
             autoCopyVerifyCode(data.code);
         }
         // Pop-in on the group's top capsule (newest, on top of the
-        // stack) — unless the 1.x pop throttle says to only refresh:
-        // same app within 30s, or any notification within 5s of the
-        // last pop. The notification still joins its group/stack.
+        // stack). v413: the 1.x pop throttle (same app within 30s,
+        // or any notification within 5s) used to skip the pop-in
+        // animation entirely, so a re-pop just appeared with no
+        // motion ("突然出现", user 2026-11-22). Now every new
+        // capsule slides in (see below); the notification still
+        // joins its group/stack either way.
         long now = System.currentTimeMillis();
-        Long lastPkgPop = lastPopByPkg.get(data.pkg);
-        boolean throttled = (lastPkgPop != null
-                && now - lastPkgPop < SAME_APP_POP_WINDOW_MS)
-                || (lastPopAt != 0 && now - lastPopAt < REPOP_GUARD_MS);
         CapsuleView cap = topCapsule(group);
         // v360: 大卡片模式重做（用户 2026-11-22 “重新做一套”）——
         // 普通通知不再走 openCard，直接以放大胶囊（卡片内容）依次
@@ -2190,13 +2280,18 @@ public class BubbleWindow {
                     }
                 }
             }
-        } else if (!throttled) {
+        } else {
             lastPopByPkg.put(data.pkg, now);
             lastPopAt = now;
             if (cap != null) {
                 // New notifications pop out from the docked direction too
                 // (user 2026-11-19 "新通知也是这么弹出来"): the capsule
                 // slides in from the left edge, not scaling in place.
+                // v413 (user 2026-11-22 "都改成滑入 / 贴边滑入"): this
+                // slide-in used to be gated by the pop throttle, so a
+                // re-pop appeared with no motion at all ("突然出现").
+                // Now it always runs — every new capsule slides in
+                // from off-screen left to its edge position.
                 cap.setTranslationX(-dp(200));
                 cap.setAlpha(0f);
                 cap.animate().translationX(0f).alpha(1f)
@@ -2272,7 +2367,16 @@ public class BubbleWindow {
                     stopCallTick();
                     String title = name != null && !name.isEmpty()
                             ? name : number;
-                    String text = number != null ? number : "";
+                    // v395: no name → the number is the title
+                    // ONLY. v389 set text=number too, so the
+                    // number showed on BOTH lines (video: two
+                    // rows of "188 8320 4388"); the user asked
+                    // for just the number, bigger, centred
+                    // ("就号码加大居中"). With a name, text is
+                    // the number (second line); without one it
+                    // stays empty and the title centres alone.
+                    String text = (name != null && !name.isEmpty()
+                            && number != null) ? number : "";
                     NotifData d = new NotifData(CALL_KEY, CALL_PKG,
                             title, text, System.currentTimeMillis(),
                             null, null, false, null, false, true);
@@ -2306,7 +2410,27 @@ public class BubbleWindow {
         if (dock == null) {
             return;
         }
-        removeCallCapsule();
+        // v395: do NOT call removeCallCapsule() here. It removes
+        // the call group and rebuilds the dock WHILE the group is
+        // gone — rebuildDock ends in syncCallWindow, which finds
+        // no call and hideCallWindow() DESTROYS the capsule being
+        // dragged (the video "vanish on drag start": the call
+        // notification re-posts, the old capsule is removed, a
+        // new one is created, the drag state is lost). Remove the
+        // old group silently and rebuild ONCE below, after the new
+        // group is in place, so syncCallWindow finds the call and
+        // showCallOnRight keeps the existing CapsuleView.
+        // v414: remember whether a call was already showing, so a
+        // RINGING re-post (same call, capsule already on screen)
+        // does not re-trigger the slide-in below.
+        boolean hadCall = false;
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            NotifGroup g = groups.get(i);
+            if (g != null && CALL_PKG.equals(g.pkg)) {
+                groups.remove(i);
+                hadCall = true;
+            }
+        }
         NotifGroup group = new NotifGroup(CALL_PKG);
         group.items.add(d);
         group.pinned = true;
@@ -2314,6 +2438,24 @@ public class BubbleWindow {
         group.pinnedAtByKey.put(d.key, System.currentTimeMillis());
         groups.add(0, group);
         rebuildDock();
+        // v414: left-dock call capsule slides in from the left edge
+        // (user 2026-11-22 "左边来电胶囊还是直接出现的 / 右边正常").
+        // Calls bypass popCapsule entirely, so the left capsule
+        // never got the slide-in — rebuildDock just creates it and
+        // it appears with no motion. Only slide in for a genuinely
+        // new call (hadCall == false); a RINGING re-post recreates
+        // the capsule too, but it is already on screen. When
+        // callRight is on, syncCallWindow (end of rebuildDock)
+        // already slid it in on the right via showCallOnRight.
+        if (!hadCall && !FeatureFlags.callRight) {
+            CapsuleView cap = topCapsule(group);
+            if (cap != null) {
+                cap.setTranslationX(-dp(260));
+                cap.setAlpha(0f);
+                cap.animate().translationX(0f).alpha(1f)
+                        .setDuration(240).withLayer().start();
+            }
+        }
     }
 
     private void removeCallCapsule() {
@@ -2485,18 +2627,10 @@ public class BubbleWindow {
         applyCallSpeaker();
         // v116: 1.x toggles the speaker icon in place
         // (toggleSpeaker -> refreshLevelContent); no dissipate.
-        if (dock == null) {
-            return;
-        }
-        for (int i = 0; i < dock.getChildCount(); i++) {
-            View v = dock.getChildAt(i);
-            if (v instanceof CapsuleView) {
-                CapsuleView cap = (CapsuleView) v;
-                NotifData d = cap.getData();
-                if (d != null && d.isCall) {
-                    cap.setCallSpeaker(callSpeaker);
-                }
-            }
+        // v376: the call capsule may live in the right window.
+        CapsuleView cap = findCallCapsule();
+        if (cap != null) {
+            cap.setCallSpeaker(callSpeaker);
         }
     }
 
@@ -2541,18 +2675,10 @@ public class BubbleWindow {
         callSpeaker = false;
         callNumber = null;
         stopCallTick();
-        if (dock != null) {
-            for (int i = 0; i < dock.getChildCount(); i++) {
-                View v = dock.getChildAt(i);
-                if (v instanceof CapsuleView) {
-                    CapsuleView cap = (CapsuleView) v;
-                    NotifData d = cap.getData();
-                    if (d != null && d.isCall) {
-                        burstParticles(v);
-                        break;
-                    }
-                }
-            }
+        // v376: the call capsule may live in the right window.
+        CapsuleView callCap = findCallCapsule();
+        if (callCap != null) {
+            burstParticles(callCap);
         }
         handler.postDelayed(new Runnable() {
             @Override
@@ -2624,22 +2750,17 @@ public class BubbleWindow {
     }
 
     private void updateCallTimer() {
-        if (dock == null || callStartTime <= 0) {
+        if (callStartTime <= 0) {
             return;
         }
         long secs = (android.os.SystemClock.elapsedRealtime()
                 - callStartTime) / 1000;
         String timer = (secs / 60) + ":"
                 + String.format("%02d", secs % 60);
-        for (int i = 0; i < dock.getChildCount(); i++) {
-            View v = dock.getChildAt(i);
-            if (v instanceof CapsuleView) {
-                CapsuleView cap = (CapsuleView) v;
-                NotifData d = cap.getData();
-                if (d != null && d.isCall) {
-                    cap.setCallTimer(timer, callSpeaker);
-                }
-            }
+        // v376: the call capsule may live in the right window.
+        CapsuleView cap = findCallCapsule();
+        if (cap != null) {
+            cap.setCallTimer(timer, callSpeaker);
         }
     }
 
@@ -2881,6 +3002,13 @@ public class BubbleWindow {
         for (int pi = 0; pi < pinnedOrdered.size(); pi++) {
             final NotifData d = pinnedOrdered.get(pi);
             final NotifGroup group = pinnedGroup.get(d);
+            // v376: the call capsule lives in the right window when
+            // the "来电放右边" switch is on — it takes no dock row.
+            // (syncCallWindow, at the end of this rebuild, puts it
+            // there; the pin state does not matter.)
+            if (d.isCall && FeatureFlags.callRight) {
+                continue;
+            }
             CapsuleView cap = new CapsuleView(app);
             cap.setTag(group);
             cap.bind(d);
@@ -2936,7 +3064,9 @@ public class BubbleWindow {
                 // Pinned capsules sit below the card (when there is
                 // one) in pin-time order; y already accounts for the
                 // card's height.
-                cap.setLayoutParams(capsuleLp(y));
+                // v376: the call capsule is bigger (240×60).
+                cap.setLayoutParams(d.isCall ? callCapsuleLp(y)
+                        : capsuleLp(y));
             }
             // v151: pinned capsules do not participate in the ripple,
             // so they stay visible while a card is open (the tapped
@@ -3049,8 +3179,11 @@ public class BubbleWindow {
                 // v365: 钉住的大卡片按自己量出来的高度占行。
                 y += bigPinnedH + dp(CAPSULE_GAP_DP);
             } else {
-                y += dp(CapsuleView.DEFAULT_HEIGHT_DP
-                        + CAPSULE_GAP_DP);
+                // v376: the call capsule is taller (60dp) — it takes
+                // its own height in the dock.
+                int h = d.isCall ? CapsuleView.CALL_HEIGHT_DP
+                        : CapsuleView.DEFAULT_HEIGHT_DP;
+                y += dp(h + CAPSULE_GAP_DP);
             }
         }
 
@@ -3066,7 +3199,12 @@ public class BubbleWindow {
             for (NotifData d : group.items) {
                 if (d != null && (d.key == null
                         || (!group.pinnedAtByKey.containsKey(d.key)
-                            && !stayPutPinTime.containsKey(d.key)))) {
+                            && !stayPutPinTime.containsKey(d.key)))
+                        // v376: a call capsule never sits in the
+                        // dock when the "来电放右边" switch is on —
+                        // it lives in the right window (see
+                        // syncCallWindow), pinned or not.
+                        && !(d.isCall && FeatureFlags.callRight)) {
                     items.add(d);
                 }
             }
@@ -3096,8 +3234,14 @@ public class BubbleWindow {
                     cap.setStacked(true);
                     // i=0 (newest) at the top of the stack; older ones
                     // 6dp lower each, peeking out below.
+                    // v378: the call capsule keeps its 240×60 size
+                    // here too — the regular capsuleLp (180×44) made
+                    // it snap back to the original size first when it
+                    // shrank (user 2026-11-22 "缩小的时候他会先变成
+                    // 原来的胶囊大小", left dock).
                     int top = y + i * dp(STACK_EDGE_DP);
-                    cap.setLayoutParams(capsuleLp(top));
+                    cap.setLayoutParams(d.isCall ? callCapsuleLp(top)
+                            : capsuleLp(top));
                     // v150: a card is open elsewhere — this stack
                     // dissipated in the ripple, so it stays hidden.
                     // Calls stay out.
@@ -3157,7 +3301,12 @@ public class BubbleWindow {
                     });
                     dock.addView(cap);
                 }
-                y += dp(CapsuleView.DEFAULT_HEIGHT_DP
+                // v378: the stack's height follows its top (newest)
+                // capsule — a call capsule is 60dp, not 44dp.
+                int stackTopH = items.get(0).isCall
+                        ? CapsuleView.CALL_HEIGHT_DP
+                        : CapsuleView.DEFAULT_HEIGHT_DP;
+                y += dp(stackTopH
                         + (n - 1) * STACK_EDGE_DP + CAPSULE_GAP_DP);
                 if (group == fanAnchor) {
                     fanAnchorBottom = y - dp(CAPSULE_GAP_DP);
@@ -3190,7 +3339,12 @@ public class BubbleWindow {
                 int ty = groupTop;
                 for (int i = 0; i < items.size(); i++) {
                     int h = dp(CapsuleView.DEFAULT_HEIGHT_DP);
-                    if (isBigCapsule(items.get(i))) {
+                    // v378: a call capsule takes its own 60dp row —
+                    // otherwise it shrinks back to the original 44dp
+                    // size first (user 2026-11-22, left dock).
+                    if (items.get(i).isCall) {
+                        h = dp(CapsuleView.CALL_HEIGHT_DP);
+                    } else if (isBigCapsule(items.get(i))) {
                         CapsuleView scratch = new CapsuleView(app);
                         scratch.bind(items.get(i));
                         scratch.setCardExpanded(true);
@@ -3250,7 +3404,11 @@ public class BubbleWindow {
                         // Left edge flush, like the card.
                         cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
                     } else {
-                        cap.setLayoutParams(capsuleLp(placeTop));
+                        // v378: the call capsule keeps its 240×60
+                        // size in an expanded group too.
+                        cap.setLayoutParams(d.isCall
+                                ? callCapsuleLp(placeTop)
+                                : capsuleLp(placeTop));
                     }
                     if (cardKey != null && !isCardPinned() && !isCard) {
                         // v150: dissipated in the ripple; hidden
@@ -3360,6 +3518,9 @@ public class BubbleWindow {
         // If a call is up, restore the answered button (speaker +
         // timer) right away instead of waiting for the next tick.
         updateCallTimer();
+        // v376: keep the right call window in sync (show the call
+        // capsule there when the switch is on, hide it otherwise).
+        syncCallWindow();
         // v237: an open card was just pinned — its group's
         // capsules that were hidden while it was open are now
         // visible; pop them in one by one instead of letting
@@ -3379,6 +3540,449 @@ public class BubbleWindow {
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
         lp.topMargin = y;
         return lp;
+    }
+
+    /** v376: the call capsule's dock slot — bigger (240×60,
+     * preview A) than a regular capsule, so it takes its own
+     * height in the dock layout. */
+    private FrameLayout.LayoutParams callCapsuleLp(int y) {
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                dp(CapsuleView.CALL_WIDTH_DP),
+                dp(CapsuleView.CALL_HEIGHT_DP),
+                Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
+        lp.topMargin = y;
+        return lp;
+    }
+
+    // ---- v376: right-side call window ----
+
+    /** The "来电放右边" switch flipped — re-layout so an active
+     * call capsule moves between the dock and the right window
+     * at once (called from the feature-toggle receiver). */
+    public void onCallRightChanged() {
+        rebuildDock();
+    }
+
+    /** The current call capsule, whether it lives in the dock
+     * (switch off) or in the right window (switch on). */
+    private CapsuleView findCallCapsule() {
+        if (callCapView != null) {
+            return callCapView;
+        }
+        if (dock != null) {
+            for (int i = 0; i < dock.getChildCount(); i++) {
+                View v = dock.getChildAt(i);
+                if (v instanceof CapsuleView) {
+                    CapsuleView cap = (CapsuleView) v;
+                    NotifData d = cap.getData();
+                    if (d != null && d.isCall) {
+                        return cap;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Create the right-side call window on first use. It is a
+     * small transient window (560×80dp): 160dp of drag room on
+     * the left (the hang-up tail), the 240dp capsule, 160dp on
+     * the right (the pin/dock drag past the edge). */
+    private void ensureCallWindow() {
+        // v384: always sync the window size/position, even when
+        // the window already exists. v383 grew the window to
+        // 800x300dp but this method returned early when callRoot
+        // already existed, so an updated module kept the OLD
+        // 560x80 window while new capsules used the NEW margins
+        // (280/120) — the capsule landed 120dp too far right
+        // (cut off) and 110dp too low. Now the size/position are
+        // re-applied on every call.
+        if (wm == null || app == null) {
+            return;
+        }
+        if (callRoot == null) {
+            callRoot = new FrameLayout(app);
+            callRoot.setClipChildren(false);
+            callRoot.setVisibility(View.GONE);
+        }
+        // v390: the idle window is EXACTLY the capsule (240x60dp)
+        // v392: mirror the LEFT dock (user 2026-11-22 "之前左边是
+        // 怎么设计的"). The left window is gravity LEFT with the
+        // capsule anchored to its left edge, and a drag ONLY grows
+        // the window wider (to full screen) — position, margins
+        // and translation are never touched, so the capsule cannot
+        // jump. The right window is the mirror: gravity RIGHT, the
+        // capsule anchored to its right edge, and a drag only grows
+        // the window wider — the right edge stays on the screen
+        // edge and the window extends LEFT, giving the capsule room
+        // to slide toward the centre. v390/v391 moved the window
+        // and translated the root mid-drag; the two never land in
+        // the same frame, so it kept jumping.
+        if (callParams == null) {
+            callParams = new WindowManager.LayoutParams(dp(240), dp(60),
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
+                    PixelFormat.TRANSLUCENT);
+            // v401: gravity LEFT + explicit x (see updateCallWindowPos).
+            // v392–v400 used gravity RIGHT + x=0, but the v399/v400
+            // logs proved Flyme does NOT keep the window right-anchored
+            // on resize — the capsule slides off the right edge (pos
+            // x 559 -> 2054) when the window grows to 800dp. Gravity
+            // is evidently not re-applied on updateViewLayout here,
+            // so the anchor is computed explicitly instead.
+            callParams.gravity = Gravity.TOP | Gravity.LEFT;
+            callParams.setTitle("flymebobo-call");
+        } else if (callDragWindowOpen || callDragWindowShrinkPending) {
+            // v391: a drag is in progress, or one just ended and
+            // the shrink is waiting out the 200ms spring-back —
+            // keep the drag window. ensureCallWindow runs at the
+            // end of every rebuildDock, and shrinking it mid-drag
+            // (or mid-spring-back) would clip the capsule and
+            // break the touch stream.
+            // v406: width is the SCREEN width (callScreenWidth),
+            // not dp(800). v403 fixed beginCallDragWindow to the
+            // screen width so x is never negative, but this branch
+            // still used dp(800)=2935px — any rebuildDock while a
+            // drag was open or a shrink was pending (e.g. right
+            // swipe pin -> onSwipeRight -> rebuildDock) reset the
+            // width to 2935, x went to -1495, Flyme clamped it to
+            // 0 and the capsule jumped right to 2054 (off-screen)
+            // — the extra right bounce after the spring-back, in
+            // both directions. Now both paths use the screen width.
+            callParams.width = callScreenWidth();
+            callParams.height = dp(300);
+        } else {
+            callParams.width = dp(240);
+            callParams.height = dp(60);
+        }
+        updateCallWindowPos();
+        if (!callWindowAdded) {
+            try {
+                wm.addView(callRoot, callParams);
+                callWindowAdded = true;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** v403: the real screen width in pixels (via the
+     * WindowManager's default display getRealSize, falling back
+     * to app resources). Used to size/position the right call
+     * window so it never needs a negative x (see below). */
+    private int callScreenWidth() {
+        try {
+            android.graphics.Point sz =
+                    new android.graphics.Point();
+            if (wm != null) {
+                wm.getDefaultDisplay().getRealSize(sz);
+                if (sz.x > 0) {
+                    return sz.x;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return app.getResources().getDisplayMetrics().widthPixels;
+    }
+
+    /** (Re)compute the right call window's screen position from
+     * the current display metrics (rotation-safe). */
+    private void updateCallWindowPos() {
+        if (callParams == null || app == null) {
+            return;
+        }
+        // v402: get the REAL screen size from the WindowManager's
+        // default display, not from app resources. The v401 log
+        // proved app-resources DisplayMetrics is wrong here:
+        // v401 computed x = widthPixels - windowWidth, but the
+        // capsule still landed at pos x=2054 (identical to
+        // v399/v400), which means widthPixels came back as ~2935
+        // (the window width) instead of the real screen width
+        // 1080 — so x ended up ~0 and the window stayed
+        // left-anchored, growing right off-screen. getRealSize
+        // returns the physical display size in pixels.
+        // v403: getRealSize DID return the real size (1440x3200 —
+        // the recording is a 0.75x downscale, the panel is 1440
+        // wide, not 1080), and the resize log showed x=-1495
+        // (1440-2935). But the capsule STILL went to pos x=2054:
+        // Flyme evidently clamps a negative window x to 0, so the
+        // window stays left-anchored at x=0 and the capsule (at
+        // the window's right edge) lands at 0+2935-881=2054,
+        // off-screen. So the window must NEVER be wider than the
+        // screen — then x is never negative (see beginCallDragWindow).
+        int screenW = callScreenWidth();
+        int screenH = 0;
+        try {
+            android.graphics.Point sz =
+                    new android.graphics.Point();
+            if (wm != null) {
+                wm.getDefaultDisplay().getRealSize(sz);
+                screenH = sz.y;
+            }
+        } catch (Throwable ignored) {
+        }
+        if (screenH <= 0) {
+            screenH = app.getResources().getDisplayMetrics()
+                    .heightPixels;
+        }
+        // v401: explicit right anchor. Gravity RIGHT + x=0 did NOT
+        // hold on resize (v399/v400 logs: the capsule's pos x went
+        // 559 -> 2054 when the window grew to 800dp, i.e. the whole
+        // window drifted right off-screen). So the window is now
+        // gravity LEFT and x is computed directly: x = screen width
+        // - window width, which puts the window's right edge exactly
+        // on the screen edge for ANY width (idle 240dp or drag
+        // 800dp). updateCallWindowPos runs on every resize
+        // (begin/endCallDragWindow call it), so the anchor is
+        // re-computed with the new width each time. y puts the
+        // capsule centre at 55%.
+        callParams.gravity = Gravity.TOP | Gravity.LEFT;
+        callParams.x = screenW - callParams.width;
+        callParams.y = (int) (screenH * 0.55) - dp(30);
+        if (callWindowAdded && callRoot != null && wm != null) {
+            try {
+                wm.updateViewLayout(callRoot, callParams);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** Keep the right call window in step with the current call
+     * and the switch (called at the end of every rebuildDock).
+     * The call capsule is found by scanning the groups, so its
+     * pin state does not matter — pinned or not, it goes right
+     * when the switch is on, and only there. */
+    private void syncCallWindow() {
+        if (!FeatureFlags.callRight) {
+            hideCallWindow();
+            return;
+        }
+        NotifData callData = null;
+        NotifGroup callGroup = null;
+        for (NotifGroup g : groups) {
+            if (g == null) {
+                continue;
+            }
+            for (NotifData d : g.items) {
+                if (d != null && d.isCall) {
+                    callData = d;
+                    callGroup = g;
+                    break;
+                }
+            }
+            if (callData != null) {
+                break;
+            }
+        }
+        if (callData == null) {
+            hideCallWindow();
+            return;
+        }
+        showCallOnRight(callData, callGroup);
+    }
+
+    /** Show the call capsule in the right window. The capsule is
+     * created once per call (keyed by the call key); later
+     * rebuilds keep the same view so the timer and the answered
+     * state survive. */
+    private void showCallOnRight(final NotifData d,
+            final NotifGroup group) {
+        if (d == null || group == null) {
+            return;
+        }
+        ensureCallWindow();
+        if (callRoot == null) {
+            return;
+        }
+        // Same call already showing — re-apply the capsule's
+        // margins (v384: they must match the window size; a
+        // capsule created with mismatched margins would sit in
+        // the wrong place) and show it.
+        if (callCapView != null && d.key != null
+                && d.key.equals(callCapKey)) {
+            // v396: drag diagnosis — log whether a re-post keeps
+            // the existing capsule during a drag.
+            // v399: also log the capsule's screen position.
+            FileLog.i("CallWin keep dragOpen=" + callDragWindowOpen
+                    + " transX=" + callCapView.getTranslationX()
+                    + " pos=" + callCapScreenPos());
+            // v391: the capsule always fills its window (margins
+            // 0/0); the drag slack lives in the window size and
+            // the callRoot translation, never in the margins.
+            FrameLayout.LayoutParams curLp =
+                    (FrameLayout.LayoutParams)
+                            callCapView.getLayoutParams();
+            if (curLp != null) {
+                curLp.leftMargin = 0;
+                curLp.topMargin = 0;
+                callCapView.setLayoutParams(curLp);
+            }
+            updateCallWindowPos();
+            callRoot.setVisibility(View.VISIBLE);
+            return;
+        }
+        // New call: drop the old capsule (if any) and build one.
+        // v396: drag diagnosis — log if a NEW capsule is built
+        // while a drag is in progress (the old one is destroyed).
+        FileLog.i("CallWin NEW dragOpen=" + callDragWindowOpen
+                + " hadCap=" + (callCapView != null));
+        if (callCapView != null) {
+            try {
+                callRoot.removeView(callCapView);
+            } catch (Throwable ignored) {
+            }
+            callCapView = null;
+            callCapKey = null;
+        }
+        final CapsuleView cap = new CapsuleView(app);
+        cap.setDockLeft(false);
+        cap.setTag(group);
+        cap.bind(d);
+        cap.setPinned(true);
+        cap.setStacked(false);
+        // Same call actions as the pinned dock call capsule
+        // (v103/v108): tap = speaker answer, timer tap = toggle.
+        cap.setOnAnswer(new Runnable() {
+            @Override
+            public void run() {
+                answerCall(true);
+            }
+        });
+        cap.setOnHangup(new Runnable() {
+            @Override
+            public void run() {
+                hangupCallWithParticles();
+            }
+        });
+        cap.setOnToggleSpeaker(new Runnable() {
+            @Override
+            public void run() {
+                toggleCallSpeaker();
+            }
+        });
+        cap.setOnTap(new Runnable() {
+            @Override
+            public void run() {
+                // Calls never open a card.
+            }
+        });
+        cap.setOnSwipeRight(new Runnable() {
+            @Override
+            public void run() {
+                togglePin(group, d);
+                rebuildDock();
+            }
+        });
+        cap.setOnDockSwipe(new Runnable() {
+            @Override
+            public void run() {
+                dockOneCapsule(cap, d, group);
+            }
+        });
+        cap.setOnSwipeLeft(new Runnable() {
+            @Override
+            public void run() {
+                dissipateOne(d);
+            }
+        });
+        // v392: the capsule is anchored to the window's right edge
+        // (gravity END), so it never moves when the window grows
+        // left during a drag — the mirror of the left dock, whose
+        // capsule is anchored to its window's left edge.
+        FrameLayout.LayoutParams lp =
+                new FrameLayout.LayoutParams(
+                        dp(CapsuleView.CALL_WIDTH_DP),
+                        dp(CapsuleView.CALL_HEIGHT_DP),
+                        Gravity.TOP | Gravity.END);
+        lp.leftMargin = 0;
+        lp.topMargin = 0;
+        callRoot.addView(cap, lp);
+        callCapView = cap;
+        callCapKey = d.key;
+        updateCallWindowPos();
+        callRoot.setVisibility(View.VISIBLE);
+        // If the call was already answered (e.g. the switch flipped
+        // mid-call), restore the timer at once instead of waiting
+        // for the next tick — bind() just reset it to ringing.
+        updateCallTimer();
+        // v413: slide in from the right edge instead of popping in
+        // (user 2026-11-22 "来电时胶囊应该是滑入的 / 都改成滑入 /
+        // 贴边滑入"). The capsule starts one full width to the right
+        // (off-screen) and slides to its edge position, mirroring
+        // the left capsule's slide-in from the left in popCapsule.
+        // Only a NEW call slides in; the keep branch above (same
+        // call re-post) leaves the capsule where it is.
+        cap.setTranslationX(dp(CapsuleView.CALL_WIDTH_DP));
+        cap.setAlpha(0f);
+        cap.animate().translationX(0f).alpha(1f)
+                .setDuration(250).withLayer().start();
+    }
+
+    /** Hide the right call window and drop its capsule (call
+     * ended, or the switch turned off). */
+    /** v399: the right call capsule's screen position for drag
+     * diagnosis — getLocationOnScreen gives the absolute screen
+     * x/y of the capsule's left-top corner ("-" when there is
+     * no capsule). Together with the pill width and transX it
+     * tells whether a "vanished" capsule was removed/invisible
+     * or simply moved off-screen. */
+    private String callCapScreenPos() {
+        if (callCapView == null) {
+            return "-";
+        }
+        int[] loc = new int[2];
+        try {
+            callCapView.getLocationOnScreen(loc);
+        } catch (Throwable ignored) {
+        }
+        return loc[0] + "," + loc[1];
+    }
+
+    private void hideCallWindow() {
+        // v396: drag diagnosis — log if the call capsule is
+        // destroyed while a drag is in progress (the video
+        // "vanish on drag start"). If this fires mid-drag, the
+        // removal path is the cause; if it never fires, the
+        // vanish is a rendering/window issue, not a removal.
+        // v399: also log the capsule's screen position, so a
+        // "vanished" capsule can be told apart from one that
+        // is still there but moved off-screen.
+        FileLog.i("CallWin hide dragOpen=" + callDragWindowOpen
+                + " hasCap=" + (callCapView != null)
+                + " pos=" + callCapScreenPos());
+        if (callCapView != null && callRoot != null) {
+            try {
+                callRoot.removeView(callCapView);
+            } catch (Throwable ignored) {
+            }
+        }
+        callCapView = null;
+        callCapKey = null;
+        if (callRoot != null) {
+            callRoot.setVisibility(View.GONE);
+        }
+        // v397: the user is right — the call window was a
+        // leftover. It was added to the WindowManager once and
+        // NEVER removed; hideCallWindow only set the root GONE.
+        // The empty window (240x60, or 800x300 if a drag left
+        // it enlarged) stayed at the right edge and swallowed
+        // every touch inside its bounds (FLAG_NOT_TOUCH_MODAL
+        // only lets touches OUTSIDE the window through, and
+        // with a GONE root nothing inside handles them, so
+        // they are dropped). That is why the spot where the
+        // right capsule was could not be tapped. Remove the
+        // window itself; ensureCallWindow re-adds it when a
+        // new call comes (callWindowAdded == false).
+        if (callWindowAdded && callRoot != null && wm != null) {
+            try {
+                wm.removeView(callRoot);
+            } catch (Throwable ignored) {
+            } finally {
+                callWindowAdded = false;
+            }
+        }
     }
 
     // ---- Card (v143) ----
@@ -5643,7 +6247,17 @@ public class BubbleWindow {
         // 左拖的 -80dp 顶出也一并收回来），同时以左边缘为轴心横向
         // 压扁到 0（scaleX），240ms，和其他消散动画同速。图标在
         // 下沿等着，卡片缩进边缘后图标再沉进扇子。
-        cap.setPivotX(0f);
+        // v380: 右窗的来电胶囊反过来——轴心在右边缘（靠屏边），
+        // 否则它靠右缩到一半、最后却弹到左边去（用户 2026-11-22
+        // 视频“靠右缩的，但是最后动画弹到左边去了”）。
+        boolean isRightCall = cap == callCapView;
+        if (isRightCall) {
+            float w = cap.getWidth() > 0 ? cap.getWidth()
+                    : dp(CapsuleView.CALL_WIDTH_DP);
+            cap.setPivotX(w);
+        } else {
+            cap.setPivotX(0f);
+        }
         cap.animate().translationX(0f).scaleX(0f).setDuration(240)
                 .setInterpolator(
                         new android.view.animation.DecelerateInterpolator())
@@ -6420,6 +7034,231 @@ public class BubbleWindow {
                 }
             }
         }, 450);
+    }
+
+    /** v386: enlarge the right call window ONLY while its capsule
+     * is being dragged, then shrink it back. The idle window is a
+     * fixed 560x120dp; a horizontal swipe drifts a little
+     * vertically, and once the finger leaves that window the touch
+     * stream breaks, no UP arrives, and the capsule stays stuck
+     * halfway instead of springing back ("还是不会弹出"). The drag
+     * window is 800x300dp — but unlike v384, this ONLY changes the
+     * window's width/height. The window's x/y and the capsule's
+     * margins are NEVER touched mid-drag, so the capsule's screen
+     * spot cannot jump and the capsule cannot look freely
+     * draggable; only the invisible slack around it grows. Called
+     * from CapsuleView when a right-dock drag starts; the drag
+     * end (UP/CANCEL) shrinks it back.
+     * v390: the idle window shrank to exactly the capsule
+     * (240x60dp) so touches around it reach the app below.
+     * v391: the drag slack no longer comes from the capsule's
+     * margins (changing them mid-drag is a layout change — the
+     * capsule jumped). The window moved left/up by 280/120 and
+     * the ROOT view was translated right/down by the same — but
+     * the two halves never land in the same frame, so it STILL
+     * jumped (user 2026-11-22 "还是跳动").
+     * v392: mirror the LEFT dock exactly (user "之前左边是怎么
+     * 设计的"). Left: gravity LEFT, capsule anchored left, drag
+     * ONLY widens the window — position, margins, translation
+     * never touched, so the capsule cannot jump. Right: gravity
+     * RIGHT, capsule anchored right (END), drag ONLY widens the
+     * window (800x300) — the right edge stays on the screen
+     * edge, the window extends left, the capsule does not move.
+     * The shrink still waits 250ms so the 200ms spring-back
+     * finishes while the window is still big. */
+    private boolean callDragWindowOpen;
+    private boolean callDragWindowShrinkPending;
+    private Runnable callDragWindowShrinkRunnable;
+
+    public void beginCallDragWindow() {
+        if (!callWindowAdded || wm == null || callRoot == null
+                || callParams == null) {
+            return;
+        }
+        if (callDragWindowOpen) {
+            return;
+        }
+        // A previous drag just ended and its shrink is still
+        // waiting out the spring-back — cancel it, we need the
+        // big window again.
+        if (callDragWindowShrinkRunnable != null) {
+            try {
+                handler.removeCallbacks(
+                        callDragWindowShrinkRunnable);
+            } catch (Throwable ignored) {
+            }
+            callDragWindowShrinkRunnable = null;
+        }
+        callDragWindowShrinkPending = false;
+        callDragWindowOpen = true;
+        try {
+            // v403: the drag window is exactly the SCREEN width,
+            // not 800dp. 800dp (2935px) is wider than the screen
+            // (1440px), so right-anchoring it needed x=-1495 — and
+            // the v402 log proved Flyme clamps a negative window x
+            // to 0: the resize log showed x=-1495 but the capsule
+            // still landed at pos x=2054 (0+2935-881), i.e. the
+            // window stayed left-anchored at x=0 and the capsule
+            // went off-screen right. With width == screen width,
+            // x = screenW - width = 0 (never negative), the window
+            // spans the full screen, and the capsule stays at the
+            // right edge (x = screenW - 881). The pill grows left
+            // from there; it has 559px of room before the window's
+            // left edge, and its tail is a fade so clipping there
+            // is barely visible. Height stays 300dp.
+            callParams.width = callScreenWidth();
+            callParams.height = dp(300);
+            // v400: re-assert the window position after resizing.
+            // The v399 log proved the capsule slides off the right
+            // edge during a left drag (pos x 559 -> 2054 while the
+            // finger drags left 746px, transX stays 0) — the window
+            // is NOT staying right-anchored on resize, so the whole
+            // window (and the capsule in it) drifts right. A bare
+            // updateViewLayout with only the size changed evidently
+            // lets Flyme reposition the window; updateCallWindowPos
+            // re-asserts the anchor in the same update, so the
+            // right edge stays on the screen edge.
+            // v402: log the window geometry at resize so the next
+            // test shows exactly what screen size and x were used.
+            updateCallWindowPos();
+            FileLog.i("CallWin resize w=" + callParams.width
+                    + " h=" + callParams.height
+                    + " x=" + callParams.x + " y=" + callParams.y
+                    + " g=" + callParams.gravity);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Shrink the right call window back to its idle 240x60dp.
+     * v405: deferred 250ms again, AFTER the spring-back.
+     * v404 shrank it immediately on release and that broke the
+     * tail in both directions (user 2026-11-22 "拖尾呢" /
+     * "缩回去的机会" / "右滑弹出的时候"):
+     * - Left drag: at release the pill is still LONG (grown);
+     *   shrinking the window first clips the tail at the
+     *   window's left edge — the tail never gets to retract,
+     *   it is just cut off.
+     * - Right drag: at release the capsule is still shifted
+     *   right by transX; shrinking the window first clips the
+     *   capsule's right end (answer button) at the window's
+     *   right edge while the 200ms translationX spring-back
+     *   is still running — the capsule pops back half-cut.
+     * So the window must stay wide until the capsule itself
+     * has finished springing back. The 250ms delay is back:
+     * the pill reset (resetLongCapsule) and the translationX
+     * animation both run inside the still-wide window, and
+     * the shrink lands at 250ms after they finish. Hangup /
+     * dissipate is unaffected: the capsule is set INVISIBLE
+     * and burstParticles spawns at its screen position, and
+     * removeCallCapsule/hideCallWindow run 300ms later. */
+    public void endCallDragWindow() {
+        if (!callDragWindowOpen) {
+            return;
+        }
+        callDragWindowOpen = false;
+        callDragWindowShrinkPending = true;
+        try {
+            if (callDragWindowShrinkRunnable != null) {
+                handler.removeCallbacks(
+                        callDragWindowShrinkRunnable);
+            }
+            callDragWindowShrinkRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    callDragWindowShrinkPending = false;
+                    callDragWindowShrinkRunnable = null;
+                    // v410: animate the shrink (see
+                    // animateCallWindowShrink) instead of jumping
+                    // it — the one-shot resize is what bounces.
+                    // (v413: reverted to v410 — the v411/v412
+                    // remove+re-add line flashed once per shrink,
+                    // user 2026-11-22 "算了 / 退回上一版".)
+                    animateCallWindowShrink();
+                }
+            };
+            handler.postDelayed(callDragWindowShrinkRunnable, 250);
+        } catch (Throwable ignored) {
+            callDragWindowShrinkPending = false;
+        }
+    }
+
+    /** v410 (restored in v413): animate the right call window
+     * from drag size back to idle (240x60dp). Root cause of the
+     * post-settle left bounce (user 2026-11-22 v409 video,
+     * frame-by-frame): after a left or right swipe release the
+     * capsule springs back, sticks to the edge, and then — ~70ms
+     * after it settles — jumps LEFT once and comes back. That
+     * jump lines up exactly with the 250ms delayed shrink in
+     * endCallDragWindow: the one-shot resize (width 1440->881,
+     * x 0->559) is NOT applied atomically by Flyme — the window
+     * transiently sits narrow at x=0, so the right-anchored
+     * capsule jumps left to ~0 and then comes back when x lands
+     * (the "extra bounce", in both directions). The v409 tail
+     * only covered the 200ms spring-back, so it never saw this.
+     * Animating the width in small steps, with
+     * updateCallWindowPos() recomputing x = screenW - width on
+     * every frame, keeps x + width == screenW throughout, so the
+     * right-anchored capsule stays at the edge for the whole
+     * shrink; any per-frame transient is only one step wide.
+     * Height lerps 300->60dp alongside. If the window is already
+     * idle-sized, just re-assert the position.
+     * v413: v411/v412's remove+re-add line is dropped (it
+     * flashed once per shrink; user "算了 / 退回上一版") and
+     * this v410 animation is back. The ~60px per-step dip
+     * remains ("还是有一点点") — accepted, not chased. */
+    private void animateCallWindowShrink() {
+        if (callParams == null || callRoot == null || wm == null) {
+            return;
+        }
+        final int startW = callParams.width;
+        final int startH = callParams.height;
+        final int endW = dp(240);
+        final int endH = dp(60);
+        if (startW <= endW) {
+            try {
+                callParams.width = endW;
+                callParams.height = endH;
+                updateCallWindowPos();
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
+        android.animation.ValueAnimator anim =
+                android.animation.ValueAnimator.ofFloat(0f, 1f);
+        anim.setDuration(120);
+        anim.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+            @Override
+            public void onAnimationUpdate(
+                    android.animation.ValueAnimator a) {
+                float f = (Float) a.getAnimatedValue();
+                try {
+                    callParams.width = (int) (startW
+                            + (endW - startW) * f);
+                    callParams.height = (int) (startH
+                            + (endH - startH) * f);
+                    // x = screenW - width, so x + width stays the
+                    // screen width and the capsule never moves.
+                    updateCallWindowPos();
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        anim.addListener(
+                new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(
+                    android.animation.Animator animation) {
+                try {
+                    callParams.width = endW;
+                    callParams.height = endH;
+                    updateCallWindowPos();
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        anim.start();
     }
 
     private int dp(int v) {

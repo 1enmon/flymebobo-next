@@ -85,6 +85,36 @@ public final class NotifCollectionHook {
             bridge.hook(posted).intercept(new XposedInterface.Hooker() {
                 @Override
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    // v370: hide the notification from the lock screen
+                    // so only the bubble shows there. Set visibility
+                    // SECRET before SystemUI processes it. The shade
+                    // still shows it, and the module's own listener
+                    // (separate process) is unaffected, so music lyric
+                    // / download progress re-reads keep working. Only
+                    // when the master switch is on; otherwise the lock
+                    // screen would lose notifications with no bubble
+                    // to show. Calls are skipped (CallNotifSuppress
+                    // already drops them from the collection).
+                    try {
+                        if (FeatureFlags.notif) {
+                            StatusBarNotification sbn =
+                                    (StatusBarNotification) chain.getArg(0);
+                            if (sbn != null
+                                    && sbn.getNotification() != null) {
+                                String pkg = sbn.getPackageName();
+                                if (pkg != null
+                                        && !pkg.equals("com.chenan.flymebobo")
+                                        && !pkg.equals("com.android.systemui")
+                                        && !pkg.equals("android")
+                                        && !isCall(sbn,
+                                                sbn.getNotification())) {
+                                    sbn.getNotification().visibility =
+                                            Notification.VISIBILITY_SECRET;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
                     Object result = chain.proceed();
                     try {
                         onPosted((StatusBarNotification) chain.getArg(0));
@@ -660,6 +690,132 @@ public final class NotifCollectionHook {
         } catch (Throwable ignored) {
         }
         BubbleWindow.getInstance().onNotification(data);
+        // v425 (diagnostic, user 2026-11-22 "查"): restore the v422
+        // hook-side push cancel. Push-service notifications
+        // (com.meizu.cloud posting for the real app) pop a bubble
+        // but their system card stays — cancel it here, in the
+        // same hook that popped the bubble. Music/downloads are
+        // exempt (they keep their system card).
+        if (isPushService(pkg) && !isMusic && !isDownload) {
+            cancelViaSystemUI(sbn);
+        }
+    }
+
+    // v422 (restored in v425): a push-service notification is
+    // one whose posting package is com.meizu.cloud, or whose app
+    // label is "推送服务".
+    private boolean isPushService(String pkg) {
+        if (pkg == null) {
+            return false;
+        }
+        if ("com.meizu.cloud".equals(pkg)) {
+            return true;
+        }
+        try {
+            if (app != null) {
+                android.content.pm.PackageManager pm =
+                        app.getPackageManager();
+                if (pm != null) {
+                    android.content.pm.ApplicationInfo ai =
+                            pm.getApplicationInfo(pkg, 0);
+                    CharSequence label = pm.getApplicationLabel(ai);
+                    if (label != null
+                            && "推送服务".equals(label.toString())) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    // v422 (restored in v425, diagnostic): cancel the push
+    // notification through the system's own INotificationManager,
+    // from the SystemUI hook. The bubble is popped by this hook,
+    // so the cancel happens in the same place. v425 change: the
+    // catch logs the FULL cause chain — BubbleNotify_46 showed
+    // "HookCancel threw: InvocationTargetException" twice, but
+    // the wrapper hides the real exception (SecurityException?
+    // RemoteException? a Flyme-side check?). The cause chain
+    // settles it.
+    private void cancelViaSystemUI(
+            android.service.notification.StatusBarNotification sbn) {
+        if (sbn == null) {
+            return;
+        }
+        String pkg;
+        String tag;
+        int id;
+        try {
+            pkg = sbn.getPackageName();
+            tag = sbn.getTag();
+            id = sbn.getId();
+        } catch (Throwable t) {
+            log("HookCancel threw: " + t);
+            return;
+        }
+        int userId = 0;
+        try {
+            android.os.UserHandle user = sbn.getUser();
+            if (user != null) {
+                try {
+                    java.lang.reflect.Method m = user.getClass()
+                            .getMethod("getIdentifier");
+                    Object r = m.invoke(user);
+                    if (r instanceof Integer) {
+                        userId = ((Integer) r).intValue();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            log("HookCancel pkg=" + pkg + " tag=" + tag + " id=" + id
+                    + " userId=" + userId + " key=" + sbn.getKey());
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            java.lang.reflect.Method getService = sm.getMethod(
+                    "getService", String.class);
+            Object binder = getService.invoke(null, "notification");
+            if (binder == null) {
+                log("HookCancel no notification service");
+                return;
+            }
+            Class<?> stub = Class.forName(
+                    "android.app.INotificationManager$Stub");
+            java.lang.reflect.Method asInterface = stub.getMethod(
+                    "asInterface", android.os.IBinder.class);
+            Object inm = asInterface.invoke(null, binder);
+            if (inm == null) {
+                log("HookCancel no INotificationManager");
+                return;
+            }
+            try {
+                java.lang.reflect.Method cancel = inm.getClass()
+                        .getMethod("cancelNotificationWithTag",
+                                String.class, String.class,
+                                int.class, int.class);
+                cancel.invoke(inm, pkg, tag, Integer.valueOf(id),
+                        Integer.valueOf(userId));
+                log("HookCancel cancelled pkg=" + pkg + " id=" + id);
+            } catch (NoSuchMethodException e) {
+                java.lang.reflect.Method cancelAll = inm.getClass()
+                        .getMethod("cancelAllNotifications",
+                                String.class, int.class);
+                cancelAll.invoke(inm, pkg, Integer.valueOf(userId));
+                log("HookCancel cancelled-all pkg=" + pkg);
+            }
+        } catch (Throwable t) {
+            StringBuilder sb = new StringBuilder(
+                    "HookCancel threw: " + t);
+            Throwable c = t.getCause();
+            while (c != null) {
+                sb.append(" | caused by: ").append(c);
+                c = c.getCause();
+            }
+            log(sb.toString());
+        }
     }
 
     // v219: unwrap a notification largeIcon Icon to the

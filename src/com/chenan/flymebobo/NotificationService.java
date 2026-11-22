@@ -27,6 +27,14 @@ import android.service.notification.StatusBarNotification;
 public class NotificationService extends NotificationListenerService {
     public static final String ACTION_NOTIFY =
             "com.chenan.flymebobo.NOTIFY";
+    /** v427 (push diagnostic): cancelNotif reports its 500ms
+     * still-active check to SystemUI, so the result lands in the
+     * SystemUI log the user sends — the listener process's own
+     * FileLog lines never appear in those files, so without this
+     * we cannot tell whether the listener's cancel ran or worked.
+     * extras: key, stillActive, pkg, tag, id. */
+    public static final String ACTION_CANCEL_DIAG =
+            "com.chenan.flymebobo.CANCEL_DIAG";
     /** Live lyric line, service -> SystemUI (BubbleWindow). */
     public static final String ACTION_LYRIC =
             "com.chenan.flymebobo.LYRIC";
@@ -196,15 +204,59 @@ public class NotificationService extends NotificationListenerService {
     // outright would lose those notifications entirely. The smart
     // filter below drops a push copy ONLY when the real app already
     // posted the same content recently.
+    // v394: all system push services (user 2026-11-22 "把所有系统
+    // 的推送都加上去") — every OEM / system push package that can
+    // post a notification on another app's behalf. The label
+    // fallback in isPushService ("推送服务") already catches any
+    // of these whose app label is exactly that; the explicit list
+    // is the reliable path.
     private static final java.util.Set<String> PUSH_SERVICE_PACKAGES =
             new java.util.HashSet<String>(java.util.Arrays.asList(
+            // Meizu / Flyme (v393: com.meizu.cloud posts BOSS).
+            "com.meizu.cloud",
             "com.meizu.cloud.pushservice", "com.meizu.push",
             "com.meizu.flyme.push", "com.meizu.cloud.pushsdk",
-            "com.xiaomi.xmsf",
+            // Xiaomi / Redmi / MIUI / HyperOS.
+            "com.xiaomi.xmsf", "com.xiaomi.push",
+            "com.xiaomi.mipush", "com.xiaomi.xmpush",
+            // Huawei / EMUI / HarmonyOS.
             "com.huawei.android.pushagent", "com.huawei.hms",
+            "com.huawei.android.push",
+            // Honor / MagicOS (split from Huawei).
+            "com.hihonor.push", "com.honor.push",
+            "com.hihonor.android.pushagent",
+            "com.honor.android.pushagent",
+            // OPPO / ColorOS / OnePlus / Realme (HeyTap).
             "com.coloros.mcs", "com.heytap.mcs", "com.heytap.msp",
+            "com.oppo.push", "com.coloros.push", "com.heytap.push",
+            "com.oneplus.push", "com.oneplus.mcs",
+            "com.realme.push", "com.realme.mcs",
+            // Vivo / Funtouch OS / OriginOS.
             "com.vivo.pushservice", "com.vivo.push",
-            "com.samsung.android.push"));
+            "com.vivo.push.sdk",
+            // Samsung / One UI.
+            "com.samsung.android.push",
+            "com.samsung.android.mobileservice",
+            "com.sec.android.push", "com.samsung.push",
+            // Google / FCM.
+            "com.google.android.gms", "com.google.android.gsf",
+            // ZTE / Nubia.
+            "com.zte.push", "com.nubia.push",
+            // Lenovo / Motorola.
+            "com.lenovo.push", "com.motorola.push",
+            // Sony.
+            "com.sony.nfx", "com.sonymobile.push",
+            // LG / HTC / ASUS / Sharp / TCL / Nokia.
+            "com.lge.push", "com.htc.push", "com.asus.push",
+            "com.sharp.push", "com.tcl.push",
+            "com.hmdglobal.push",
+            // Baidu / 360 / Meitu / Gionee / Coolpad / Smartisan.
+            "com.baidu.push", "com.baidu.android.pushservice",
+            "com.qihoo.push", "com.meitu.push",
+            "com.gionee.push", "com.coolpad.push",
+            "com.smartisan.push",
+            // Generic.
+            "com.android.push"));
     // Who last posted each content digest (title+text) — so the push
     // filter can tell whether the real app already posted it. Kept
     // in step with recentFingerprints by isFingerprintRepeat.
@@ -686,6 +738,124 @@ public class NotificationService extends NotificationListenerService {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    /** v407: cancel a notification by key AND by pkg/tag/id.
+     * Push-service notifications (com.meizu.cloud) carry a key
+     * whose package field is the REAL app (e.g. com.coolapk.market,
+     * com.eg.android.AlipayGphone) while the posting package is the
+     * push service — cancelNotification(key) does not resolve it on
+     * Flyme, so the card stays in the shade even though the bubble
+     * popped (user 2026-11-22 酷安/支付宝). The 3-arg cancel uses
+     * the package + tag + id, which does resolve.
+     * v408 (user 2026-11-22 "消这种通知实际上应该还是要靠消原来
+     * 的报名的"): the 3-arg cancel must use the ORIGINAL package
+     * from the KEY (e.g. com.hpbr.bosszhipin), NOT the posting
+     * package (com.meizu.cloud) — the notification is registered
+     * under the original package, so cancelling by the push-service
+     * package finds nothing. Both are tried; the second is a no-op
+     * if the first already removed it. Replaces every
+     * cancelNotification(sbn.getKey()) in onNotificationPosted. */
+    private void cancelNotif(StatusBarNotification sbn) {
+        if (sbn == null) {
+            return;
+        }
+        // v417 (diagnostic): log the cancel parameters and whether
+        // each call throws. The Migu push (19:38:42) popped a bubble
+        // but the card stayed in the shade — both cancels are
+        // silently swallowed, so log what is actually attempted.
+        final String key = sbn.getKey();
+        final String keyPkg = keyPackage(key);
+        final String pkg = (keyPkg != null && !keyPkg.isEmpty())
+                ? keyPkg : sbn.getPackageName();
+        final String tag = sbn.getTag();
+        final int id = sbn.getId();
+        FileLog.i("cancelNotif key=" + key + " keyPkg=" + keyPkg
+                + " pkg=" + pkg + " postPkg=" + sbn.getPackageName()
+                + " tag=" + tag + " id=" + id);
+        try {
+            cancelNotification(key);
+        } catch (Throwable t) {
+            FileLog.i("cancelNotif key-cancel threw: " + t);
+        }
+        try {
+            cancelNotification(pkg, tag, id);
+        } catch (Throwable t) {
+            FileLog.i("cancelNotif 3-arg cancel threw: " + t);
+        }
+        // v419 (user 2026-11-22 "做吧/修复"): third attempt — the
+        // POSTING package. A push notification is registered under
+        // the push service that posted it (com.meizu.cloud), not
+        // under the original app in the key, so the key cancel and
+        // the original-package 3-arg cancel both miss it. Only
+        // cancelling by the posting package finds it. Skipped when
+        // the posting package already equals the key package
+        // (normal notifications — the 2nd attempt covered it).
+        final String postPkg = sbn.getPackageName();
+        if (postPkg != null && !postPkg.equals(pkg)) {
+            try {
+                cancelNotification(postPkg, tag, id);
+            } catch (Throwable t) {
+                FileLog.i("cancelNotif postPkg cancel threw: " + t);
+            }
+        }
+        // v417 (diagnostic): 500ms later, check whether the
+        // notification is still active. A silent no-op (not found)
+        // throws nothing, so only this tells us the cancel worked.
+        try {
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()).postDelayed(
+                    new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        boolean stillThere = false;
+                        StatusBarNotification[] act =
+                                getActiveNotifications();
+                        if (act != null) {
+                            for (StatusBarNotification a : act) {
+                                if (a != null
+                                        && key.equals(a.getKey())) {
+                                    stillThere = true;
+                                    break;
+                                }
+                            }
+                        }
+                        FileLog.i("cancelNotif stillActive=" + stillThere
+                                + " key=" + key);
+                        // v427: report the result to SystemUI so it
+                        // lands in the log the user sends (see
+                        // ACTION_CANCEL_DIAG). stillActive=true means
+                        // all three cancels missed (or the push
+                        // service re-posted); false means the cancel
+                        // worked and a staying card is a re-post.
+                        try {
+                            Intent diag = new Intent(ACTION_CANCEL_DIAG);
+                            diag.putExtra("key", key);
+                            diag.putExtra("stillActive", stillThere);
+                            diag.putExtra("pkg", pkg);
+                            diag.putExtra("tag", tag);
+                            diag.putExtra("id", id);
+                            sendBroadcast(diag);
+                        } catch (Throwable ignored) {
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, 500);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v408: the package field (2nd) of a notification key
+     * ("user|pkg|id|tag|uid"). For push-service notifications this
+     * is the ORIGINAL app package, not the posting push service. */
+    private static String keyPackage(String key) {
+        if (key == null) {
+            return null;
+        }
+        String[] parts = key.split("\\|");
+        return parts.length >= 2 ? parts[1] : null;
     }
 
     /** Smart push-service filter (v144, user 2026-11-19 "可以"):
@@ -3239,12 +3409,28 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    /** v418: the app's version (name + code) for the log, so a log
+     * file always shows which build produced it. */
+    private String appVersion() {
+        try {
+            android.content.pm.PackageInfo pi = getPackageManager()
+                    .getPackageInfo(getPackageName(), 0);
+            return pi.versionName + " (" + pi.versionCode + ")";
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
+
     @Override
     public void onListenerConnected() {
         // v158: prove the log is writing — one line on every
         // (re)connect, so the user can check the file exists even
         // before any notification arrives.
         FileLog.i("Listener connected, FileLog ready");
+        // v418 (user 2026-11-22 "让你把版本写入日志"): log the
+        // version on every connect, so a log file always shows
+        // which build produced it.
+        FileLog.i("Version: " + appVersion());
         // v133: the toggle command comes from SystemUI (another
         // process), so this receiver MUST be exported. A plain
         // 2-arg registerReceiver never receives a cross-app
@@ -3411,6 +3597,69 @@ public class NotificationService extends NotificationListenerService {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /** v389: recognise a phone number vs a contact name (user
+     * 2026-11-22 "识别名称和号码"). The incallui notification
+     * posts TWICE for one call: first title = the raw number
+     * ("18883204388", text empty, titleOverlay = "188 8320
+     * 4388"), then 16ms later title = the name ("我的", text =
+     * "188 8320 4388"). The old code took EXTRA_TITLE as the name
+     * and EXTRA_TEXT as the number blindly — no judgement at all —
+     * so the first post showed the raw unspaced number as the
+     * "name" and an empty second line, and the key dedup dropped
+     * the second post, so the name never arrived.
+     * A string is a phone number when, after stripping spaces,
+     * dashes and a leading +, it is all digits and 7+ digits
+     * long. Anything else non-empty is a name. */
+    private static boolean isPhoneNumber(String s) {
+        if (s == null) {
+            return false;
+        }
+        String d = s.trim().replace(" ", "").replace("-", "");
+        if (d.startsWith("+")) {
+            d = d.substring(1);
+        }
+        if (d.length() < 7) {
+            return false;
+        }
+        for (int i = 0; i < d.length(); i++) {
+            if (!Character.isDigit(d.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Digits only, for comparing numbers ("18883204388" ==
+     * "188 8320 4388"). */
+    private static String digitsOnly(String s) {
+        if (s == null) {
+            return null;
+        }
+        String d = s.trim().replace(" ", "").replace("-", "");
+        if (d.startsWith("+")) {
+            d = d.substring(1);
+        }
+        return d;
+    }
+
+    /** Display form: an 11-digit mobile with no spaces becomes
+     * "188 8320 4388" (3-4-4). Anything else is returned trimmed. */
+    private static String formatNumber(String s) {
+        if (s == null) {
+            return null;
+        }
+        String t = s.trim();
+        if (t.isEmpty()) {
+            return t;
+        }
+        String d = digitsOnly(t);
+        if (d != null && d.length() == 11 && !t.contains(" ")) {
+            return d.substring(0, 3) + " " + d.substring(3, 7)
+                    + " " + d.substring(7);
+        }
+        return t;
     }
 
     /** 1.x isCallNotification: category call, full-screen intent
@@ -3764,12 +4013,64 @@ public class NotificationService extends NotificationListenerService {
                 // = the same call updating, skip it. A different
                 // number still rings (call waiting).
                 android.os.Bundle cb = n.extras;
-                String name = cb != null ? cb.getString(
+                String rawTitle = cb != null ? cb.getString(
                         android.app.Notification.EXTRA_TITLE) : null;
-                String number = cb != null ? cb.getString(
+                String rawText = cb != null ? cb.getString(
                         android.app.Notification.EXTRA_TEXT) : null;
+                // v389: recognise name vs number (user 2026-11-22
+                // "识别名称和号码"). Flyme's display strings live
+                // in notification.live.titleOverlay /
+                // contentOverlay — the formatted number with spaces
+                // ("188 8320 4388"), which EXTRA_TITLE/EXTRA_TEXT
+                // do not always carry (first post: title = raw
+                // "18883204388", text empty).
+                String titleOverlay = cb != null ? cb.getString(
+                        "notification.live.titleOverlay") : null;
+                String contentOverlay = cb != null ? cb.getString(
+                        "notification.live.contentOverlay") : null;
+                // Number: first phone-number-like string, preferring
+                // one that already has spaces (formatted). Name:
+                // first non-empty string that is NOT a number.
+                String number = null;
+                if (isPhoneNumber(titleOverlay)) {
+                    number = formatNumber(titleOverlay);
+                } else if (isPhoneNumber(rawText)) {
+                    number = formatNumber(rawText);
+                } else if (isPhoneNumber(contentOverlay)) {
+                    number = formatNumber(contentOverlay);
+                } else if (isPhoneNumber(rawTitle)) {
+                    number = formatNumber(rawTitle);
+                }
+                String name = null;
+                if (rawTitle != null && !rawTitle.trim().isEmpty()
+                        && !isPhoneNumber(rawTitle)) {
+                    name = rawTitle.trim();
+                } else if (titleOverlay != null
+                        && !titleOverlay.trim().isEmpty()
+                        && !isPhoneNumber(titleOverlay)) {
+                    name = titleOverlay.trim();
+                }
                 if (callKey != null
                         && callKey.equals(sbn.getKey())) {
+                    // v389: same key, but the second post may be the
+                    // name resolving (first post had only the number
+                    // as the title). If we stored no real name yet
+                    // and this post brings one, update the capsule
+                    // instead of dropping it. Still RINGING (not
+                    // offhook), so re-sending RINGING only refreshes
+                    // the capsule — BubbleWindow drops it once
+                    // offhook.
+                    boolean storedHasName = callName != null
+                            && !callName.trim().isEmpty()
+                            && !isPhoneNumber(callName);
+                    if (name != null && !storedHasName) {
+                        callName = name;
+                        if (number != null) {
+                            callNumber = digitsOnly(number);
+                        }
+                        extractCallSpeakerIntents(n);
+                        sendCallBroadcast(CALL_RINGING, name, number);
+                    }
                     return;
                 }
                 // v132: match by name too — after answering, the
@@ -3785,9 +4086,12 @@ public class NotificationService extends NotificationListenerService {
                 // no RINGING is sent and no bubble pops. A re-post
                 // only happens after answering (OFFHOOK); a new
                 // incoming call arrives while RINGING.
+                // v389: callNumber is stored digits-only, so the
+                // formatted display number ("188 8320 4388") matches
+                // the raw one ("18883204388") in this comparison.
                 boolean sameNumber = callNumber != null
                         && number != null
-                        && callNumber.equals(number);
+                        && callNumber.equals(digitsOnly(number));
                 boolean sameName = callName != null && name != null
                         && callName.equals(name);
                 boolean callOffhook = false;
@@ -3822,7 +4126,10 @@ public class NotificationService extends NotificationListenerService {
                     return;
                 }
                 callKey = sbn.getKey();
-                callNumber = number;
+                // v389: store digits-only for the dedup above; the
+                // broadcast still carries the formatted number for
+                // display.
+                callNumber = digitsOnly(number);
                 callName = name;
                 extractCallSpeakerIntents(n);
                 sendCallBroadcast(CALL_RINGING, name, number);
@@ -4194,6 +4501,15 @@ public class NotificationService extends NotificationListenerService {
             }
             if ((title == null || title.isEmpty())
                     && (text == null || text.isEmpty())) {
+                // v375: an empty notification is still a visible
+                // card — cancel it so it does not leak onto the
+                // lock screen / shade.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             // Full 1.x dedup (v105, user "完整套用"), in 1.x order:
@@ -4239,6 +4555,15 @@ public class NotificationService extends NotificationListenerService {
             if (!hasProgress && !isMusic && System.currentTimeMillis()
                     - sbn.getPostTime() > STALE_WINDOW_MS) {
                 FileLog.i("Stale notification dropped (>5s old): " + pkg);
+                // v375: a re-delivered stale notification is a
+                // fresh visible card — cancel it (no-op if it is
+                // already gone).
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             // Flags mask (1.x fixed28/31/135/137): 578 = 0x242 =
@@ -4256,6 +4581,26 @@ public class NotificationService extends NotificationListenerService {
             // mask — a player notification is ongoing by definition).
             if (!isMusic && (n.flags & dropMask) != 0) {
                 FileLog.i("Notification dropped by flags mask " + dropMask + ": " + pkg);
+                // v372: a group summary dropped here is still a
+                // visible notification (its children popped as
+                // bubbles) — cancel it so it does not leak onto the
+                // lock screen / shade.
+                // v377: same for ONGOING / FOREGROUND_SERVICE.
+                // BOSS 直聘 (and similar apps) post a real user
+                // message — a job recommendation — with the
+                // ongoing / foreground-service flag set, so it was
+                // dropped here with no bubble AND no cancel, and
+                // the card stayed on the lock screen (user
+                // 2026-11-22 "这种还是没有屏蔽到"). A dropped
+                // notification is a visible card either way, so
+                // cancel it. Music / downloads are exempt (they
+                // never reach this branch).
+                if (!isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             // Per-package fingerprint (1.x fixed28): identical
@@ -4264,15 +4609,37 @@ public class NotificationService extends NotificationListenerService {
             if (isRepeatNotifFingerprint(pkg, sbn, title, text,
                     notifProgress, notifProgressMax)) {
                 FileLog.i("Repeat notification fingerprint dropped: " + pkg);
+                // v375: a re-delivered notification is a fresh
+                // visible card — cancel it (no-op if gone).
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (isRepeatNotif(sbn.getKey(), title, text,
                     notifProgress, notifProgressMax)) {
                 FileLog.i("Repeat notification key dropped: " + sbn.getKey());
+                // v375: same — cancel the re-delivered card.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (isStalePostTime(sbn.getKey(), sbn.getPostTime())) {
                 FileLog.i("Stale postTime dropped: " + sbn.getKey());
+                // v375: same — cancel the stale card.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             // Per-key message lifecycle (1.x fixed11/12): a re-post
@@ -4281,6 +4648,14 @@ public class NotificationService extends NotificationListenerService {
             // posted it.
             if (isRedundantMessage(sbn, n, extras, pkg, title, text)) {
                 FileLog.i("Redundant message dropped (already seen): " + pkg);
+                // v375: a re-posted message is a fresh visible
+                // card — cancel it (no-op if gone).
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             // Duplicate (1.x fixed135): skipped for progress
@@ -4294,26 +4669,77 @@ public class NotificationService extends NotificationListenerService {
             // in the background) is the only copy, so it is kept.
             if (isRedundantPushCopy(pkg, title, text)) {
                 FileLog.i("Redundant push copy dropped: " + pkg);
+                // v372: the push copy is a DISTINCT notification
+                // (different key, posted by the push service) — the
+                // real app's copy already popped a bubble and was
+                // cancelled, but this copy stays visible unless it
+                // is cancelled too. That is the "系统推送" leak.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (!hasProgress && isPkgFingerprintRepeat(pkg, title, text)) {
                 FileLog.i("Duplicate notification dropped (pkg fp): " + pkg);
+                // v375: a duplicate is a FRESH visible card (new
+                // post, same content) — cancel it. This is the
+                // test app's "再发一条相同内容" case.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (!hasProgress && isFingerprintRepeat(pkg, title, text)) {
                 FileLog.i("Duplicate notification dropped (content fp): " + pkg);
+                // v375: same — cancel the duplicate card.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (isRedundantGroupSummary(n, pkg)) {
                 FileLog.i("Group summary dropped (child already shown): " + pkg);
+                // v372: cancel the summary itself — its children
+                // already popped as bubbles, so the summary card
+                // must not stay on the lock screen / shade.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (isSummaryOf(pkg, title, text)) {
                 FileLog.i("Summary dropped: " + pkg);
+                // v372: cancel the summary itself (same leak as the
+                // group summary — its content is already shown).
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             if (isAggregatedSummary(pkg, text)) {
                 FileLog.i("Aggregated summary dropped: " + pkg);
+                // v372: cancel the aggregated summary itself.
+                if (!isMusic && !isDownloadType && FeatureFlags.notif) {
+                    try {
+                        cancelNotif(sbn);
+                    } catch (Throwable ignored) {
+                    }
+                }
                 return;
             }
             noteNotifGroup(n, pkg);
@@ -4501,7 +4927,7 @@ public class NotificationService extends NotificationListenerService {
             boolean isDownload = isDownloadType;
             if (!isMusic && !isDownload && FeatureFlags.notif) {
                 try {
-                    cancelNotification(sbn.getKey());
+                    cancelNotif(sbn);
                 } catch (Throwable ignored) {
                 }
             }

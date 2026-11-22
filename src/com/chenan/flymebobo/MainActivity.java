@@ -99,6 +99,13 @@ public class MainActivity extends Activity {
             new Feature("live", "来电", "接听 · 挂断 · 扬声器",
                     "来电有专属胶囊：接听、挂断、\n扬声器切换都在上面。\n来电永不自动消散。",
                     Color.rgb(139, 92, 246), "电"),
+            // v376: 来电放右边——嵌进“来电”卡片里。关着：来电胶囊
+            // 和其它胶囊一样在左贴边；开着：来电胶囊单独放右手边、
+            // 屏幕中间偏下一点，滑动方向镜像（往右滑钉住/收纳，
+            // 往左滑挂断）。
+            new Feature("callRight", "来电放右边", "来电胶囊放右手边 · 屏幕中间偏下",
+                    "关着：来电胶囊和其它胶囊一样，\n在左贴边胶囊堆里。\n开着：来电胶囊单独放右手边，\n屏幕中间偏下一点。\n右边时滑动方向镜像：往右滑钉住/收纳，\n往左滑挂断。",
+                    Color.rgb(139, 92, 246), "右", false, "live"),
             new Feature("card", "展开卡片", "点胶囊展开卡片（不含音乐）",
                     "点一下胶囊，展开成卡片看全文。\n关掉后点胶囊不再展开卡片。\n音乐胶囊不受这个开关管，\n由“音乐卡片”开关单独控制。",
                     Color.rgb(20, 184, 166), "卡"),
@@ -244,7 +251,7 @@ public class MainActivity extends Activity {
         hTexts.setLayoutParams(htlp);
 
         TextView hName = new TextView(this);
-        hName.setText("煤气泡 2.2");
+        hName.setText("煤气泡 2.3");
         hName.setTextSize(20);
         hName.setTextColor(Color.WHITE);
         hName.setTypeface(hName.getTypeface(), android.graphics.Typeface.BOLD);

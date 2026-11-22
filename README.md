@@ -1,8 +1,8 @@
-# flymebobo 2.2
+# flymebobo 2.3
 
 LSPosed 模块，把通知变成贴在屏幕左边的悬浮气泡（胶囊）——音乐、下载、验证码 / 取件码、来电、实况都有。
 
-包名 `com.chenan.flymebobo`，versionName `2.2`。在 Flyme（MEIZU 20 Pro）上验证过；核心是通用 Android，但小窗打开用 Flyme WindowManagerExt，有些 hook 针对 SystemUI 内部。
+包名 `com.chenan.flymebobo`，versionName `2.3`。在 Flyme（MEIZU 20 Pro）上验证过；核心是通用 Android，但小窗打开用 Flyme WindowManagerExt，有些 hook 针对 SystemUI 内部。
 
 ## 功能
 
@@ -17,7 +17,14 @@ LSPosed 模块，把通知变成贴在屏幕左边的悬浮气泡（胶囊）—
 - 设置 App（MainActivity），功能开关实时生效，拨动后不用重启 SystemUI。
 - 设置 App 底部的链接：源码仓库、酷安主页、"请我喝咖啡"微信收款码。
 
-当前版本：v2.2（versionCode 369）。
+当前版本：v2.3（versionCode 427）。
+
+## v2.3 更新
+
+- 锁屏：气泡能上锁屏，锁屏上的原通知卡片能屏蔽，息屏显示上不显示气泡。
+- 来电胶囊重新设计：变大到 240x60，名字和号码都居中；新开关“来电放右边”，开后胶囊单独放右手边屏幕中间偏下；号码能识别（纯数字是号码、其他是名字），11 位裸号按 3-4-4 补空格；接听后缩成只剩计时器一行；胶囊改成从边缘滑入。
+- 推送：推送服务包名从 14 个扩到 60+，覆盖全厂商；推送通知撤卡片改走监听服务。
+- 微信 / QQ：同一个人的多条消息合并成一个胶囊，原地更新，不再一个一个弹。
 
 ## v2.2 更新
 
