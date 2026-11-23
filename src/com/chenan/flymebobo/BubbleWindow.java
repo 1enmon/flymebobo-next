@@ -113,6 +113,13 @@ public class BubbleWindow {
     private boolean musicLedPlaying;
     private boolean dockLeft = true;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    // Scene guard (user 2026-11-23): landscape game / video scene —
+    // bubbles hidden while it lasts, notifications queued and
+    // flushed on exit. See ImmersiveSceneGuard.
+    private ImmersiveSceneGuard sceneGuard;
+    private boolean sceneSuppressed;
+    private final java.util.ArrayDeque<NotifData> suppressedQueue =
+            new java.util.ArrayDeque<>();
     /** v320: Amap bus live navigation state (no voice). Mode A
      * (waiting) shows real-time arrival from BusNaviHook; mode B
      * (on the bus) shows next stop / remaining stations, computed
@@ -633,6 +640,37 @@ public class BubbleWindow {
             }
         } catch (Throwable ignored) {
         }
+        // Scene guard init (same pattern as the screen-off hide
+        // above): entering a landscape game/video scene hides both
+        // windows; leaving it restores them (unless the screen is
+        // off) and flushes the notifications queued meanwhile.
+        try {
+            this.sceneGuard = new ImmersiveSceneGuard(this.app, this.handler);
+            this.sceneGuard.setListener(new ImmersiveSceneGuard.Listener() {
+                @Override
+                public void onSceneChanged(boolean immersive) {
+                    BubbleWindow.this.sceneSuppressed = immersive;
+                    if (immersive) {
+                        BubbleWindow.this.root.setVisibility(View.GONE);
+                        BubbleWindow.this.pileRoot.setVisibility(View.GONE);
+                    } else {
+                        try {
+                            android.os.PowerManager pm2 = (android.os.PowerManager)
+                                    BubbleWindow.this.app.getSystemService(
+                                            Context.POWER_SERVICE);
+                            if (pm2 == null || pm2.isInteractive()) {
+                                BubbleWindow.this.root.setVisibility(View.VISIBLE);
+                                BubbleWindow.this.pileRoot.setVisibility(View.VISIBLE);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        BubbleWindow.this.flushSuppressedQueue();
+                    }
+                }
+            });
+            this.sceneGuard.start();
+        } catch (Throwable ignored) {
+        }
         // Phone-state listener (v117, ported whole from 1.x
         // CallBubble): the listener is the source of truth for the
         // call state. It posts to the handler and handlePhoneState
@@ -856,6 +894,30 @@ public class BubbleWindow {
         if (data == null || app == null) {
             return;
         }
+        // Scene guard: in a landscape game/video scene, queue the
+        // notification instead of popping it; flushed on scene exit
+        // by flushSuppressedQueue(). This runs BEFORE the seen-key
+        // dedup below on purpose — a queued notification must not
+        // consume its dedup slot, or the flush would be swallowed.
+        // Calls are exempt: a ringing call still shows in-game.
+        if (!data.isCall && this.sceneGuard != null
+                && this.sceneGuard.isSuppressed()) {
+            synchronized (this.suppressedQueue) {
+                java.util.Iterator<NotifData> qit =
+                        this.suppressedQueue.iterator();
+                while (qit.hasNext()) {
+                    NotifData old = qit.next();
+                    if (old.key != null && old.key.equals(data.key)) {
+                        qit.remove();
+                    }
+                }
+                this.suppressedQueue.add(data);
+                while (this.suppressedQueue.size() > 20) {
+                    this.suppressedQueue.poll();
+                }
+            }
+            return;
+        }
         // v197: synchronous duplicate-delivery guard (see
         // seenNotifKeys). Both the hook and the broadcast funnel
         // here; the second delivery of the same key within 2s is
@@ -901,6 +963,20 @@ public class BubbleWindow {
                 popCapsule(data);
             }
         });
+    }
+
+    /** Scene guard: re-deliver everything queued during a
+     * game/video scene. Goes back through onNotification so the
+     * normal dedup / grouping / pop logic applies unchanged. */
+    private void flushSuppressedQueue() {
+        java.util.ArrayList<NotifData> copy;
+        synchronized (this.suppressedQueue) {
+            copy = new java.util.ArrayList<>(this.suppressedQueue);
+            this.suppressedQueue.clear();
+        }
+        for (NotifData d : copy) {
+            onNotification(d);
+        }
     }
 
     // v176 (method 1): the system removed a notification (user
