@@ -170,11 +170,15 @@ public class ImmersiveSceneGuard {
             // 3a) 游戏: 系统分类, 最可靠
             if (isGameApp(pkg)) return true;
 
+            // 3a2) 游戏: 引擎 Activity 特征兜底 (没声明分类的游戏靠这行:
+            // Unity/Unreal/Cocos/Godot 的主 Activity 类名都带这些特征)
+            String cls = top.getClassName();
+            if (cls != null && (cls.contains("UnityPlayer") || cls.contains("GameActivity") || cls.contains("Cocos2dx") || cls.contains("Unreal") || cls.contains("Godot"))) return true;
+
             // 3b) 视频: 名单命中
             if (VIDEO_PACKAGES.contains(pkg)) return true;
 
             // 3c) 视频: Activity 特征兜底 (名单外的播放器 / 浏览器全屏播放等)
-            String cls = top.getClassName();
             if (cls != null) {
                 for (String hint : VIDEO_ACTIVITY_HINTS) {
                     if (cls.contains(hint)) return true;
