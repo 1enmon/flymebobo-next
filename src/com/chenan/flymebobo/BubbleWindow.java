@@ -1,6 +1,7 @@
 package com.chenan.flymebobo;
 
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
@@ -94,6 +95,22 @@ public class BubbleWindow {
     private FrameLayout dock;
     private WindowManager.LayoutParams params;
     private boolean windowAdded;
+    // v476: 充电全屏动画——插充电器播一次，从右上角（电池位置）
+    // 向对角线拓展至全屏。窗口全屏、FLAG_NOT_TOUCHABLE（不挡
+    // 点击，点直接穿透到下面），播完就撤。
+    private android.view.View chargingRoot;
+    private ChargingAnimView chargingView;
+    private WindowManager.LayoutParams chargingParams;
+    private boolean chargingWindowAdded;
+    private boolean chargingAnimPlaying;
+    // v478: 反方向的钟——音乐跑马灯。放音乐时屏幕边缘一圈 LED
+    // 灯珠（MusicLedView），窗口全屏、FLAG_NOT_TOUCHABLE，不挡点击。
+    // 开关（musicLed）+ 播放状态双控：开关开着且正在放音乐才亮，
+    // 音乐一停就灭。
+    private MusicLedView musicLedView;
+    private WindowManager.LayoutParams musicLedParams;
+    private boolean musicLedWindowAdded;
+    private boolean musicLedPlaying;
     private boolean dockLeft = true;
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** v320: Amap bus live navigation state (no voice). Mode A
@@ -264,6 +281,14 @@ public class BubbleWindow {
     // capsule is a green NotifData (isCall) in its own group.
     private static final String CALL_PKG = "com.android.incallui";
     private static final String CALL_KEY = "flymebobo-call";
+    // v443: 模拟来电（测试用）的 key——跟真来电 CALL_KEY 区分开，
+    // 这样收起模拟时只撤模拟那组，不会误撤真来电。
+    private static final String SIM_CALL_KEY = "flymebobo-simcall";
+    // v459: 模拟音乐的假 key（和模拟来电一个路子）。假音乐胶囊
+    // 的 pkg 用 QQ Flyme（com.meizu.media.music，已装，图标能
+    // 读到），歌是晴天 - 周杰伦。
+    private static final String SIM_MUSIC_KEY = "flymebobo-simmusic";
+    private static final String SIM_MUSIC_PKG = "com.meizu.media.music";
     // Call state machine (v117, ported whole from 1.x CallBubble):
     // "idle" / "ringing" / "offhook". The single source of truth,
     // driven by the PhoneStateListener (telephony ground truth)
@@ -307,6 +332,33 @@ public class BubbleWindow {
     }
 
     private String callState = "idle";
+    // v443: 模拟来电胶囊当前是否在屏上（测试用）。只由
+    // setSimCall/showSimCall/hideSimCall 改，重启后默认 false，
+    // 所以模拟胶囊不会在开机时自己冒出来。
+    private boolean simCallShowing = false;
+    // v459: 模拟音乐胶囊当前是否在屏上（测试用）。和 simCall 一个
+    // 路子，只由 setSimMusic/showSimMusic/hideSimMusic 改。
+    private boolean simMusicShowing = false;
+    // v459: 扇子自动变淡——扇子出现后 5 秒没点就变半透明。
+    // fanDimmed 是当前是否已变淡；dimRunnable 是 5 秒定时器。
+    private boolean fanDimmed = false;
+    private Runnable fanDimRunnable = null;
+    // v444: 锚点拖动（长按胶囊拖整组）进行中。拖动只改锚点
+    // dockTopPct（跟滑块同一个值），整组走滑块那条路
+    // （onAppearanceChanged / rebuildDock），不直接改窗口，
+    // 所以胶囊和扇子永远对得上。拖动中不调 beginDragWindow
+    // （v441 的钳制教训）——触摸由按住的胶囊接着（touch
+    // target 粘住，手指划出窗也照样收到 MOVE）。
+    // v444 修正：拖动中不能调 onAppearanceChanged() / rebuildDock()
+    // ——rebuildDock 会把按住的那颗胶囊删了重建，触摸目标一丢，
+    // MOVE 就断了，拖一下就断。拖动中只挪两个窗口（主窗 +
+    // 扇子窗），不重建任何胶囊：主窗靠 updateWindowSize() 按
+    // 新锚点下移；扇子窗靠 pileTargetY = 拖开始时记下的
+    // 相对偏移 + 新锚点。松手落盘后，下次 rebuildDock 再正常算。
+    private boolean anchorDragActive = false;
+    private float anchorDragStartY;
+    private int anchorDragStartPct;
+    private int anchorDragPileRelY;
     private long callStartTime;
     // Current call's number, for the duplicate-RINGING guard (v112).
     private String callNumber;
@@ -379,6 +431,13 @@ public class BubbleWindow {
 
     public static BubbleWindow getInstance() {
         return INSTANCE;
+    }
+
+    /** v448: 有没有一通已经接听的电话（offhook）。CapsuleView
+     * bind() 里用——新造出来的胶囊要是已经接听了，直接缩
+     * 成计时器，不用等 setCallTimer 那一秒。 */
+    public boolean isCallAnswered() {
+        return "offhook".equals(callState);
     }
 
     // v374: hide the bubble windows while the screen is off so
@@ -607,6 +666,154 @@ public class BubbleWindow {
                 callTelephonyManager.listen(callPhoneListener,
                         android.telephony.PhoneStateListener
                                 .LISTEN_CALL_STATE);
+            }
+        } catch (Throwable ignored) {
+        }
+        // v476: 充电器插入监听——只在插上那一刻播一次全屏动画
+        // （ACTION_POWER_CONNECTED）。充电中反复收到电池广播
+        // 也不重播，只有“插上”这个动作才触发。
+        try {
+            android.content.BroadcastReceiver powerReceiver =
+                    new android.content.BroadcastReceiver() {
+                        @Override
+                        public void onReceive(Context c, Intent i) {
+                            if (Intent.ACTION_POWER_CONNECTED
+                                    .equals(i.getAction())) {
+                                showChargingAnim();
+                            }
+                        }
+                    };
+            android.content.IntentFilter powerFilter =
+                    new android.content.IntentFilter(
+                            Intent.ACTION_POWER_CONNECTED);
+            app.registerReceiver(powerReceiver, powerFilter);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v476: 插充电器播一次的全屏动画——从右上角（电池）向对角线
+     * 拓展至全屏。窗口全屏、FLAG_NOT_TOUCHABLE，不挡点击；播完
+     * （约 1 秒）自动撤窗。正在播就不再重播（快速反复插拔只播
+     * 一次，等播完再插才播）。 */
+    public void showChargingAnim() {
+        if (chargingAnimPlaying || app == null || wm == null) {
+            return;
+        }
+        chargingAnimPlaying = true;
+        try {
+            if (chargingRoot == null) {
+                chargingView = new ChargingAnimView(app);
+                chargingView.setOnDone(new Runnable() {
+                    @Override
+                    public void run() {
+                        hideChargingAnim();
+                    }
+                });
+                chargingRoot = chargingView;
+                chargingParams = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCHABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_NO_LIMITS
+                                | WindowManager.LayoutParams
+                                        .FLAG_SHOW_WHEN_LOCKED,
+                        PixelFormat.TRANSLUCENT);
+                chargingParams.gravity = android.view.Gravity.TOP
+                        | android.view.Gravity.LEFT;
+                chargingParams.setTitle("flymebobo-charging");
+            }
+            if (!chargingWindowAdded) {
+                wm.addView(chargingRoot, chargingParams);
+                chargingWindowAdded = true;
+            }
+            chargingRoot.setVisibility(View.VISIBLE);
+            chargingView.start();
+        } catch (Throwable ignored) {
+            chargingAnimPlaying = false;
+        }
+    }
+
+    private void hideChargingAnim() {
+        chargingAnimPlaying = false;
+        try {
+            if (chargingRoot != null && chargingWindowAdded) {
+                wm.removeView(chargingRoot);
+                chargingWindowAdded = false;
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v478: 反方向的钟——开关翻动。开着：正在放音乐就亮跑马灯；
+     * 关着：灯灭（正在跑也灭）。只响应开关翻动。 */
+    public void setMusicLed(boolean on) {
+        if (!on) {
+            hideMusicLed();
+            return;
+        }
+        if (musicLedPlaying) {
+            showMusicLed();
+        }
+    }
+
+    /** v478: 反方向的钟——放音乐时亮跑马灯（屏幕边缘一圈 LED）。
+     * 窗口全屏、FLAG_NOT_TOUCHABLE，不挡点击。 */
+    public void showMusicLed() {
+        if (app == null || wm == null) {
+            return;
+        }
+        try {
+            if (musicLedView == null) {
+                musicLedView = new MusicLedView(app);
+                // v483: v481 的往上顶（y=-状态栏高、高度=整屏高）撤了——
+                // 它把底排灯珠顶没了（高度跟窗口管理器实际给的不
+                // 对上，底排被裁掉），状态栏那边也没变。根因还是
+                // Flyme 的窗口管理器对 TYPE_SYSTEM_ERROR 的窗口按
+                // 状态栏内缩。换 TYPE_APPLICATION_OVERLAY（2038，
+                // 比 TYPE_SYSTEM_ERROR 还高，是专门给悬浮窗用的），
+                // 宽高回到 MATCH_PARENT、y 回 0，让窗口管理器自己
+                // 按全屏铺——顶排压状态栏、底排回到底边，两头都顾上。
+                musicLedParams = new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCHABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_IN_SCREEN
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_NO_LIMITS
+                                | WindowManager.LayoutParams
+                                        .FLAG_SHOW_WHEN_LOCKED,
+                        PixelFormat.TRANSLUCENT);
+                musicLedParams.gravity = android.view.Gravity.TOP
+                        | android.view.Gravity.LEFT;
+                musicLedParams.setTitle("flymebobo-musicled");
+            }
+            if (!musicLedWindowAdded) {
+                wm.addView(musicLedView, musicLedParams);
+                musicLedWindowAdded = true;
+            }
+            musicLedView.setVisibility(View.VISIBLE);
+            musicLedView.start();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v478: 反方向的钟——音乐停了灯就灭。 */
+    public void hideMusicLed() {
+        try {
+            if (musicLedView != null) {
+                musicLedView.stop();
+            }
+            if (musicLedView != null && musicLedWindowAdded) {
+                wm.removeView(musicLedView);
+                musicLedWindowAdded = false;
             }
         } catch (Throwable ignored) {
         }
@@ -1836,11 +2043,14 @@ public class BubbleWindow {
         // update, full stop.
         if (data.isMusic && data.key != null) {
             CapsuleView existingCap = findCapsuleByKey(data.key);
-            if (existingCap == null) {
+            if (existingCap == null
+                    && !SIM_MUSIC_KEY.equals(data.key)) {
                 // Fallback: the key may differ between hook and
                 // broadcast deliveries of the same re-post. If ANY
                 // music capsule for this app is on screen, it's the
                 // same song — refresh it in place, don't pop.
+                // v459: 模拟音乐（SIM_MUSIC_KEY）不走这个 fallback——
+                // 否则它会把真 QQ Flyme 胶囊当成自己刷成假数据。
                 existingCap = findMusicCapsuleByPkg(data.pkg);
             }
             if (existingCap != null) {
@@ -2427,6 +2637,14 @@ public class BubbleWindow {
         for (int i = groups.size() - 1; i >= 0; i--) {
             NotifGroup g = groups.get(i);
             if (g != null && CALL_PKG.equals(g.pkg)) {
+                // v443: 真来电顶掉模拟胶囊时，把模拟标记清掉，
+                // 否则开关状态和实际显示对不上。
+                for (NotifData item : g.items) {
+                    if (item != null && SIM_CALL_KEY.equals(item.key)) {
+                        simCallShowing = false;
+                        break;
+                    }
+                }
                 groups.remove(i);
                 hadCall = true;
             }
@@ -2469,6 +2687,185 @@ public class BubbleWindow {
         }
         if (changed) {
             rebuildDock();
+        }
+    }
+
+    /** v443: 模拟来电开关（APP「来电」卡片里）——弹一颗假来电
+     * 胶囊，让用户看着调来电高度、测位置到没到位。不用真打
+     * 电话。开 = 弹，关 = 收。只响应开关翻动，重启不自动弹。 */
+    public void setSimCall(boolean on) {
+        if (on) {
+            showSimCall();
+        } else {
+            hideSimCall();
+        }
+    }
+
+    private void showSimCall() {
+        if (dock == null || simCallShowing) {
+            return;
+        }
+        // 真来电优先：正在响铃 / 通话中，不弹模拟的。
+        if ("ringing".equals(callState) || "offhook".equals(callState)) {
+            return;
+        }
+        // 假数据：号码只做显示，没有任何通知动作。
+        NotifData d = new NotifData(SIM_CALL_KEY, CALL_PKG,
+                "138 0000 0000", "", System.currentTimeMillis(),
+                null, null, false, null, false, true);
+        simCallShowing = true;
+        popCallCapsule(d);
+    }
+
+    private void hideSimCall() {
+        if (!simCallShowing) {
+            return;
+        }
+        simCallShowing = false;
+        // 只撤模拟那组（按 SIM_CALL_KEY 认），别动真来电。
+        boolean changed = false;
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            NotifGroup g = groups.get(i);
+            if (g == null || !CALL_PKG.equals(g.pkg)) {
+                continue;
+            }
+            boolean hasSim = false;
+            for (NotifData item : g.items) {
+                if (item != null && SIM_CALL_KEY.equals(item.key)) {
+                    hasSim = true;
+                    break;
+                }
+            }
+            if (hasSim) {
+                groups.remove(i);
+                changed = true;
+            }
+        }
+        if (changed) {
+            rebuildDock();
+        }
+    }
+
+    /** v459: 模拟音乐开关（APP「音乐胶囊」卡片里）——弹一颗假音乐
+     * 胶囊，让用户看着调音乐胶囊/卡片大小。不用真放音乐。开 = 弹，
+     * 关 = 收。只响应开关翻动，重启不自动弹。 */
+    public void setSimMusic(boolean on) {
+        if (on) {
+            showSimMusic();
+        } else {
+            hideSimMusic();
+        }
+    }
+
+    private void showSimMusic() {
+        if (dock == null) {
+            return;
+        }
+        // 已在屏上就别再弹（按实际在屏状态认，不只认标记——用户
+        // 手滑把假胶囊消散掉时标记还留着，再开开关要能重新弹）。
+        if (findCapsuleByKey(SIM_MUSIC_KEY) != null) {
+            simMusicShowing = true;
+            return;
+        }
+        // 假数据：歌名/歌手/歌词只做显示，没有任何通知动作，也没有
+        // MediaSession——卡片上的播放控制是摆设（bindCardCapsule
+        // 里对 SIM_MUSIC_KEY 接了空操作，不碰真音乐）。
+        NotifData d = new NotifData(SIM_MUSIC_KEY, SIM_MUSIC_PKG,
+                "晴天", "周杰伦", System.currentTimeMillis(),
+                null, null, true, "从前从前有个人爱你很久");
+        simMusicShowing = true;
+        popCapsule(d);
+    }
+
+    private void hideSimMusic() {
+        if (!simMusicShowing
+                && findCapsuleByKey(SIM_MUSIC_KEY) == null) {
+            return;
+        }
+        simMusicShowing = false;
+        // 假卡片还开着就先关掉，否则卡片会指着一个已撤的胶囊。
+        if (SIM_MUSIC_KEY.equals(cardKey)) {
+            closeCard();
+        }
+        // 只摘模拟那一条（按 SIM_MUSIC_KEY 认）——真 QQ Flyme
+        // 胶囊可能在同一组里，别动它；组空了才整组撤掉。
+        boolean changed = false;
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            NotifGroup g = groups.get(i);
+            if (g == null || g.items == null) {
+                continue;
+            }
+            boolean removed = false;
+            for (int j = g.items.size() - 1; j >= 0; j--) {
+                NotifData item = g.items.get(j);
+                if (item != null && SIM_MUSIC_KEY.equals(item.key)) {
+                    g.items.remove(j);
+                    removed = true;
+                }
+            }
+            if (removed) {
+                changed = true;
+                if (g.items.isEmpty()) {
+                    groups.remove(i);
+                }
+            }
+        }
+        if (changed) {
+            rebuildDock();
+        }
+    }
+
+    /** v459: 扇子自动变淡开关（APP「扇子自动变淡」卡片）。开着：
+     * 扇子出现后 5 秒没点就变半透明；关着：扇子一直不透明，正在
+     * 变淡的也恢复。只响应开关翻动。 */
+    public void setFanAutoDim(boolean on) {
+        if (on) {
+            scheduleFanDim();
+        } else {
+            cancelFanDim();
+        }
+    }
+
+    /** v459: 扇子出现/更新后开始 5 秒闲置计时——5 秒内没点就变
+     * 半透明。开关关着不计时；扇子空着不计时。每次有新图标进来
+     * 都重计时（先取消变淡、恢复不透明，再重新开始 5 秒）。 */
+    private void scheduleFanDim() {
+        if (!FeatureFlags.fanAutoDim || pile == null) {
+            return;
+        }
+        if (fanDimRunnable != null) {
+            handler.removeCallbacks(fanDimRunnable);
+        }
+        if (pile.getIconCount() <= 0) {
+            return;
+        }
+        if (fanDimRunnable == null) {
+            fanDimRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (!FeatureFlags.fanAutoDim || pile == null
+                            || pile.getIconCount() <= 0) {
+                        return;
+                    }
+                    fanDimmed = true;
+                    pile.setDimmed(true);
+                }
+            };
+        }
+        handler.postDelayed(fanDimRunnable, 5000L);
+    }
+
+    /** v459: 取消变淡计时，并把已变淡的扇子恢复不透明。扇子被点
+     * （展开）、有新图标进来、开关关掉时调。 */
+    private void cancelFanDim() {
+        if (fanDimRunnable != null) {
+            handler.removeCallbacks(fanDimRunnable);
+        }
+        if (fanDimmed) {
+            fanDimmed = false;
+            if (pile != null) {
+                pile.setDimmed(false);
+            }
         }
     }
 
@@ -2599,6 +2996,30 @@ public class BubbleWindow {
      * is unpinned (it then renders in Phase 2, which previously
      * never bound these callbacks). */
     private void bindCallCapsule(final CapsuleView cap) {
+        // v443: 模拟来电胶囊（测试用）——接听/挂断/扬声器都不许碰
+        // 真电话状态（否则点一下接听会把模块推进 offhook）。
+        // 点接听或挂断就收起预览，扬声器点它没用。
+        NotifData cd = cap.getData();
+        if (cd != null && SIM_CALL_KEY.equals(cd.key)) {
+            cap.setOnAnswer(new Runnable() {
+                @Override
+                public void run() {
+                    hideSimCall();
+                }
+            });
+            cap.setOnHangup(new Runnable() {
+                @Override
+                public void run() {
+                    hideSimCall();
+                }
+            });
+            cap.setOnToggleSpeaker(new Runnable() {
+                @Override
+                public void run() {
+                }
+            });
+            return;
+        }
         cap.setOnAnswer(new Runnable() {
             @Override
             public void run() {
@@ -2761,6 +3182,14 @@ public class BubbleWindow {
         CapsuleView cap = findCallCapsule();
         if (cap != null) {
             cap.setCallTimer(timer, callSpeaker);
+        } else {
+            // v448 diag: tick 跑了但找不到胶囊——setCallTimer
+            // 根本没人调，pill 永远缩不了。
+            FileLog.i("CallTimerDiag updateCallTimer NO CAP"
+                    + " timer=" + timer
+                    + " callCapView=" + (callCapView != null)
+                    + " dockChildren=" + (dock == null
+                            ? -1 : dock.getChildCount()));
         }
     }
 
@@ -2909,6 +3338,128 @@ public class BubbleWindow {
      * its own capsule below, newest first. Different apps are regular
      * parallel rows, one per group, newest group on top.
      */
+    /** v438: APP 外观滑块动了（弹出/扇子位置）—— SystemUI 侧
+     * 已更新 Appearance 缓存，这里重排一次立即生效，不用重启。 */
+    public void onAppearanceChanged() {
+        // v462（用户「卡片高度为什么无法缩小」）：卡片高度只在点
+        // 开时量一次、存在 cardHeightPx 里，之后外观一变
+        // rebuildDock 用的还是缓存的旧高度——歌词行数 / 比例
+        // 改了，卡片也不跟着变矮。所以外观变了、又有卡片开着
+        // 时，先按当前外观重新量一遍卡片高（跟点开时一个量法，
+        // 用个临时 view 量），再重排。没卡片开着不用量。
+        if (cardKey != null && dock != null) {
+            try {
+                NotifData cardData = null;
+                for (NotifGroup g : groups) {
+                    if (g == null) {
+                        continue;
+                    }
+                    for (NotifData d : g.items) {
+                        if (d != null && cardKey.equals(d.key)) {
+                            cardData = d;
+                            break;
+                        }
+                    }
+                    if (cardData != null) {
+                        break;
+                    }
+                }
+                if (cardData != null) {
+                    CapsuleView scratch = new CapsuleView(app);
+                    scratch.bind(cardData);
+                    scratch.setCardExpanded(true);
+                    cardHeightPx = scratch.cardHeightForWidth(
+                            dp(CapsuleView.cardWidthDp(app)));
+                }
+            } catch (Throwable ignored) {
+                // 量失败就用旧高度，不炸。
+            }
+        }
+        rebuildDock();
+    }
+
+    /** v444: 锚点拖动——长按胶囊拖整组。只认左贴边、没展开成
+     * 卡片的胶囊（右来电、卡片不拖；扇子图标长按还是换位）。
+     * 开始拖：记下手指起点 Y 和当前锚点；拖动中：手指竖着走
+     * 多少，锚点就跟着走多少（delta 映射），整组走滑块那条路；
+     * 松手：把最后的锚点落盘 + 发广播。 */
+    public boolean isAnchorDragActive() {
+        return anchorDragActive;
+    }
+
+    public void startAnchorDrag(CapsuleView cap) {
+        if (cap == null || anchorDragActive) {
+            return;
+        }
+        if (!cap.isLeftDock() || cap.isCardExpanded()) {
+            return;
+        }
+        anchorDragActive = true;
+        anchorDragStartY = cap.getDownY();
+        anchorDragStartPct = Appearance.dockTopPct;
+        // 扇子相对锚点的偏移（拖动中胶囊布局不变，这个偏移是常量，
+        // 扇子就按它跟着锚点走）。
+        anchorDragPileRelY = pileTargetY - Appearance.dockTopPx(app);
+    }
+
+    public void updateAnchorDrag(float rawY) {
+        if (!anchorDragActive) {
+            return;
+        }
+        int sh = 0;
+        try {
+            sh = app.getResources().getDisplayMetrics().heightPixels;
+        } catch (Throwable ignored) {
+        }
+        if (sh <= 0) {
+            return;
+        }
+        float deltaPx = rawY - anchorDragStartY;
+        int pct = anchorDragStartPct
+                + Math.round(deltaPx / sh * 100f);
+        if (pct < 0) {
+            pct = 0;
+        }
+        if (pct > Appearance.MAX_DOCK_PCT) {
+            pct = Appearance.MAX_DOCK_PCT;
+        }
+        if (pct != Appearance.dockTopPct) {
+            Appearance.setDock(pct);
+            // 只挪窗口，不重建胶囊（见上面注释）。扇子窗的 Y =
+            // 拖开始时的相对偏移 + 新锚点。
+            pileTargetY = anchorDragPileRelY + Appearance.dockTopPx(app);
+            updateWindowSize();
+        }
+    }
+
+    public void endAnchorDrag() {
+        if (!anchorDragActive) {
+            return;
+        }
+        anchorDragActive = false;
+        // 落盘（跟滑块松手一样：commit 同步写，杀进程也不丢），
+        // 再发广播让其它地方同步。SystemUI 进程经
+        // createPackageContext 写 APP 的 prefs（同 Appearance.load
+        // 的读法）。
+        final int pct = Appearance.dockTopPct;
+        try {
+            Context appCtx = app.createPackageContext(
+                    "com.chenan.flymebobo",
+                    Context.CONTEXT_IGNORE_SECURITY);
+            appCtx.getSharedPreferences(Appearance.PREFS,
+                    Context.MODE_PRIVATE)
+                    .edit().putInt(Appearance.KEY_DOCK_PCT, pct).commit();
+        } catch (Throwable ignored) {
+        }
+        try {
+            Intent i = new Intent(
+                    "com.chenan.flymebobo.APPEARANCE");
+            i.putExtra("dockPct", pct);
+            app.sendBroadcast(i);
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void rebuildDock() {
         if (dock == null) {
             return;
@@ -3048,7 +3599,7 @@ public class BubbleWindow {
                 // strip (video 01:27).
                 pinnedCardH = cap.cardHeightForWidth(
                         dp(CapsuleView.cardWidthDp(app)));
-                cap.setLayoutParams(cardLp(y, pinnedCardH));
+                cap.setLayoutParams(cardLp(y, pinnedCardH, cap));
                 // Left edge starts after the retracted slivers.
                 cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
             } else if (isBigPinned) {
@@ -3058,15 +3609,14 @@ public class BubbleWindow {
                 bindBigCapsule(cap, d, group);
                 bigPinnedH = cap.cardHeightForWidth(
                         dp(CapsuleView.cardWidthDp(app)));
-                cap.setLayoutParams(cardLp(y, bigPinnedH));
+                cap.setLayoutParams(cardLp(y, bigPinnedH, cap));
                 cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
             } else {
                 // Pinned capsules sit below the card (when there is
                 // one) in pin-time order; y already accounts for the
                 // card's height.
                 // v376: the call capsule is bigger (240×60).
-                cap.setLayoutParams(d.isCall ? callCapsuleLp(y)
-                        : capsuleLp(y));
+                cap.setLayoutParams(capsuleLp(y, cap));
             }
             // v151: pinned capsules do not participate in the ripple,
             // so they stay visible while a card is open (the tapped
@@ -3179,11 +3729,8 @@ public class BubbleWindow {
                 // v365: 钉住的大卡片按自己量出来的高度占行。
                 y += bigPinnedH + dp(CAPSULE_GAP_DP);
             } else {
-                // v376: the call capsule is taller (60dp) — it takes
-                // its own height in the dock.
-                int h = d.isCall ? CapsuleView.CALL_HEIGHT_DP
-                        : CapsuleView.DEFAULT_HEIGHT_DP;
-                y += dp(h + CAPSULE_GAP_DP);
+                // v456: 行高按类型走（来电 / 音乐 / 普通各栏的高度）。
+                y += dp(CapsuleView.heightDpFor(d) + CAPSULE_GAP_DP);
             }
         }
 
@@ -3240,8 +3787,7 @@ public class BubbleWindow {
                     // shrank (user 2026-11-22 "缩小的时候他会先变成
                     // 原来的胶囊大小", left dock).
                     int top = y + i * dp(STACK_EDGE_DP);
-                    cap.setLayoutParams(d.isCall ? callCapsuleLp(top)
-                            : capsuleLp(top));
+                    cap.setLayoutParams(capsuleLp(top, cap));
                     // v150: a card is open elsewhere — this stack
                     // dissipated in the ripple, so it stays hidden.
                     // Calls stay out.
@@ -3301,11 +3847,8 @@ public class BubbleWindow {
                     });
                     dock.addView(cap);
                 }
-                // v378: the stack's height follows its top (newest)
-                // capsule — a call capsule is 60dp, not 44dp.
-                int stackTopH = items.get(0).isCall
-                        ? CapsuleView.CALL_HEIGHT_DP
-                        : CapsuleView.DEFAULT_HEIGHT_DP;
+                // v456: 叠起来的高度跟顶上那颗走（按类型）。
+                int stackTopH = CapsuleView.heightDpFor(items.get(0));
                 y += dp(stackTopH
                         + (n - 1) * STACK_EDGE_DP + CAPSULE_GAP_DP);
                 if (group == fanAnchor) {
@@ -3338,13 +3881,9 @@ public class BubbleWindow {
                 int[] heights = new int[items.size()];
                 int ty = groupTop;
                 for (int i = 0; i < items.size(); i++) {
-                    int h = dp(CapsuleView.DEFAULT_HEIGHT_DP);
-                    // v378: a call capsule takes its own 60dp row —
-                    // otherwise it shrinks back to the original 44dp
-                    // size first (user 2026-11-22, left dock).
-                    if (items.get(i).isCall) {
-                        h = dp(CapsuleView.CALL_HEIGHT_DP);
-                    } else if (isBigCapsule(items.get(i))) {
+                    // v456: 行高按类型走（来电 / 音乐 / 普通各栏的高度）。
+                    int h = dp(CapsuleView.heightDpFor(items.get(i)));
+                    if (isBigCapsule(items.get(i))) {
                         CapsuleView scratch = new CapsuleView(app);
                         scratch.bind(items.get(i));
                         scratch.setCardExpanded(true);
@@ -3393,22 +3932,20 @@ public class BubbleWindow {
                             frozenCardTopY = cardTop;
                             frozenCardKey = d.key;
                         }
-                        cap.setLayoutParams(cardLp(cardTop));
+                        cap.setLayoutParams(cardLp(cardTop, cap));
                         // Left edge starts after the retracted slivers.
                         cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
                     } else if (isBig) {
                         cap.setCardExpanded(true);
                         bindBigCapsule(cap, d, group);
                         cap.setLayoutParams(
-                                cardLp(placeTop, heights[idx]));
+                                cardLp(placeTop, heights[idx], cap));
                         // Left edge flush, like the card.
                         cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
                     } else {
                         // v378: the call capsule keeps its 240×60
                         // size in an expanded group too.
-                        cap.setLayoutParams(d.isCall
-                                ? callCapsuleLp(placeTop)
-                                : capsuleLp(placeTop));
+                        cap.setLayoutParams(capsuleLp(placeTop, cap));
                     }
                     if (cardKey != null && !isCardPinned() && !isCard) {
                         // v150: dissipated in the ripple; hidden
@@ -3498,6 +4035,11 @@ public class BubbleWindow {
                 ? cardTopY + cardHeightPx : 0;
         int newPileY = groups.isEmpty() ? 0
                 : Math.max(y, cardBottom);
+        // v439: 胶囊和扇子是一个整体——扇子还是跟胶囊走（v427 原样），
+        // 整组再整体下移 anchorY。扇子窗的 Y 是屏幕绝对值，所以
+        // anchorY 加在这里；主窗口的 Y 在 updateWindowSize() 里加。
+        int anchorY = Appearance.dockTopPx(app);
+        newPileY += anchorY;
         int oldPileY = (pileWindowAdded && pileParams != null)
                 ? pileParams.y : -1;
         pileTargetY = newPileY;
@@ -3533,22 +4075,18 @@ public class BubbleWindow {
         }
     }
 
-    private FrameLayout.LayoutParams capsuleLp(int y) {
+    /** v456: 胶囊的 dock 槽位——宽/高走胶囊自己的值（来电 / 音乐 /
+     * 普通各走各栏的宽高），不再写死 180×44。 */
+    private FrameLayout.LayoutParams capsuleLp(int y, CapsuleView cap) {
+        int w = CapsuleView.DEFAULT_WIDTH_DP;
+        int h = CapsuleView.DEFAULT_HEIGHT_DP;
+        if (cap != null) {
+            w = cap.baseWidthDp();
+            h = cap.baseHeightDp();
+        }
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                dp(CapsuleView.capsuleWidthDp(app)),
-                dp(CapsuleView.DEFAULT_HEIGHT_DP),
-                Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
-        lp.topMargin = y;
-        return lp;
-    }
-
-    /** v376: the call capsule's dock slot — bigger (240×60,
-     * preview A) than a regular capsule, so it takes its own
-     * height in the dock layout. */
-    private FrameLayout.LayoutParams callCapsuleLp(int y) {
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                dp(CapsuleView.CALL_WIDTH_DP),
-                dp(CapsuleView.CALL_HEIGHT_DP),
+                dp(w),
+                dp(h),
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
         lp.topMargin = y;
         return lp;
@@ -3566,8 +4104,29 @@ public class BubbleWindow {
     /** The current call capsule, whether it lives in the dock
      * (switch off) or in the right window (switch on). */
     private CapsuleView findCallCapsule() {
+        // v448: callCapView 会过期——右边来电用完切回左边，
+        // callCapView 还指着已摘掉的右窗胶囊，findCallCapsule
+        // 直接把它返回，setCallTimer 就打到摘掉的旧实例上，
+        // 左边 dock 里真正显示那颗永远收不到 setCallTimer，
+        // 缩计时器永远不触发（v444–v447 三版都没修到点子上，
+        // 根因在这里）。先验它还在不在树上、是不是来电，
+        // 不对就清掉、改去 dock 里找。
         if (callCapView != null) {
-            return callCapView;
+            boolean stale = callCapView.getParent() == null;
+            if (!stale) {
+                NotifData d = callCapView.getData();
+                stale = (d == null || !d.isCall);
+            }
+            if (stale) {
+                FileLog.i("CallTimerDiag findCallCapsule STALE"
+                        + " callCapView cleared"
+                        + " hadParent=" + (callCapView.getParent() != null)
+                        + " key=" + callCapKey);
+                callCapView = null;
+                callCapKey = null;
+            } else {
+                return callCapView;
+            }
         }
         if (dock != null) {
             for (int i = 0; i < dock.getChildCount(); i++) {
@@ -3736,17 +4295,31 @@ public class BubbleWindow {
         // on the screen edge for ANY width (idle 240dp or drag
         // 800dp). updateCallWindowPos runs on every resize
         // (begin/endCallDragWindow call it), so the anchor is
-        // re-computed with the new width each time. y puts the
-        // capsule centre at 55%.
+        // re-computed with the new width each time.
+        // v442: y 不再写死 55%——改由来电高度滑条定（Appearance.callTopPct，
+        // 胶囊中心高度百分比，默认 55，跟原来 0.55 一样）。滑条在 APP
+        // 「来电放右边」开关下面。夹住：胶囊 60dp 高，上下都不能出屏
+        // （滑条拉到顶/底时顶边/底边贴住屏幕边，不会整个飞出去）。
         callParams.gravity = Gravity.TOP | Gravity.LEFT;
         callParams.x = screenW - callParams.width;
-        callParams.y = (int) (screenH * 0.55) - dp(30);
+        int callY = (int) (screenH * (Appearance.callTopPct / 100f))
+                - dp(30);
+        int maxCallY = screenH - dp(60) - dp(8);
+        if (callY > maxCallY) callY = maxCallY;
+        if (callY < 0) callY = 0;
+        callParams.y = callY;
         if (callWindowAdded && callRoot != null && wm != null) {
             try {
                 wm.updateViewLayout(callRoot, callParams);
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    /** v442: 来电高度滑条改了——只重算右边来电窗的位置（整颗胶囊
+     * 一起移），不重排左边胶囊。XposedEntry 收到 callPct 广播后调。 */
+    public void onCallPositionChanged() {
+        updateCallWindowPos();
     }
 
     /** Keep the right call window in step with the current call
@@ -3891,10 +4464,11 @@ public class BubbleWindow {
         // (gravity END), so it never moves when the window grows
         // left during a drag — the mirror of the left dock, whose
         // capsule is anchored to its window's left edge.
+        // v456: 右窗来电胶囊宽/高走来电栏的设定值。
         FrameLayout.LayoutParams lp =
                 new FrameLayout.LayoutParams(
-                        dp(CapsuleView.CALL_WIDTH_DP),
-                        dp(CapsuleView.CALL_HEIGHT_DP),
+                        dp(Appearance.callCapsuleWidthDp),
+                        dp(Appearance.callCapsuleHeightDp),
                         Gravity.TOP | Gravity.END);
         lp.leftMargin = 0;
         lp.topMargin = 0;
@@ -3986,16 +4560,22 @@ public class BubbleWindow {
     }
 
     // ---- Card (v143) ----
-    private FrameLayout.LayoutParams cardLp(int y) {
-        return cardLp(y, cardHeightPx);
+    private FrameLayout.LayoutParams cardLp(int y, CapsuleView cap) {
+        return cardLp(y, cardHeightPx, cap);
     }
 
     // v237: card layout with an explicit height (a pinned card
     // measures its own — the shared cardHeightPx is the open
     // card's height and is reset to 0 when it closes).
-    private FrameLayout.LayoutParams cardLp(int y, int heightPx) {
+    // v456: 卡片宽走胶囊自己的值（普通卡外观宽，音乐卡 v458 起也走外观的音乐卡片宽）。
+    private FrameLayout.LayoutParams cardLp(int y, int heightPx,
+            CapsuleView cap) {
+        int cw = CapsuleView.CARD_WIDTH_DP;
+        if (cap != null) {
+            cw = cap.cardWidthDp();
+        }
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                dp(CapsuleView.cardWidthDp(app)),
+                dp(cw),
                 Math.max(heightPx, dp(CapsuleView.DEFAULT_HEIGHT_DP)),
                 Gravity.TOP | (dockLeft ? Gravity.START : Gravity.END));
         lp.topMargin = y;
@@ -4052,7 +4632,10 @@ public class BubbleWindow {
             if (v instanceof CapsuleView) {
                 CapsuleView cap = (CapsuleView) v;
                 NotifData d = cap.getData();
-                if (d != null && d.isMusic && pkg.equals(d.pkg)) {
+                // v459: 模拟音乐胶囊不算——真音乐 re-post 时别把它
+                // 当成真胶囊刷掉，也别让它挡住真胶囊弹出。
+                if (d != null && d.isMusic && pkg.equals(d.pkg)
+                        && !SIM_MUSIC_KEY.equals(d.key)) {
                     return cap;
                 }
             }
@@ -4420,14 +5003,29 @@ public class BubbleWindow {
                 android.graphics.Color.red(tailColor),
                 android.graphics.Color.green(tailColor),
                 android.graphics.Color.blue(tailColor));
-        android.graphics.drawable.GradientDrawable tailBg =
-                new android.graphics.drawable.GradientDrawable();
+        // v473: 展开卡片的拖尾也要描边（用户 2026-11-23 “展开卡片的
+        // 拖尾没有描边”）。拖尾背景改成 EdgeBorderDrawable（跟胶囊
+        // 本身一个路子）：渐变底色不变（透明→卡片色）。
+        // v474: 拖尾不要单独描边（用户 2026-11-23 “拖尾不要单独描边”
+        // “他和展开卡片一个描边”“你把前面展开卡片的描边延长到拖尾
+        // 上面”）：拖尾只描顶边和底边（把卡片的边延长到拖尾上），
+        // 不描竖边——卡片和拖尾共用一条边，中间没有竖线隔开。
+        // 之前 v473 给拖尾描了三边（含靠卡片那头的竖边），截图里
+        // 中间那条竖着的黑线就是它，看着像拖尾自己单独描了边。
+        EdgeBorderDrawable tailBg = new EdgeBorderDrawable();
         tailBg.setShape(
                 android.graphics.drawable.GradientDrawable.RECTANGLE);
         tailBg.setOrientation(
                 android.graphics.drawable.GradientDrawable.Orientation
                         .LEFT_RIGHT);
         tailBg.setColors(new int[]{tailTransparent, tailColor});
+        int tailBorder = android.graphics.Color.TRANSPARENT;
+        try {
+            tailBorder = cardCap.getBorderColor();
+        } catch (Throwable ignored) {
+        }
+        tailBg.setBorder(tailBorder, dp(1), true, 0f);
+        tailBg.setDrawEnd(false);
         final View tail = new View(app);
         // v366: 拖尾和卡片不重叠 —— 拖尾右端正好顶到卡片左边缘，
         // 不再往卡片底下塞重叠（v364 的 24dp 撤掉，用户 2026-11-22
@@ -4804,12 +5402,23 @@ public class BubbleWindow {
         });
         // v171: music card controls — send the command to the module
         // process, which owns the MediaController.
-        cap.setOnMusicControl(new CapsuleView.OnMusicControlListener() {
-            @Override
-            public void onMusicControl(String command, long seekMs) {
-                sendMusicControl(command, seekMs);
-            }
-        });
+        // v459: 模拟音乐卡片的控制是摆设——假胶囊没有 MediaSession，
+        // 点播放/上一首不能去动真音乐（真在放的歌会被它切掉）。
+        // 接空操作，只翻本地图标，不发广播。
+        if (d != null && SIM_MUSIC_KEY.equals(d.key)) {
+            cap.setOnMusicControl(new CapsuleView.OnMusicControlListener() {
+                @Override
+                public void onMusicControl(String command, long seekMs) {
+                }
+            });
+        } else {
+            cap.setOnMusicControl(new CapsuleView.OnMusicControlListener() {
+                @Override
+                public void onMusicControl(String command, long seekMs) {
+                    sendMusicControl(command, seekMs);
+                }
+            });
+        }
     }
 
     /** v360: 大卡片模式的放大胶囊——普通通知（非音乐/来电/下载/
@@ -4874,6 +5483,18 @@ public class BubbleWindow {
             long durationMs, boolean playing, boolean favorite,
             boolean hasFavorite) {
         try {
+            // v478: 反方向的钟——播放状态变了就同步跑马灯：开关开着
+            // 且正在放音乐才亮，暂停/停了就灭。
+            if (playing != musicLedPlaying) {
+                musicLedPlaying = playing;
+                if (playing) {
+                    if (FeatureFlags.musicLed) {
+                        showMusicLed();
+                    }
+                } else {
+                    hideMusicLed();
+                }
+            }
             // v332: the old cardKey gate ("only update while a card
             // is open") starved the COLLAPSED music capsule — with
             // no card open cardKey is null, so updateMusicProgress
@@ -4992,6 +5613,20 @@ public class BubbleWindow {
         }
     }
 
+    /** v465: 胶囊自动取色开关拨动后，把已经弹出来的胶囊按新开关
+     * 重新上色（跟 refreshLyricsScroll 一个路子）。 */
+    public void refreshCapsuleTint() {
+        if (dock == null) {
+            return;
+        }
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                ((CapsuleView) v).refreshTint();
+            }
+        }
+    }
+
     public void onMusicArt(String key,
             android.graphics.Bitmap art) {
         try {
@@ -5047,10 +5682,19 @@ public class BubbleWindow {
         removeNotifByKey(d.key);
         final String pkg = d.pkg;
         final NotifData removed = d;
+        // v457: 自动销毁——开着时，消散的卡片通知同时撤销，
+        // 不进扇子（音乐不撤销，撤销会停掉音乐，v276 同款）。
+        final boolean destroy = FeatureFlags.autoDestroy && !d.isMusic;
+        if (destroy) {
+            dismissNotification(d.key);
+        }
         closeCard();
         dock.postDelayed(new Runnable() {
             @Override
             public void run() {
+                if (destroy) {
+                    return;
+                }
                 NotifGroup docked = new NotifGroup(pkg);
                 docked.add(removed);
                 addPileIconForGroup(docked);
@@ -5388,6 +6032,9 @@ public class BubbleWindow {
         });
         setupPileIconDrag(icon);
         pile.addIcon(icon);
+        // v459: 扇子出现/更新——先恢复不透明，再重计 5 秒闲置变淡。
+        cancelFanDim();
+        scheduleFanDim();
         // Resize the pile window right away (v25): it must never be
         // left 1x1 while icons exist, even if a caller forgets
         // rebuildDock.
@@ -5408,6 +6055,9 @@ public class BubbleWindow {
         if (dockedGroups.isEmpty()) {
             return;
         }
+        // v459: 扇子被点了——恢复不透明（别让展开动画带着半透明跑），
+        // 取消变淡计时；展开后扇子清空，计时也不用再跑。
+        cancelFanDim();
         final java.util.List<NotifGroup> all =
                 new java.util.ArrayList<>(dockedGroups.values());
         Collections.sort(all, new Comparator<NotifGroup>() {
@@ -5527,8 +6177,16 @@ public class BubbleWindow {
         }
         // Each icon moves from its fan slot into the column: the
         // leftmost (slot 0, newest/anchor) goes to the top row, older
-        // ones below. Slot is read from the icon's actual X so the
-        // order follows the fan, not the child order.
+        // ones below. Slot is read from the icon's actual position so
+        // the order follows the fan, not the child order.
+        // v458 (user "扇子竖着点击展开动画和横向一样" / "图标先依次
+        // 移动到胶囊展开位置去，然后胶囊再弹出来"): 纵向时扇子图标
+        // 是往下叠的（topMargin），X 全是 0——按 X 算 slot 全是 0，
+        // 图标挤在顶行一起淡出，跟横向不一样。纵向按 Y 算 slot，
+        // 图标才依次移到各自的胶囊展开位置（40dp 一档），再淡出、
+        // 胶囊弹出，跟横向一个路子。
+        final boolean vertical = Appearance.fanDirection
+                == Appearance.FAN_DIR_VERTICAL;
         float stepPx = 1f;
         try {
             stepPx = pile.stepPx();
@@ -5540,8 +6198,11 @@ public class BubbleWindow {
             if (icon == null) {
                 continue;
             }
-            int slot = stepPx > 0
-                    ? Math.round(icon.getX() / stepPx) : i;
+            int slot = vertical
+                    ? (stepPx > 0
+                            ? Math.round(icon.getY() / stepPx) : i)
+                    : (stepPx > 0
+                            ? Math.round(icon.getX() / stepPx) : i);
             if (slot < 0) {
                 slot = 0;
             }
@@ -5552,12 +6213,21 @@ public class BubbleWindow {
             if (delay > maxDelay) {
                 maxDelay = delay;
             }
+            // v459 (user "扇子竖着展开图标间隔有点远了" / "要跟随胶囊
+            // 弹出位置" / "截断图标了"): 纵向时图标已经带着 topMargin
+            // （gi * stepPx，往下叠的），再平移 slot * 40dp，落点
+            // 是 slot * (stepPx + 40dp) ≈ slot * 58dp——比胶囊行
+            // （40dp 一档）宽，越往下越偏，末尾几颗顶出窗口底被截断。
+            // 落点改成胶囊行本身：translationY = slot * 40dp - 当前 Y，
+            // 横向当前 Y 是 0（和原来一样），纵向扣掉已有的 topMargin，
+            // 两边都落在 slot * 40dp，40dp 间距，跟胶囊弹出位置走，
+            // 窗口 n * 40dp + 8dp 也够装，不再截断。
             // v111: no withLayer() here — a hardware layer is
             // sized to the 22dp frame and can clip the 34dp icon's
             // 12dp overflow on tap.
             icon.animate()
                     .translationX(-icon.getX())
-                    .translationY(slot * step)
+                    .translationY(slot * step - icon.getY())
                     .setDuration(260)
                     .setStartDelay(delay)
                     .start();
@@ -5705,83 +6375,9 @@ public class BubbleWindow {
      * drops it into the nearest slot.
      */
     private void setupPileIconDrag(final PileIcon icon) {
-        if (icon == null) {
-            return;
-        }
-        final boolean[] dragging = new boolean[]{false};
-        final float[] downX = new float[]{0f};
-        final float[] downY = new float[]{0f};
-        icon.setOnLongClickListener(new View.OnLongClickListener() {
-            @Override
-            public boolean onLongClick(View v) {
-                dragging[0] = true;
-                // Widen the window so the icon can be dragged anywhere
-                // on screen (v5: the window is content-sized again).
-                beginDragWindow();
-                icon.animate().scaleX(1.15f).scaleY(1.15f)
-                        .setDuration(120).withLayer().start();
-                return true;
-            }
-        });
-        icon.setOnTouchListener(new View.OnTouchListener() {
-            @Override
-            public boolean onTouch(View v, android.view.MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case android.view.MotionEvent.ACTION_DOWN:
-                        downX[0] = e.getRawX();
-                        downY[0] = e.getRawY();
-                        return false;
-                    case android.view.MotionEvent.ACTION_MOVE:
-                        if (!dragging[0]) {
-                            return false;
-                        }
-                        // Free 2D drag: follow the finger up/down as
-                        // well as left/right (user 2026-11-19 "贴合的
-                        // 应用图标没办法上下移动换位置").
-                        icon.setTranslationX(e.getRawX() - downX[0]);
-                        icon.setTranslationY(e.getRawY() - downY[0]);
-                        return true;
-                    case android.view.MotionEvent.ACTION_UP:
-                    case android.view.MotionEvent.ACTION_CANCEL:
-                        if (!dragging[0]) {
-                            return false;
-                        }
-                        dragging[0] = false;
-                        icon.animate().scaleX(1f).scaleY(1f)
-                                .setDuration(120).withLayer().start();
-                        endDragWindow();
-                        finishPileIconDrag(icon);
-                        return true;
-                    default:
-                        return false;
-                }
-            }
-        });
-    }
-
-    /** Drop a dragged pile icon: it always stacks to the END of the
-     * fan (user 2026-11-20 "拖动后让他自动堆叠到最后去"). The end is
-     * the anchor end (newest slot, list index n-1, flush at the
-     * edge); the drop position no longer picks a slot. */
-    private void finishPileIconDrag(PileIcon icon) {
-        if (icon == null || pile == null) {
-            return;
-        }
-        int n = pile.getIconCount();
-        icon.setTranslationX(0f);
-        icon.setTranslationY(0f);
-        if (n <= 1) {
-            return;
-        }
-        // v202: drag-to-end = the dragged icon stacks BELOW the
-        // current last icon (user 2026-11-20 "CBA c才是第一位" /
-        // "拖动c他就叠加到a下面去"): fan C,B,A, drag C -> B,A,C.
-        // The far/right end (after A) is list index 0 (oldest slot).
-        // v200 had this X position right but moveIcon never reordered
-        // the views, so the icon kept floating ON TOP of the icon it
-        // should tuck under — DockedPile.moveIcon now keeps the view
-        // z-order in sync with the list order.
-        pile.moveIcon(icon, 0);
+        // v454: 用户 2026-11-23 06:17 “把扇子长按也去了”——
+        // 扇子图标长按换位撤掉，不再可拖动换位。
+        return;
     }
 
     /** Stack a capsule under the previous one (user 2026-11-19 "缩小改成
@@ -5983,8 +6579,17 @@ public class BubbleWindow {
                 }
             }
         }
+        // v440: 坐标系混算修复（用户 “手动消除和缩小的没有以前下来 /
+        // 还是会回到原位”）。capsuleTop 是 getY() 来的窗内相对 Y，
+        // fanTop（pileParams.y / pileTargetY）是屏幕绝对 Y。v427
+        // 主窗在 y=0，两者相等，混算没事；v439 滑块把整组下移
+        // anchorY 后，主窗在 y=anchorY，相对值和绝对值差一个
+        // anchorY：图标落点高了 anchorY，缩不进扇子；stretch 又把
+        // 相对值当绝对值写进 pileParams.y，扇子弹回顶部。这里把
+        // belowTop 转成屏幕绝对值（加主窗 Y），两边就对上了。
+        int winTop = (params != null) ? params.y : 0;
         int fanTop = (pileParams != null) ? pileParams.y : 0;
-        int belowTop = capsuleTop + capsuleHeight
+        int belowTop = winTop + capsuleTop + capsuleHeight
                 + dp(CAPSULE_GAP_DP);
         icon.setTranslationY(belowTop - fanTop);
         // Stretch the pile window up to the icon so it is not clipped
@@ -6067,11 +6672,16 @@ public class BubbleWindow {
         // v281: same as stackIconToFan — grow the pile window
         // (width + height) before the last icon slides down, or
         // its right half is clipped while it drops.
+        // v456: 纵向时扇子本身就是一列，窗高得按扇子总高算。
         if (pileWindowAdded && pileParams != null && wm != null
                 && pile != null) {
             int n = pile.getIconCount();
             int needW = dp(pile.totalWidthDp()) + dp(48);
             int needH = n * dp(40) + dp(16);
+            int fanH = dp(pile.totalHeightDp()) + dp(48);
+            if (fanH > needH) {
+                needH = fanH;
+            }
             boolean changed = false;
             if (pileParams.width < needW) {
                 pileParams.width = needW;
@@ -6811,9 +7421,17 @@ public class BubbleWindow {
             if (holdWindowHeight && params.height > h) {
                 h = params.height;
             }
-            if (params.width != w || params.height != h) {
+            // v439: 整组（胶囊+扇子）下移 anchorY —— 靠窗口本身下移，
+            // 不在窗内垫空位。窗内垫空位会让窗口从屏顶一直罩到胶囊，
+            // 空的那段也在窗内、触控进不去（FLAG_NOT_TOUCH_MODAL
+            // 只放行窗外的触控）。窗口仍包内容，触控照常穿透。
+            int anchorY = Appearance.dockTopPx(app);
+            int winY = dp(DOCK_EDGE_DP) + anchorY;
+            if (params.width != w || params.height != h
+                    || params.y != winY) {
                 params.width = w;
                 params.height = h;
+                params.y = winY;
                 wm.updateViewLayout(root, params);
             }
         } catch (Throwable ignored) {
@@ -7002,6 +7620,34 @@ public class BubbleWindow {
                     pileParams.height = sh;
                     wm.updateViewLayout(pileRoot, pileParams);
                 }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v441: width-only drag window for a CAPSULE swipe (manual
+     * dissipate / card drag). A capsule only slides horizontally,
+     * so it only needs the width — the height must stay content
+     * height. beginDragWindow() sets height to full screen; with
+     * the dock slid down (anchorY > 0) the window then spans
+     * anchorY..anchorY+screenHeight, past the screen bottom, and
+     * the system clamps its Y back to 0 — the whole unit jumps to
+     * the top and stays there after a manual right-swipe
+     * (user 2026-11-23 "手动消除...还是会回到原位"). Widening only
+     * keeps the window at anchorY, so the unit stays where the
+     * slider put it. The pile window is untouched (a capsule swipe
+     * never drags the fan). The pile-icon long-press drag keeps
+     * using beginDragWindow() (2D, needs the full window). */
+    public void beginCapsuleDragWindow() {
+        if (!windowAdded || wm == null || root == null || params == null) {
+            return;
+        }
+        dragWindowGen++;
+        try {
+            int sw = app.getResources().getDisplayMetrics().widthPixels;
+            if (params.width != sw) {
+                params.width = sw;
+                wm.updateViewLayout(root, params);
             }
         } catch (Throwable ignored) {
         }
@@ -7504,6 +8150,9 @@ public class BubbleWindow {
         // of app (user 2026-11-19 "不区分应用，全部叠加到一起").
         final List<View> caps = new ArrayList<>();
         final java.util.Set<String> dissipatedKeys = new java.util.HashSet<>();
+        // v457: 自动销毁——开着时要撤销的通知 key（消散时撤销，
+        // 不进扇子）。音乐不进这个集合（撤销会停掉音乐，v276 同款）。
+        final java.util.Set<String> destroyedKeys = new java.util.HashSet<>();
         for (int i = 0; i < dock.getChildCount(); i++) {
             View v = dock.getChildAt(i);
             if (v instanceof CapsuleView) {
@@ -7528,6 +8177,11 @@ public class BubbleWindow {
                     caps.add(v);
                     if (d != null && d.key != null) {
                         dissipatedKeys.add(d.key);
+                        // v457: 自动销毁——开着时记下来，消散完撤销
+                        // 通知、不进扇子（音乐豁免）。
+                        if (FeatureFlags.autoDestroy && !d.isMusic) {
+                            destroyedKeys.add(d.key);
+                        }
                     }
                 }
             }
@@ -7639,13 +8293,31 @@ public class BubbleWindow {
                             if (d != null && d.key != null
                                     && dissipatedKeys.contains(d.key)) {
                                 it.remove();
-                                docked.add(d);
+                                // v457: 自动销毁——撤销通知，不进扇子；
+                                // 否则照常进扇子，点图标能展开回来。
+                                if (destroyedKeys.contains(d.key)) {
+                                    dismissNotification(d.key);
+                                } else {
+                                    docked.add(d);
+                                }
                             }
                         }
                         if (!docked.items.isEmpty()) {
                             pinnedDocked.add(docked);
                         }
                     } else {
+                        // v457: 自动销毁——先把要撤销的从组里摘掉
+                        // （撤销通知，不进扇子），剩下的才进扇子。
+                        java.util.Iterator<NotifData> dit =
+                                g.items.iterator();
+                        while (dit.hasNext()) {
+                            NotifData dd = dit.next();
+                            if (dd != null && dd.key != null
+                                    && destroyedKeys.contains(dd.key)) {
+                                dit.remove();
+                                dismissNotification(dd.key);
+                            }
+                        }
                         groups.remove(g);
                     }
                 }
@@ -7660,7 +8332,8 @@ public class BubbleWindow {
                     addPileIconForGroup(docked);
                 }
                 for (NotifGroup g : queue) {
-                    if (!g.pinned) {
+                    // v457: 自动销毁——组里全被撤销了就没图标可弹了。
+                    if (!g.pinned && !g.items.isEmpty()) {
                         addPileIconForGroup(g);
                     }
                 }

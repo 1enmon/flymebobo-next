@@ -735,86 +735,112 @@ public final class NotifCollectionHook {
     // from the SystemUI hook. The bubble is popped by this hook,
     // so the cancel happens in the same place. v425 change: the
     // catch logs the FULL cause chain — BubbleNotify_46 showed
-    // "HookCancel threw: InvocationTargetException" twice, but
-    // the wrapper hides the real exception (SecurityException?
-    // RemoteException? a Flyme-side check?). The cause chain
-    // settles it.
+    // v488 (user 2026-11-23 "到底怎么屏蔽"): cancel the push
+    // notification through the module's own NotificationListenerService
+    // instead of INotificationManager. The old path (v422/v425)
+    // called cancelNotificationWithTag, which doesn't exist on this
+    // Flyme version, then fell back to cancelAllNotifications — and
+    // the system refused it: "Package com.meizu.cloud is not owned
+    // by uid 10082" (cancelAllNotifications requires the caller to
+    // own the package). The listener service can cancel ANY
+    // notification by key (BIND_NOTIFICATION_LISTENER_SERVICE), so
+    // send it the same ACTION_DISMISS broadcast BubbleWindow uses
+    // when a card opens an app. No reflection, no ownership check.
+    // v490: also send the POSTING package (com.meizu.cloud) — the
+    // key only carries the ORIGINAL package (e.g. com.baidu.netdisk),
+    // and the service needs both to try all three cancels (see
+    // NotificationService.cancelByKey).
+    // v492 (user 2026-11-23 "still didn't intercept", after v488 +
+    // v490 both failed in the field): the listener-service cancels
+    // never remove a delegated push — the system registers it under
+    // the push service and the listener's cancelNotification can't
+    // reach it (v488 single-key: CancelDiag stillActive=true;
+    // v490 three-way: the shade still shows them). So first try the
+    // FlymeIsland route, proven on this exact case: call
+    // IStatusBarService.onNotificationClear(pkg, userId, key, 1, 0,
+    // visibility) directly from SystemUI — the status bar's own
+    // "user swiped the notification away" path, no ownership check.
+    // The hook already runs inside SystemUI, so no broadcast is
+    // needed. Only if the reflection throws do we fall back to the
+    // old ACTION_DISMISS broadcast (listener three-way cancel).
     private void cancelViaSystemUI(
             android.service.notification.StatusBarNotification sbn) {
         if (sbn == null) {
             return;
         }
-        String pkg;
-        String tag;
-        int id;
+        String key;
+        String postPkg;
         try {
-            pkg = sbn.getPackageName();
-            tag = sbn.getTag();
-            id = sbn.getId();
+            key = sbn.getKey();
+            postPkg = sbn.getPackageName();
         } catch (Throwable t) {
             log("HookCancel threw: " + t);
             return;
         }
-        int userId = 0;
-        try {
-            android.os.UserHandle user = sbn.getUser();
-            if (user != null) {
-                try {
-                    java.lang.reflect.Method m = user.getClass()
-                            .getMethod("getIdentifier");
-                    Object r = m.invoke(user);
-                    if (r instanceof Integer) {
-                        userId = ((Integer) r).intValue();
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-        } catch (Throwable ignored) {
+        if (key == null) {
+            return;
         }
+        log("HookCancel key=" + key + " postPkg=" + postPkg);
         try {
-            log("HookCancel pkg=" + pkg + " tag=" + tag + " id=" + id
-                    + " userId=" + userId + " key=" + sbn.getKey());
-            Class<?> sm = Class.forName("android.os.ServiceManager");
-            java.lang.reflect.Method getService = sm.getMethod(
-                    "getService", String.class);
-            Object binder = getService.invoke(null, "notification");
-            if (binder == null) {
-                log("HookCancel no notification service");
+            if (clearViaStatusBar(key)) {
+                log("HookCancel cleared via onNotificationClear key="
+                        + key);
                 return;
-            }
-            Class<?> stub = Class.forName(
-                    "android.app.INotificationManager$Stub");
-            java.lang.reflect.Method asInterface = stub.getMethod(
-                    "asInterface", android.os.IBinder.class);
-            Object inm = asInterface.invoke(null, binder);
-            if (inm == null) {
-                log("HookCancel no INotificationManager");
-                return;
-            }
-            try {
-                java.lang.reflect.Method cancel = inm.getClass()
-                        .getMethod("cancelNotificationWithTag",
-                                String.class, String.class,
-                                int.class, int.class);
-                cancel.invoke(inm, pkg, tag, Integer.valueOf(id),
-                        Integer.valueOf(userId));
-                log("HookCancel cancelled pkg=" + pkg + " id=" + id);
-            } catch (NoSuchMethodException e) {
-                java.lang.reflect.Method cancelAll = inm.getClass()
-                        .getMethod("cancelAllNotifications",
-                                String.class, int.class);
-                cancelAll.invoke(inm, pkg, Integer.valueOf(userId));
-                log("HookCancel cancelled-all pkg=" + pkg);
             }
         } catch (Throwable t) {
-            StringBuilder sb = new StringBuilder(
-                    "HookCancel threw: " + t);
-            Throwable c = t.getCause();
-            while (c != null) {
-                sb.append(" | caused by: ").append(c);
-                c = c.getCause();
+            log("HookCancel onNotificationClear threw: " + t);
+        }
+        try {
+            android.content.Intent di = new android.content.Intent(
+                    NotificationService.ACTION_DISMISS);
+            di.putExtra("key", key);
+            if (postPkg != null) {
+                di.putExtra("postPkg", postPkg);
             }
-            log(sb.toString());
+            app.sendBroadcast(di);
+            log("HookCancel sent dismiss key=" + key);
+        } catch (Throwable t) {
+            log("HookCancel threw: " + t);
+        }
+    }
+
+    // v492: IStatusBarService.onNotificationClear, the FlymeIsland
+    // route (decompiled from its CoolapkSystemClear). key format is
+    // "userId|pkg|id|tag|uid" — the pkg in the key is the ORIGINAL
+    // app (e.g. com.baidu.netdisk), which is what onNotificationClear
+    // wants. Returns false on any failure so the caller falls back.
+    private boolean clearViaStatusBar(String key) {
+        try {
+            String[] parts = key.split("\\|");
+            if (parts.length < 2) {
+                return false;
+            }
+            int userId = Integer.parseInt(parts[0]);
+            String origPkg = parts[1];
+            Object binder = Class.forName("android.os.ServiceManager")
+                    .getMethod("getService", String.class)
+                    .invoke(null, "statusbar");
+            Class<?> stub = Class.forName(
+                    "com.android.internal.statusbar"
+                            + ".IStatusBarService$Stub");
+            Class<?> svc = Class.forName(
+                    "com.android.internal.statusbar.IStatusBarService");
+            Object bar = stub.getMethod("asInterface",
+                    android.os.IBinder.class).invoke(null, binder);
+            Class<?> visCls = Class.forName(
+                    "com.android.internal.statusbar"
+                            + ".NotificationVisibility");
+            Object vis = visCls.getMethod("obtain", String.class,
+                    Integer.TYPE, Integer.TYPE, Boolean.TYPE)
+                    .invoke(null, key, 0, 1, true);
+            svc.getMethod("onNotificationClear", String.class,
+                    Integer.TYPE, String.class, Integer.TYPE,
+                    Integer.TYPE, visCls)
+                    .invoke(bar, origPkg, userId, key, 1, 0, vis);
+            return true;
+        } catch (Throwable t) {
+            log("HookCancel clearViaStatusBar threw: " + t);
+            return false;
         }
     }
 

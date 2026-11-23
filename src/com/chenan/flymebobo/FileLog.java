@@ -44,6 +44,38 @@ public class FileLog {
     private static final long MAX_BYTES = 2 * 1024 * 1024; // 2 MB, then restart the file
     private static final Object LOCK = new Object();
     private static String cachedProcessName;
+    // v450（用户 “以后每行日志都给我加上版本号”）：每行都带
+    // versionCode，日志发过来一眼就知道是哪个版本，不用再问。
+    // 读一次缓存起来，别每行都查 PackageManager。
+    private static String cachedVersion = null;
+
+    private static String versionTag() {
+        if (cachedVersion != null) {
+            return cachedVersion;
+        }
+        String v = "v?";
+        try {
+            android.content.Context ctx = null;
+            // SystemUI 进程里没有现成的 app context，用反射拿
+            // ActivityThread 的当前应用上下文。
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            java.lang.reflect.Method m =
+                    at.getMethod("currentApplication");
+            android.app.Application app =
+                    (android.app.Application) m.invoke(null);
+            if (app != null) {
+                ctx = app.getApplicationContext();
+            }
+            if (ctx != null) {
+                android.content.pm.PackageInfo pi = ctx.getPackageManager()
+                        .getPackageInfo("com.chenan.flymebobo", 0);
+                v = "v" + pi.versionCode;
+            }
+        } catch (Throwable ignored) {
+        }
+        cachedVersion = v;
+        return v;
+    }
 
     // Mirrors the message to logcat (as before) and appends it to the file.
     public static void i(String msg) {
@@ -57,7 +89,7 @@ public class FileLog {
     private static void write(String msg) {
         synchronized (LOCK) {
             String line = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(new Date())
-                    + " " + processName() + " " + msg + "\n";
+                    + " " + versionTag() + " " + processName() + " " + msg + "\n";
             writeTo(LOG_PATH, line);
             writeTo(LOG_PATH_ALT, line);
             writeTo(LOG_PATH_PRIVATE, line);

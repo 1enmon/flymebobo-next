@@ -314,6 +314,10 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_CALL_RESULT);
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
+        filter.addAction(NotificationService.ACTION_APPEARANCE);
+        // v471: 打开 App 时恢复本地备份后推一次全量重载（见
+        // ACTION_RELOAD_SETTINGS）。
+        filter.addAction(NotificationService.ACTION_RELOAD_SETTINGS);
         filter.addAction(NotificationService.ACTION_NAVI_INFO);
         filter.addAction(NotificationService.ACTION_NAVI_END);
         filter.addAction(NotificationService.ACTION_NAVI_HOOK_STATUS);
@@ -388,6 +392,199 @@ public class XposedEntry extends XposedModule {
                     // capsule between the dock and the right window.
                     if ("callRight".equals(fkey)) {
                         BubbleWindow.getInstance().onCallRightChanged();
+                    }
+                    // v443: simCall flips show/hide the fake call
+                    // capsule (position preview for the call-height
+                    // slider). Only on a live flip; never auto-shown
+                    // at startup.
+                    if ("simCall".equals(fkey)) {
+                        BubbleWindow.getInstance().setSimCall(fenabled);
+                    }
+                    // v459: simMusic flips show/hide the fake music
+                    // capsule (size preview for the music capsule /
+                    // card sliders). Same pattern as simCall.
+                    if ("simMusic".equals(fkey)) {
+                        BubbleWindow.getInstance().setSimMusic(fenabled);
+                    }
+                    // v459: fanAutoDim flips the fan idle-dim on/off.
+                    // Off = fan stays fully opaque, any dim is lifted.
+                    if ("fanAutoDim".equals(fkey)) {
+                        BubbleWindow.getInstance().setFanAutoDim(fenabled);
+                    }
+                    // v465: autoTint flips re-tint the capsules that
+                    // are already out (icon colour <-> default dark).
+                    if ("autoTint".equals(fkey)) {
+                        BubbleWindow.getInstance().refreshCapsuleTint();
+                    }
+                    // v478: 反方向的钟——开关翻动。开着：正在放音乐
+                    // 就亮跑马灯；关着：灯灭（正在跑也灭）。
+                    if ("musicLed".equals(fkey)) {
+                        BubbleWindow.getInstance().setMusicLed(fenabled);
+                    }
+                    return;
+                }
+                // v438/v439: APP appearance slider moved — update the
+                // live value at once and re-lay out, no restart.
+                // One slider only (the fan / whole unit anchor).
+                // v442: 同一条广播也带来电高度 callPct——只移右边来电窗，
+                // 不重排左边胶囊（onCallPositionChanged）。两个值各管各的，
+                // 广播里带哪个就改哪个。
+                // v456: 外观细调全家都走这条广播——带哪个改哪个；改了
+                // 尺寸/圆角/扇子的，重排整组（onAppearanceChanged，
+                // rebuildDock，胶囊按新值重造）；只改来电高度的还是
+                // 只移右窗。
+                if (NotificationService.ACTION_APPEARANCE.equals(
+                        intent.getAction())) {
+                    int dockPct = intent.getIntExtra("dockPct", -1);
+                    int callPct = intent.getIntExtra("callPct", -1);
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    boolean relayout = false;
+                    if (dockPct >= 0) {
+                        Appearance.setDock(dockPct);
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("cornerRadius")) {
+                        Appearance.setCornerRadius(intent.getIntExtra(
+                                "cornerRadius", Appearance.DEF_CORNER_RADIUS));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("capsuleHeight")) {
+                        Appearance.setCapsuleHeight(intent.getIntExtra(
+                                "capsuleHeight", Appearance.DEF_CAPSULE_HEIGHT));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("capsuleWidth")) {
+                        Appearance.setCapsuleWidth(intent.getIntExtra(
+                                "capsuleWidth", Appearance.DEF_CAPSULE_WIDTH));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("cardWidth")) {
+                        Appearance.setCardWidth(intent.getIntExtra(
+                                "cardWidth", Appearance.DEF_CARD_WIDTH));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("cardCornerRadius")) {
+                        Appearance.setCardCornerRadius(intent.getIntExtra(
+                                "cardCornerRadius",
+                                Appearance.DEF_CARD_CORNER_RADIUS));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("cardMaxRows")) {
+                        Appearance.setCardMaxRows(intent.getIntExtra(
+                                "cardMaxRows", Appearance.DEF_CARD_MAX_ROWS));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("fanOverlap")) {
+                        Appearance.setFanOverlap(intent.getIntExtra(
+                                "fanOverlap", Appearance.DEF_FAN_OVERLAP));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("fanDirection")) {
+                        Appearance.setFanDirection(intent.getIntExtra(
+                                "fanDirection", Appearance.DEF_FAN_DIRECTION));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("callCornerRadius")) {
+                        Appearance.setCallCornerRadius(intent.getIntExtra(
+                                "callCornerRadius",
+                                Appearance.DEF_CALL_CORNER_RADIUS));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("callCapsuleHeight")) {
+                        Appearance.setCallCapsuleHeight(intent.getIntExtra(
+                                "callCapsuleHeight",
+                                Appearance.DEF_CALL_CAPSULE_HEIGHT));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("callCapsuleWidth")) {
+                        Appearance.setCallCapsuleWidth(intent.getIntExtra(
+                                "callCapsuleWidth",
+                                Appearance.DEF_CALL_CAPSULE_WIDTH));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("musicCornerRadius")) {
+                        Appearance.setMusicCornerRadius(intent.getIntExtra(
+                                "musicCornerRadius",
+                                Appearance.DEF_MUSIC_CORNER_RADIUS));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("musicCapsuleHeight")) {
+                        Appearance.setMusicCapsuleHeight(intent.getIntExtra(
+                                "musicCapsuleHeight",
+                                Appearance.DEF_MUSIC_CAPSULE_HEIGHT));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("musicCapsuleWidth")) {
+                        Appearance.setMusicCapsuleWidth(intent.getIntExtra(
+                                "musicCapsuleWidth",
+                                Appearance.DEF_MUSIC_CAPSULE_WIDTH));
+                        relayout = true;
+                    }
+                    // v458: 音乐卡片宽 / 圆角（播放卡大小调整）。
+                    if (intent.hasExtra("musicCardWidth")) {
+                        Appearance.setMusicCardWidth(intent.getIntExtra(
+                                "musicCardWidth",
+                                Appearance.DEF_MUSIC_CARD_WIDTH));
+                        relayout = true;
+                    }
+                    if (intent.hasExtra("musicCardCornerRadius")) {
+                        Appearance.setMusicCardCornerRadius(intent.getIntExtra(
+                                "musicCardCornerRadius",
+                                Appearance.DEF_MUSIC_CARD_CORNER_RADIUS));
+                        relayout = true;
+                    }
+                    // v462: 音乐卡片比例（60–100%）。
+                    if (intent.hasExtra("musicCardScale")) {
+                        Appearance.setMusicCardScalePct(intent.getIntExtra(
+                                "musicCardScale",
+                                Appearance.DEF_MUSIC_CARD_SCALE));
+                        relayout = true;
+                    }
+                    // v484: 展开卡片（普通卡）比例（60–100%）。
+                    if (intent.hasExtra("cardScale")) {
+                        Appearance.setCardScalePct(intent.getIntExtra(
+                                "cardScale",
+                                Appearance.DEF_CARD_SCALE));
+                        relayout = true;
+                    }
+                    if (relayout && bw != null) {
+                        bw.onAppearanceChanged();
+                    }
+                    if (callPct >= 0) {
+                        Appearance.setCall(callPct);
+                        if (bw != null) {
+                            bw.onCallPositionChanged();
+                        }
+                    }
+                    return;
+                }
+                // v471: 打开 App 时恢复本地备份后推一次全量重载（用户
+                // 2026-11-23 “改成打开自动加载一次”）。重读
+                // FeatureFlags + Appearance（文件优先，没文件读
+                // prefs——App 刚把文件值写进 prefs，所以一定读到
+                // 恢复后的值），再重排 dock、重着色胶囊，开关和
+                // 功能就对上了。Application context 走
+                // ActivityThread.currentApplication()（receiver
+                // 的 context 是受限的，createPackageContext 会炸）。
+                if (NotificationService.ACTION_RELOAD_SETTINGS.equals(
+                        intent.getAction())) {
+                    try {
+                        Class<?> at = Class.forName(
+                                "android.app.ActivityThread");
+                        java.lang.reflect.Method m =
+                                at.getMethod("currentApplication");
+                        android.app.Application app =
+                                (android.app.Application) m.invoke(null);
+                        if (app != null) {
+                            FeatureFlags.load(app);
+                            Appearance.load(app);
+                            BubbleWindow bw = BubbleWindow.getInstance();
+                            if (bw != null) {
+                                bw.onAppearanceChanged();
+                                bw.refreshCapsuleTint();
+                            }
+                        }
+                    } catch (Throwable ignored) {
                     }
                     return;
                 }
@@ -787,6 +984,8 @@ public class XposedEntry extends XposedModule {
         // v259: read the APP's saved switches so the flags
         // match what the user left them at (defaults are all on).
         FeatureFlags.load(app);
+        // v438: read the APP's saved appearance (pop/fan position).
+        Appearance.load(app);
         log(4, TAG, "flymebobo bubble window ready");
     }
 

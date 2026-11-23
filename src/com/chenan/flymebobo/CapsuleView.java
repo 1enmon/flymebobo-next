@@ -43,36 +43,184 @@ public class CapsuleView extends FrameLayout {
     public static boolean isTablet(Context ctx) {
         return ctx.getResources().getConfiguration().smallestScreenWidthDp >= 600;
     }
-    /** 当前设备的胶囊宽度（dp）：平板 260，手机 180。 */
+    /** v456: 布局用的最宽胶囊宽（dp）——取普通/音乐两档的最大值，
+     * 拖拽窗、粒子数这些不分胶囊类型的布局按它算，不会把音乐胶囊
+     * 截掉。单个胶囊自己的宽走实例方法 baseWidthDp()。 */
     public static int capsuleWidthDp(Context ctx) {
-        return isTablet(ctx) ? TABLET_WIDTH_DP : DEFAULT_WIDTH_DP;
+        int w = Appearance.capsuleWidthDp;
+        int mw = Appearance.musicCapsuleWidthDp;
+        return w > mw ? w : mw;
     }
-    /** 当前设备的卡片宽度（dp）：平板 380，手机 300。 */
+    /** v456: 布局用的最宽卡片宽（dp）——取普通卡片/音乐卡片
+     * 的最大值。单个卡片自己的宽走实例方法 cardWidthDp()。
+     * v458: 音乐卡片宽也可调了，一起取最大。 */
     public static int cardWidthDp(Context ctx) {
-        return isTablet(ctx) ? TABLET_CARD_WIDTH_DP : CARD_WIDTH_DP;
+        int w = Appearance.cardWidthDp;
+        int mw = Appearance.musicCardWidthDp;
+        int m = w > mw ? w : mw;
+        return m > CARD_WIDTH_DP ? m : CARD_WIDTH_DP;
     }
     /** v350: 手势阈值按胶囊宽度等比缩放（平板胶囊 260dp、手机 180dp）。
      * 右滑消散 = 胶囊宽的 2/3（手机 120dp、平板约 173dp）；左轻滑钉住
      * = 1/3～7/9（手机 60～140dp、平板约 87～202dp）；左重滑收纳 =
      * 超过 7/9。写死 dp 的话，平板上消散太容易误触（用户 2026-11-22
      * “还有自动消除的距离”）。 */
-    /** v376: this capsule's effective width (dp) — the call capsule
-     * is bigger (240dp, variant A) than a regular capsule. The
-     * swipe thresholds and the long tail scale with it. */
-    private int baseWidthDp() {
-        if (data != null && data.isCall) {
-            return CALL_WIDTH_DP;
+    /** v456: a notification's dock-row height (dp) by type — 来电 /
+     * 音乐 / 普通各走各栏的高度。BubbleWindow 的行距按它算。
+     * v497: 1.0 模式下普通通知气泡高 52dp，行距也得按 52dp
+     * 算——之前这里还返回 44dp（2.0 胶囊高），行距 44+6=50dp
+     * 比气泡矮 2dp，两颗气泡上下叠在一起（用户 10:52 截图）。
+     * v501: 1.0 模式全撤——这条也撤回，行距按 2.0 胶囊高算。 */
+    public static int heightDpFor(NotifData d) {
+        if (d != null && d.isCall) {
+            return Appearance.callCapsuleHeightDp;
         }
-        return capsuleWidthDp(getContext());
+        if (d != null && d.isMusic) {
+            return Appearance.musicCapsuleHeightDp;
+        }
+        return Appearance.capsuleHeightDp;
     }
 
-    /** v376: the pill's rounded-end radius (dp) — half the capsule
-     * height (30dp for the 60dp call capsule, 22dp otherwise). */
-    private int cornerRadiusDp() {
+    /** v376: this capsule's effective width (dp) — v456: 按类型分流
+     * （用户 “来电和音乐单独调整”）：来电走来电栏的宽，音乐走音乐
+     * 栏的宽，普通通知走外观的宽。
+     * v501: 1.0 模式全撤。 */
+    public int baseWidthDp() {
         if (data != null && data.isCall) {
-            return CALL_HEIGHT_DP / 2;
+            return Appearance.callCapsuleWidthDp;
         }
-        return DEFAULT_HEIGHT_DP / 2;
+        if (data != null && data.isMusic) {
+            return Appearance.musicCapsuleWidthDp;
+        }
+        return Appearance.capsuleWidthDp;
+    }
+
+    /** v456: this capsule's effective height (dp) — 跟宽一个分流：
+     * 来电 / 音乐 / 普通各走各栏的高度。
+     * v501: 1.0 模式全撤。 */
+    public int baseHeightDp() {
+        if (data != null && data.isCall) {
+            return Appearance.callCapsuleHeightDp;
+        }
+        if (data != null && data.isMusic) {
+            return Appearance.musicCapsuleHeightDp;
+        }
+        return Appearance.capsuleHeightDp;
+    }
+
+    /** v462: 音乐卡片比例调整——内容按自然尺寸布局、按比例缩着画。
+     * 胶囊本身的 LayoutParams 是缩放后的尺寸（BubbleWindow 的
+     * cardLp 按 cardWidthDp()/cardHeightPx 设），但内容（播放卡）
+     * 必须按自然尺寸排好再缩，不然控制 / 进度条先被截掉。所以
+     * 这里量孩子时用自然尺寸（自然卡片宽 + 高度不限），量完再
+     * 把上报的尺寸改成缩放后的（父容器按缩放尺寸排位置），内容
+     * 由 musicCardView 自己的 setScale 缩着画（updateMusicCard
+     * 里设，左上角为轴），正好填满缩放后的胶囊。只对已展开的
+     * 音乐卡、比例 < 100% 时生效；其他情况走正常量法。
+     * v484: 展开卡片（普通卡）也一样——已展开的普通卡、比例
+     * < 100% 时，内容按自然尺寸排好再缩，cardView 自己 setScale
+     * 缩着画（setCardExpanded 里设，左上角为轴）。 */
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (data != null && data.isMusic && cardExpanded
+                && musicCardScale() < 1.0f) {
+            int naturalW = dp(Appearance.musicCardWidthDp);
+            int wSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    naturalW, android.view.View.MeasureSpec.EXACTLY);
+            int hSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    0, android.view.View.MeasureSpec.UNSPECIFIED);
+            super.onMeasure(wSpec, hSpec);
+            int naturalH = getMeasuredHeight();
+            setMeasuredDimension(
+                    Math.round(naturalW * musicCardScale()),
+                    Math.round(naturalH * musicCardScale()));
+            return;
+        }
+        // v484: 展开卡片（普通卡）比例——跟音乐卡一个路子：内容按
+        // 自然卡片宽排好，量完上报缩放后的尺寸，cardView 自己
+        // setScale 缩着画。
+        if (data != null && !data.isMusic && cardExpanded
+                && cardScale() < 1.0f) {
+            int naturalW = dp(Appearance.cardWidthDp);
+            int wSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    naturalW, android.view.View.MeasureSpec.EXACTLY);
+            int hSpec = android.view.View.MeasureSpec.makeMeasureSpec(
+                    0, android.view.View.MeasureSpec.UNSPECIFIED);
+            super.onMeasure(wSpec, hSpec);
+            int naturalH = getMeasuredHeight();
+            setMeasuredDimension(
+                    Math.round(naturalW * cardScale()),
+                    Math.round(naturalH * cardScale()));
+            return;
+        }
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+    }
+
+    /** v462: 音乐卡片比例（0.6–1.0）——整张播放卡按比例缩放
+     * 用的因子。100% = 1.0f，不缩。 */
+    public static float musicCardScale() {
+        return Appearance.musicCardScalePct / 100f;
+    }
+
+    /** v484: 展开卡片（普通卡）比例（0.6–1.0）——整张展开卡按
+     * 比例缩放用的因子。100% = 1.0f，不缩。跟音乐卡片比例
+     * 一个路子。 */
+    public static float cardScale() {
+        return Appearance.cardScalePct / 100f;
+    }
+
+    /** v456: this card's width (dp) — 普通卡走外观的卡片宽，音乐
+     * 播放卡不动（300dp 手机 / 380dp 平板）。来电不开卡片。
+     * v458: 音乐卡片也要支持大小调整——音乐播放卡走外观的音乐
+     * 卡片宽（默认 300 手机 / 380 平板，跟普通卡片一个范围）。
+     * v462: 音乐卡片比例调整——卡片宽 = 音乐卡片宽 × 比例
+     * （60–100%），整张卡等比缩小。
+     * v484: 展开卡片（普通卡）比例调整——卡片宽 = 卡片宽 × 比例
+     * （60–100%），整张卡等比缩小，跟音乐卡一个路子。 */
+    public int cardWidthDp() {
+        if (data != null && data.isMusic) {
+            return Math.round(
+                    Appearance.musicCardWidthDp * musicCardScale());
+        }
+        return Math.round(Appearance.cardWidthDp * cardScale());
+    }
+
+    /** v456: this card's corner radius (dp) — 普通卡走外观的卡片
+     * 圆角，音乐播放卡不动（22dp）。
+     * v458: 音乐卡片圆角也走外观（默认 22）。 */
+    public int cardCornerRadiusDp() {
+        if (data != null && data.isMusic) {
+            return Appearance.musicCardCornerRadiusDp;
+        }
+        return Appearance.cardCornerRadiusDp;
+    }
+
+    /** v456: this card's max rows — 普通卡走外观的最大行数，音乐
+     * 播放卡不动（8 行）。v458: 音乐卡片的高度跟内容走（播放器
+     * 布局固定，行数上限不截它，截了会把播放控制切掉），所以
+     * 音乐卡片只调宽和圆角，最大行数仍是 8 行。 */
+    public int cardMaxRows() {
+        if (data != null && data.isMusic) {
+            return MAX_CARD_ROWS;
+        }
+        return Appearance.cardMaxRows;
+    }
+
+    /** v376: the pill's rounded-end radius (dp) — v456: 按类型分流，
+     * 各走各栏的圆角；生效值按 min(设定值, 高度/2) 钳住，高度改小
+     * 了圆角不会溢出（圆角最大不超过高度一半）。
+     * v501: 1.0 模式全撤。 */
+    public int cornerRadiusDp() {
+        int r;
+        if (data != null && data.isCall) {
+            r = Appearance.callCornerRadiusDp;
+        } else if (data != null && data.isMusic) {
+            r = Appearance.musicCornerRadiusDp;
+        } else {
+            r = Appearance.cornerRadiusDp;
+        }
+        int half = baseHeightDp() / 2;
+        return r > half ? half : r;
     }
 
     public int dissipateDp() {
@@ -89,11 +237,14 @@ public class CapsuleView extends FrameLayout {
      * capsule grid (k*50-6dp) so the bottom lands one gap above the
      * capsule below and the 22dp corners fit. */
     public static final int CARD_WIDTH_DP = 300;
+    /** v456: 卡片圆角/最大行数的出厂值（音乐播放卡不动，用这两个）。 */
+    public static final int DEF_CARD_CORNER_RADIUS = 22;
+    public static final int MAX_CARD_ROWS = 8;
     public static final int CARD_PITCH_DP = 50;
     public static final int CARD_GAP_DP = 6;
 
     private final LinearLayout pill;
-    private final GradientDrawable pillBg;
+    private final EdgeBorderDrawable pillBg;
     /** Current pill colour (for the particle burst); 0 = not set yet. */
     private int pillColor;
     /** Whether the pill is light (for the stacked border colour). */
@@ -127,6 +278,10 @@ public class CapsuleView extends FrameLayout {
         private final android.graphics.Paint paint =
                 new android.graphics.Paint(
                         android.graphics.Paint.ANTI_ALIAS_FLAG);
+        /** v472: 拖尾的描边画笔（用户 2026-11-23 “描边延长到拖尾”）。 */
+        private final android.graphics.Paint borderPaint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
         private final android.graphics.Path path =
                 new android.graphics.Path();
         private final android.graphics.RectF rect =
@@ -142,11 +297,24 @@ public class CapsuleView extends FrameLayout {
          * centre), the flat end on the RIGHT (the screen edge). */
         private boolean mirror;
         private boolean lastMirror;
+        /** v472: 拖尾的描边颜色（0/透明 = 不描）与宽度。 */
+        private int borderColor = android.graphics.Color.TRANSPARENT;
+        private int borderWidthPx = 0;
 
         void setMirror(boolean mirror) {
             if (this.mirror != mirror) {
                 this.mirror = mirror;
                 shader = null;
+                invalidateSelf();
+            }
+        }
+
+        /** v472: 设拖尾描边（颜色 0/透明 = 不描）。只在变了时重画。 */
+        void setBorder(int color, int widthPx) {
+            if (this.borderColor != color
+                    || this.borderWidthPx != widthPx) {
+                this.borderColor = color;
+                this.borderWidthPx = widthPx;
                 invalidateSelf();
             }
         }
@@ -226,6 +394,48 @@ public class CapsuleView extends FrameLayout {
             canvas.save();
             canvas.translate(b.left, b.top);
             canvas.drawPath(path, paint);
+            // v472: 描边延长到拖尾（用户 2026-11-23 “描边延长到拖尾”）：
+            // 沿着长胶囊的轮廓描三边（顶边、圆角那头、底边），贴边那头
+            // （贴着屏幕边缘的直边）不画，跟胶囊本身的描边一个路子。
+            // 透明那截（渐变淡出到透明）描边也跟着淡——描边画在
+            // 渐变底色之上，透明处描边色本身不变，只是底下透出来，
+            // 看起来就是描边跟着尾巴一起淡下去。
+            if (borderColor != android.graphics.Color.TRANSPARENT
+                    && borderWidthPx > 0) {
+                float r = Math.min(cornerR, h / 2f);
+                borderPaint.setColor(borderColor);
+                borderPaint.setStyle(
+                        android.graphics.Paint.Style.STROKE);
+                borderPaint.setStrokeWidth(borderWidthPx);
+                android.graphics.Path bp =
+                        new android.graphics.Path();
+                if (mirror) {
+                    // 贴右边：不描右直边，只描顶、左圆角头、底。
+                    bp.moveTo(w, 0);
+                    bp.lineTo(r, 0);
+                    bp.arcTo(new android.graphics.RectF(0, 0, 2 * r, 2 * r),
+                            270, -90);
+                    if (2 * r < h) {
+                        bp.lineTo(0, h - r);
+                    }
+                    bp.arcTo(new android.graphics.RectF(0, h - 2 * r,
+                            2 * r, h), 180, -90);
+                    bp.lineTo(w, h);
+                } else {
+                    // 贴左边：不描左直边，只描顶、右圆角头、底。
+                    bp.moveTo(0, 0);
+                    bp.lineTo(w - r, 0);
+                    bp.arcTo(new android.graphics.RectF(w - 2 * r, 0, w,
+                            2 * r), 270, 90);
+                    if (2 * r < h) {
+                        bp.lineTo(w, h - r);
+                    }
+                    bp.arcTo(new android.graphics.RectF(w - 2 * r,
+                            h - 2 * r, w, h), 0, 90);
+                    bp.lineTo(0, h);
+                }
+                canvas.drawPath(bp, borderPaint);
+            }
             canvas.restore();
         }
 
@@ -336,6 +546,10 @@ public class CapsuleView extends FrameLayout {
         applyDockMirror();
     }
 
+    public boolean isLeftDock() {
+        return dockLeft;
+    }
+
     /** v376: the pill's corner radii follow the capsule size and
      * the dock side — the edge against the screen is flat, the end
      * toward the centre is rounded (radius = half the height). */
@@ -355,6 +569,19 @@ public class CapsuleView extends FrameLayout {
             // centre) and flats the RIGHT end (the screen edge):
             // {r,r, 0,0, 0,0, r,r}.
             pillBg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
+        }
+        // v456: 卡片圆角也跟着走（普通卡外观值，音乐卡 v458 起也走外观）——
+        // cardBg 和 pillBg 是两个 drawable，得各设各的。
+        updateBorder();
+        if (cardBg != null) {
+            float cr = dp(cardCornerRadiusDp());
+            if (dockLeft) {
+                cardBg.setCornerRadii(
+                        new float[]{0, 0, cr, cr, cr, cr, 0, 0});
+            } else {
+                cardBg.setCornerRadii(
+                        new float[]{cr, cr, 0, 0, 0, 0, cr, cr});
+            }
         }
     }
 
@@ -456,7 +683,7 @@ public class CapsuleView extends FrameLayout {
     private android.view.View downloadFill;
     private int downloadBarPct = -1;
     private LinearLayout cardView;
-    private GradientDrawable cardBg;
+    private EdgeBorderDrawable cardBg;
     private ImageView cardIcon;
     private TextView cardAppName;
     private TextView cardTime;
@@ -532,6 +759,10 @@ public class CapsuleView extends FrameLayout {
     private OnCardDragListener onCardDragListener;
     private float downX;
     private float downY;
+    // v444: 锚点拖动用——长按开始拖时手指的起点 Y（DOWN 的 rawY）。
+    public float getDownY() {
+        return downY;
+    }
     private boolean swiping;
     /** v393: drag diagnosis — true once the drag-start line is
      * logged for the current touch, so the log is not flooded. */
@@ -555,17 +786,18 @@ public class CapsuleView extends FrameLayout {
         // 高度不动，行距和卡片高度都不受影响。手机保持 6dp 不变。
         int vPad = isTablet(context) ? dp(2) : dp(6);
         pill.setPadding(dp(2), vPad, dp(14), vPad);
-        pillBg = new GradientDrawable();
+        pillBg = new EdgeBorderDrawable();
         pillBg.setShape(GradientDrawable.RECTANGLE);
         // The end against the screen edge (left) is NOT rounded — it
         // sits flat against the edge (user 2026-11-18 "贴边的一头不要
         // 圆角"). Only the end toward the centre (right) is rounded.
-        float r = dp(22);
+        // v456: 圆角走 cornerRadiusDp()（按类型分流，钳住到高度一半）。
+        float r = dp(cornerRadiusDp());
         pillBg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
         pillBg.setColor(Color.argb(191, 30, 32, 38));
         // No border on the capsule (user 2026-11-19 "胶囊描边去掉").
         pill.setBackground(pillBg);
-        pillWidthPx = dp(capsuleWidthDp(context));
+        pillWidthPx = dp(baseWidthDp());
         addView(pill, new LayoutParams(
                 LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
         // v239: download progress bar (track + fill), bottom
@@ -769,9 +1001,11 @@ public class CapsuleView extends FrameLayout {
         cardView = new LinearLayout(context);
         cardView.setOrientation(LinearLayout.VERTICAL);
         cardView.setPadding(dp(12), dp(12), dp(12), dp(12));
-        cardBg = new GradientDrawable();
+        cardBg = new EdgeBorderDrawable();
         cardBg.setShape(GradientDrawable.RECTANGLE);
-        cardBg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+        // v456: 卡片圆角走 cardCornerRadiusDp()（普通卡外观值，音乐卡 v458 起也走外观）。
+        float cr = dp(cardCornerRadiusDp());
+        cardBg.setCornerRadii(new float[]{0, 0, cr, cr, cr, cr, 0, 0});
         cardBg.setColor(Color.argb(191, 30, 32, 38));
         cardView.setBackground(cardBg);
         cardView.setVisibility(GONE);
@@ -897,8 +1131,16 @@ public class CapsuleView extends FrameLayout {
         musicCardView.setPadding(dp(12), dp(12), dp(12), dp(12));
         musicCardView.setBackground(cardBg);
         musicCardView.setVisibility(GONE);
+        // v462: 卡片比例调整——播放卡内容按自然尺寸布局（自然卡片
+        // 宽固定 + 内容高），再整体按比例缩放着画。不能用
+        // MATCH_PARENT：胶囊本身的 LayoutParams 是缩放后的尺寸，
+        // 内容在里面按缩放尺寸布局会被截掉（控制 / 进度条先被
+        // 截）。固定自然宽 + WRAP_CONTENT 高，内容按自然尺寸
+        // 排好，再 setScale 缩着画，正好填满缩放后的胶囊。
+        // 缩放（setScaleX/Y + pivot 0,0）设在 updateMusicCard 里。
         addView(musicCardView, new LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+                dp(Appearance.musicCardWidthDp),
+                LayoutParams.WRAP_CONTENT));
         // Row 1: album disc + title/artist.
         LinearLayout musicTop = new LinearLayout(context);
         musicTop.setOrientation(LinearLayout.HORIZONTAL);
@@ -1166,6 +1408,13 @@ public class CapsuleView extends FrameLayout {
                         }
                         break;
                     case android.view.MotionEvent.ACTION_MOVE: {
+                        // v444: 锚点拖动中——手指竖着走，改锚点，
+                        // 不走左右滑那套。
+                        BubbleWindow abw = BubbleWindow.getInstance();
+                        if (abw != null && abw.isAnchorDragActive()) {
+                            abw.updateAnchorDrag(e.getRawY());
+                            return true;
+                        }
                         float dx = e.getRawX() - downX;
                         float dy = e.getRawY() - downY;
                         // Horizontal-only slide (user 2026-11-19 "胶囊
@@ -1223,13 +1472,23 @@ public class CapsuleView extends FrameLayout {
                                 if (!dragWindowOpen) {
                                     dragWindowOpen = true;
                                     BubbleWindow.getInstance()
-                                            .beginDragWindow();
+                                            .beginCapsuleDragWindow();
                                 }
                                 onCardDragListener.onCardDrag(dx);
                                 break;
                             }
                             if (cardExpanded && dx < 0) {
-                                // v367: 卡片不跟手往左移（见上面注释）。
+                                // v493（用户 2026-11-23 “改成可以滑到底”
+                                // “以前就是可以滑到底”）：v367 以为卡片
+                                // 左移会被窗口左边缘截住（-80dp），才
+                                // 让它原地不动；v491 钳 -48dp、v492
+                                // 带阻尼，都还是半道卡住。用户说以前
+                                // 1:1 跟手就能一路滑到底——那就改回
+                                // 去：卡片跟手 1:1，不钳不阻尼，手指
+                                // 划多远卡片走多远，划过 -140dp 收进
+                                // 扇子。v367 的截住说法不成立（卡片
+                                // 本来就是往扇子方向收，收进去就没了）。
+                                setTranslationX(dx);
                                 break;
                             }
                             // v360: 放大胶囊没有 cardDragListener——
@@ -1241,7 +1500,7 @@ public class CapsuleView extends FrameLayout {
                                 if (!dragWindowOpen) {
                                     dragWindowOpen = true;
                                     BubbleWindow.getInstance()
-                                            .beginDragWindow();
+                                            .beginCapsuleDragWindow();
                                 }
                                 setTranslationX(dx);
                                 break;
@@ -1265,11 +1524,15 @@ public class CapsuleView extends FrameLayout {
                                 if (dockLeft && !dragWindowOpen) {
                                     dragWindowOpen = true;
                                     BubbleWindow.getInstance()
-                                            .beginDragWindow();
+                                            .beginCapsuleDragWindow();
                                 }
                                 if (data != null && data.isCall) {
                                     setCallRed(true);
                                 }
+                                // v455: 尾巴恢复（见 growLongCapsule
+                                // 的 v455 注）——缩好的计时器右滑
+                                // 也长尾巴，跟没缩的一样；v454 的
+                                // 跟手平移撤掉，拖动反馈就是尾巴。
                                 growLongCapsule(adx);
                                 break;
                             } else {
@@ -1280,6 +1543,12 @@ public class CapsuleView extends FrameLayout {
                         break;
                     }
                     case android.view.MotionEvent.ACTION_UP: {
+                        // v444: 锚点拖动松手——落盘收尾，不走左右滑。
+                        BubbleWindow ubw = BubbleWindow.getInstance();
+                        if (ubw != null && ubw.isAnchorDragActive()) {
+                            ubw.endAnchorDrag();
+                            return true;
+                        }
                         // v386: the drag is over — shrink the right
                         // call window back to its idle size.
                         if (!dockLeft) {
@@ -1333,6 +1602,10 @@ public class CapsuleView extends FrameLayout {
                             // toward the edge (60–140dp) pins; a
                             // HEAVY one (past 140dp) docks into
                             // the fan.
+                            // v494: 1.0 模式下轻滑不钉住（用户 “钉住是
+                            // 按钮非左滑”）——钉住只走卡片上的图钉
+                            // 按钮；轻滑只弹回，重滑（≥140dp）照常
+                            // 收进扇子。
                             if (towardEdge && adx > dp(pinMinDp())
                                     && adx < dp(pinMaxDp())
                                     && onSwipeRight != null) {
@@ -1423,6 +1696,12 @@ public class CapsuleView extends FrameLayout {
                         break;
                     }
                     case android.view.MotionEvent.ACTION_CANCEL:
+                        // v444: 锚点拖动被打断——同样落盘收尾。
+                        BubbleWindow cbw = BubbleWindow.getInstance();
+                        if (cbw != null && cbw.isAnchorDragActive()) {
+                            cbw.endAnchorDrag();
+                            return true;
+                        }
                         swiping = false;
                         // v393: drag diagnosis — a cancel mid-drag
                         // snaps the capsule back; log it so a
@@ -1453,6 +1732,13 @@ public class CapsuleView extends FrameLayout {
                 return swiping;
             }
         });
+        // v444: 长按胶囊拖整组（锚点拖动）——按住不动半秒就进入
+        // 拖动，上下拖改的是锚点 dockTopPct（跟滑块同一个值），
+        // v454: 用户 2026-11-23 06:17 “把长按胶囊移动位置去掉”——
+        // 锚点拖动（v444）撤掉，长按胶囊不再拖整组。
+        // （startAnchorDrag / updateAnchorDrag / endAnchorDrag
+        // 留在 BubbleWindow 里备用，不再有人调。）
+        setOnLongClickListener(null);
         // v329: floating music notes overlay (option F) — added last
         // so it draws above the pill content; transparent and not
         // clickable, so it never intercepts the capsule's swipe/tap.
@@ -1632,6 +1918,14 @@ public class CapsuleView extends FrameLayout {
         if (pill == null) {
             return;
         }
+        // v455: 用户 2026-11-23 06:20 “左右接听的拖尾都没了”——
+        // v450 把缩好的计时器胶囊的尾巴全拦了，右滑挂断时连
+        // 拖尾反馈都没了，两边都看着像坏了。尾巴是拖动时的
+        // 正常反馈，拦掉它不对。v450 的拦法撤掉，尾巴拖动时
+        // 照常长；拖完 `resetLongCapsule`（v444/v445 已修好，
+        // 缩了的按回缩后宽、背景换回 pillBg）负责收尾，闲时
+        // 不会留尾巴。闲时那截深绿是 v450 之前尾巴没收干净
+        // 的问题，不是拖动时该不该长尾巴的问题。
         // v398: growing (toward the centre) and translating
         // (toward the edge) are mutually exclusive. A left-drag
         // after a right-drag left a stale translationX (the
@@ -1656,6 +1950,12 @@ public class CapsuleView extends FrameLayout {
         }
         longBg.setMirror(!dockLeft);
         longBg.setTintColor(pillColor);
+        // v472: 描边延长到拖尾（用户 2026-11-23 “描边延长到拖尾”）：
+        // 拖动时胶囊背景换成了 longBg（拖尾），描边也得跟过去，
+        // 不然尾巴上没边、只有胶囊头上有边，看着断了。颜色跟
+        // 胶囊本身的描边走同一处（borderColorForDraw），宽度
+        // 1dp（v471 改细后的值）。
+        longBg.setBorder(borderColorForDraw(), dp(1));
         if (pill.getBackground() != longBg) {
             pill.setBackground(longBg);
         }
@@ -1701,6 +2001,31 @@ public class CapsuleView extends FrameLayout {
 
     private void resetLongCapsule() {
         if (pill == null) {
+            return;
+        }
+        // v444: 已缩成计时器的来电胶囊，pill 宽不许打回
+        // MATCH_PARENT——接听后 ACTION_UP 走 springBackCallCapsule，
+        // 它收尾调 resetLongCapsule 会把 collapseToTimer 刚缩到
+        // 120dp 的 pill 又撑回 240dp（用户 “外边框没缩到计时器
+        // 位置”）。缩了就是缩了，别的路子别动它。
+        // v445（用户 “你没发现计时器和胶囊右边的问题吗 / 那你上
+        // 一版是虚空修复吗”——认了，v444 只修了宽、没修尾巴）：
+        // v444 的 early return 只按了宽，没把背景换回 pillBg，
+        // growLongCapsule 留下的 longBg（拖尾 drawable）还贴在
+        // pill 上，右边就拖着一条半透明绿尾巴。缩了的胶囊背景
+        // 也得换回去，尾巴状态一起清掉。
+        if (collapsedToTimer) {
+            pillWidthPx = dp(collapsedEndWidthDp());
+            lastGrowW = -1;
+            longGrown = false;
+            LayoutParams lp = (LayoutParams) pill.getLayoutParams();
+            lp.width = pillWidthPx;
+            lp.gravity = Gravity.CENTER_VERTICAL
+                    | (dockLeft ? Gravity.START : Gravity.END);
+            pill.setLayoutParams(lp);
+            if (pillBg != null) {
+                pill.setBackground(pillBg);
+            }
             return;
         }
         pillWidthPx = dp(baseWidthDp());
@@ -1797,7 +2122,35 @@ public class CapsuleView extends FrameLayout {
         anim.start();
     }
 
+    /** v463: 码的显示格式——标签 + 冒号 + 码（用户 2026-11-23
+     * “显示成 xx码:xxxxx”）。识别出验证码 / 取件码后，不直接
+     * 显示裸码，显示成 “验证码:123456” / “取件码:070797”。
+     * 标签就是识别时命中的关键词（codeLabel：验证码 / 取件码 /
+     * 取餐码 / 取货码…），没标签就只显示码。胶囊和卡片大码都
+     * 走这个格式；柜号不拼进来（胶囊自己拼，卡片有单独一行）。
+     * 自动复制的剪贴板还是纯码，不变。 */
+    public static String formatCodeLabel(NotifData d) {
+        if (d == null || d.code == null) {
+            return "";
+        }
+        if (d.codeLabel != null && !d.codeLabel.isEmpty()) {
+            return d.codeLabel + ":" + d.code;
+        }
+        return d.code;
+    }
+
     public void bind(NotifData notifData) {
+        // v447: 同一通来电重绑时别把已接听状态清掉——来电通知会
+        // 重发，bind() 每次都把 callAnswered/collapsedToTimer
+        // 打回 false、pill 宽打回 MATCH_PARENT（240dp），
+        // collapseToTimer 刚缩好的 120dp 就被 bind 顶回去了，
+        // 这才是“外边框没缩到计时器位置”的真根因（v444 找错
+        // 了，只盯着 springBack）。同一 key = 同一通电话，
+        // 保住已接听/已缩状态；换 key = 新来电，才恢复全尺寸。
+        String prevKey = (this.data != null) ? this.data.key : null;
+        boolean sameCall = prevKey != null
+                && notifData != null && notifData.key != null
+                && prevKey.equals(notifData.key);
         this.data = notifData;
         android.graphics.Bitmap tintBmp = null;
         if (notifData.icon != null) {
@@ -1830,7 +2183,11 @@ public class CapsuleView extends FrameLayout {
             // No label, no sentence (user 2026-11-21 "识别到验证
             // 码后胶囊也只显示验证码" / "加大显示" / "取件码
             // 这些也显示啊").
-            String line2 = notifData.code;
+            // v463（用户 2026-11-23 "显示成 xx码:xxxxx"）：
+            // 不直接显示裸码，显示成标签 + 冒号 + 码——
+            // "验证码:123456" / "取件码:070797"，取件码有柜号
+            // 的还带上（"取件码:070797 · 2-01柜"）。
+            String line2 = formatCodeLabel(notifData);
             if (notifData.isPickupCode && notifData.cabinet != null) {
                 line2 += " · " + notifData.cabinet;
             }
@@ -1909,31 +2266,48 @@ public class CapsuleView extends FrameLayout {
             answerBtn.setVisibility(VISIBLE);
             pinView.setVisibility(GONE);
             callRed = false;
-            callAnswered = false;
-            callSpeaker = false;
-            // v415: a (re)bound call starts full-size, not collapsed
-            // to the timer. The pill width is restored in case this
-            // view was collapsed by a previous call.
-            collapsedToTimer = false;
-            if (iconView != null) {
-                iconView.setVisibility(VISIBLE);
-            }
-            if (texts != null) {
-                texts.setVisibility(VISIBLE);
-            }
-            if (pill != null) {
-                try {
-                    LayoutParams lp =
-                            (LayoutParams) pill.getLayoutParams();
-                    if (lp.width != LayoutParams.MATCH_PARENT) {
-                        lp.width = LayoutParams.MATCH_PARENT;
-                        lp.gravity = Gravity.CENTER_VERTICAL;
-                        pill.setLayoutParams(lp);
-                    }
-                } catch (Throwable ignored) {
+            // v447: 同一通来电重绑（sameCall）且已经接听了，
+            // 别把接听/缩计时器状态清掉——bind 每重发一次就
+            // 把 pill 打回 240dp，缩了也白缩。新来电才恢复
+            // 全尺寸。
+            if (sameCall && callAnswered) {
+                // 已接听的同一通电话：保住缩计时器状态，
+                // 只把图标/正文藏起来（和 collapseToTimer
+                // 做的一样），pill 宽不动。
+                if (iconView != null) {
+                    iconView.setVisibility(GONE);
                 }
+                if (texts != null) {
+                    texts.setVisibility(GONE);
+                }
+                setAnswerIcon(callSpeaker ? 2 : 0);
+            } else {
+                callAnswered = false;
+                callSpeaker = false;
+                // v415: a (re)bound call starts full-size, not collapsed
+                // to the timer. The pill width is restored in case this
+                // view was collapsed by a previous call.
+                collapsedToTimer = false;
+                if (iconView != null) {
+                    iconView.setVisibility(VISIBLE);
+                }
+                if (texts != null) {
+                    texts.setVisibility(VISIBLE);
+                }
+                if (pill != null) {
+                    try {
+                        LayoutParams lp =
+                                (LayoutParams) pill.getLayoutParams();
+                        if (lp.width != LayoutParams.MATCH_PARENT) {
+                            lp.width = LayoutParams.MATCH_PARENT;
+                            lp.gravity = Gravity.CENTER_VERTICAL;
+                            pill.setLayoutParams(lp);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+                setAnswerIcon(0);
             }
-            setAnswerIcon(0);
             answerTimerText.setVisibility(GONE);
             answerTimerText.setText("");
             answerTimerText.setTextSize(
@@ -1978,6 +2352,53 @@ public class CapsuleView extends FrameLayout {
             // "应用图标再出来一点").
             pill.setPadding(dockLeft ? dp(2) : dp(14), dp(8),
                     dockLeft ? dp(14) : dp(14), dp(8));
+            // v448（用户 “你把缩进代码再往里面写一下不行吗”——
+            // 对，缩的代码就该写在 bind 里头，别指望外面哪
+            // 个方法再调回来）：新造出来的胶囊要是已经接听
+            // 了（offhook），直接就是计时器形态——pill 宽按
+            // 到缩后宽、图标/正文藏起来、旗子立起来，不用等
+            // setCallTimer 那一秒，也不用走 250ms 动画。
+            // 每次重绑都跑一遍，缩了就是缩了。
+            BubbleWindow bw = BubbleWindow.getInstance();
+            if (bw != null && bw.isCallAnswered()) {
+                callAnswered = true;
+                collapsedToTimer = true;
+                if (iconView != null) {
+                    iconView.setVisibility(GONE);
+                }
+                if (texts != null) {
+                    texts.setVisibility(GONE);
+                }
+                if (pinView != null) {
+                    pinView.setVisibility(GONE);
+                }
+                if (pill != null) {
+                    if (pillBg != null) {
+                        pill.setBackground(pillBg);
+                    }
+                    lastGrowW = -1;
+                    longGrown = false;
+                    try {
+                        LayoutParams lp =
+                                (LayoutParams) pill.getLayoutParams();
+                        lp.width = dp(collapsedEndWidthDp());
+                        lp.gravity = Gravity.CENTER_VERTICAL
+                                | (dockLeft ? Gravity.START
+                                        : Gravity.END);
+                        pill.setLayoutParams(lp);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                // v449 diag: bind 里直接缩，记一下跑没跑、缩到多宽。
+                try {
+                    LayoutParams lpD = (LayoutParams) pill.getLayoutParams();
+                    FileLog.i("CallTimerDiag bind DIRECT-COLLAPSE"
+                            + " id=" + System.identityHashCode(this)
+                            + " pillW=" + lpD.width
+                            + " dockLeft=" + dockLeft);
+                } catch (Throwable ignored) {
+                }
+            }
         } else {
             answerBtn.setVisibility(GONE);
             setCallTint(false);
@@ -2068,6 +2489,35 @@ public class CapsuleView extends FrameLayout {
         // (user 2026-11-22 "要它缩成只剩计时器"). Runs once per
         // call; a re-post that recreates the capsule re-collapses
         // it the next time setCallTimer runs.
+        // v444: 已缩过的，每秒 tick 顺手把 pill 宽再按到缩后宽
+        // （自愈——万一有别的路子把它撑回去，1 秒内自己收回来）。
+        // v445: 自愈也包括背景——万一 longBg 尾巴又贴回来了，
+        // 一起换回 pillBg。
+        if (collapsedToTimer) {
+            if (pill != null) {
+                LayoutParams lp = (LayoutParams) pill.getLayoutParams();
+                int endW = dp(collapsedEndWidthDp());
+                if (lp.width != endW) {
+                    // v449 diag: 自愈在干活——pill 又被撑回去了。
+                    FileLog.i("CallTimerDiag setCallTimer HEAL"
+                            + " id=" + System.identityHashCode(this)
+                            + " timer=" + timer
+                            + " pillW=" + lp.width + "->" + endW
+                            + " dockLeft=" + dockLeft);
+                    lp.width = endW;
+                    lp.gravity = Gravity.CENTER_VERTICAL
+                            | (dockLeft ? Gravity.START : Gravity.END);
+                    pill.setLayoutParams(lp);
+                }
+                if (pillBg != null
+                        && pill.getBackground() != pillBg) {
+                    pill.setBackground(pillBg);
+                    lastGrowW = -1;
+                    longGrown = false;
+                }
+            }
+            return;
+        }
         collapseToTimer();
     }
 
@@ -2078,6 +2528,17 @@ public class CapsuleView extends FrameLayout {
      * left dock, END for the right window) so the timer stays
      *贴边. The CapsuleView itself stays 240dp wide (the window /
      * dock layout is untouched); only the visible pill shrinks. */
+    /** v444: 缩成计时器后的 pill 宽。左 120dp（v416 定：图标 +
+     * 5 个字符一行不折行）；右 108dp——用户 “右边接听后再缩进
+     * 一点”，比左再窄 12dp，仍在 96dp 折行线之上。
+     * v452: 用户 2026-11-23 06:11 “接听电话后计时器和背景胶囊
+     * 右边离得太远了”——亮绿按钮才 68dp，pill 120dp 右边空出
+     * 37dp 深绿。左收到 96dp（v415 原值，计时器已单行不会
+     * 折行），右保持 108dp（用户已认）。 */
+    private int collapsedEndWidthDp() {
+        return dockLeft ? 96 : 108;
+    }
+
     public void collapseToTimer() {
         if (pill == null || answerBtn == null) {
             return;
@@ -2085,7 +2546,26 @@ public class CapsuleView extends FrameLayout {
         if (collapsedToTimer) {
             return;
         }
+        // v449 diag: 第一次缩，记一下从多宽缩到多宽。
+        try {
+            LayoutParams lp0 = (LayoutParams) pill.getLayoutParams();
+            FileLog.i("CallTimerDiag collapseToTimer"
+                    + " id=" + System.identityHashCode(this)
+                    + " pillW=" + lp0.width
+                    + "->" + dp(collapsedEndWidthDp())
+                    + " dockLeft=" + dockLeft);
+        } catch (Throwable ignored) {
+        }
         collapsedToTimer = true;
+        // v445: 缩的那一刻就把拖尾清掉——接听前要是有个划动
+        // 留下了 longBg（拖尾 drawable），不换回 pillBg 的话
+        // 尾巴会跟着缩后的 pill 一起留下来（截图里右边那条
+        // 绿尾巴就是它）。
+        if (pillBg != null) {
+            pill.setBackground(pillBg);
+        }
+        lastGrowW = -1;
+        longGrown = false;
         if (iconView != null) {
             iconView.setVisibility(GONE);
         }
@@ -2096,10 +2576,7 @@ public class CapsuleView extends FrameLayout {
             pinView.setVisibility(GONE);
         }
         final int startW = pill.getWidth() > 0 ? pill.getWidth() : dp(240);
-        // v416: 120dp (was 96dp) — the v415 width wrapped "0:27"
-        // as "0:2" / "7"; the timer needs room for icon + 5 chars
-        // on one line.
-        final int endW = dp(120);
+        final int endW = dp(collapsedEndWidthDp());
         android.animation.ValueAnimator anim =
                 android.animation.ValueAnimator.ofInt(startW, endW);
         anim.setDuration(250);
@@ -2372,21 +2849,42 @@ public class CapsuleView extends FrameLayout {
             return;
         }
         this.stacked = stacked;
-        updateStackStroke();
+        updateBorder();
     }
 
-    private void updateStackStroke() {
-        if (pillBg == null) {
-            return;
+    // v471: 黑描边改细（用户 2026-11-23 “黑描边细一点”“你这太粗了”）。
+    // 描边做到背景 drawable 里（EdgeBorderDrawable，v470），跟着 view
+    // 走，弹入、拖动、长大成卡片都跟着动。宽度从 2dp 改成 1dp。
+    /** v473: 卡片拖尾用的描边色（BubbleWindow.ensureCardTail 读它，
+     * 让拖尾的边跟卡片的边一个颜色）。 */
+    public int getBorderColor() {
+        return borderColorForDraw();
+    }
+
+    private int borderColorForDraw() {
+        if (!FeatureFlags.autoTint) {
+            // v466: 自动取色关着时胶囊是白色的，浅底上看不清，
+            // 加一圈黑色描边（不管是单颗还是叠着的，都有）。
+            return Color.BLACK;
         }
-        if (!stacked) {
-            pillBg.setStroke(0, Color.TRANSPARENT);
-            return;
+        if (stacked) {
+            return pillLight
+                    ? Color.argb(120, 0, 0, 0)
+                    : Color.argb(160, 255, 255, 255);
         }
-        int stroke = pillLight
-                ? Color.argb(120, 0, 0, 0)
-                : Color.argb(160, 255, 255, 255);
-        pillBg.setStroke(dp(2), stroke);
+        return Color.TRANSPARENT;
+    }
+
+    private void updateBorder() {
+        int c = borderColorForDraw();
+        if (pillBg != null) {
+            pillBg.setBorder(c, dp(1), dockLeft,
+                    dp(cornerRadiusDp()));
+        }
+        if (cardBg != null) {
+            cardBg.setBorder(c, dp(1), dockLeft,
+                    dp(cardCornerRadiusDp()));
+        }
     }
 
     /** Load the app icon in SystemUI from the package (v1 does it
@@ -2544,9 +3042,13 @@ public class CapsuleView extends FrameLayout {
                 cardBody.setText(data.text != null ? data.text : "");
             }
             // v244: enlarged code in the open card.
+            // v463（用户 2026-11-23 \"显示成 xx码:xxxxx\"）：卡片
+            // 里的大码也改成标签 + 冒号 + 码（\"验证码:123456\" /
+            // \"取件码:070797\"），跟胶囊一个格式。柜号不拼进来，
+            // 它有自己的一行（cardCabinet）。
             if (cardCode != null) {
                 if (data.code != null) {
-                    cardCode.setText(data.code);
+                    cardCode.setText(formatCodeLabel(data));
                     cardCode.setVisibility(VISIBLE);
                 } else {
                     cardCode.setVisibility(GONE);
@@ -2577,6 +3079,19 @@ public class CapsuleView extends FrameLayout {
         if (cardView != null) {
             cardView.setVisibility(
                     isMusicCard ? GONE : (expanded ? VISIBLE : GONE));
+            // v484: 展开卡片（普通卡）比例调整——卡片内容按比例
+            // 缩放着画（左上角为轴）。内容本身按自然尺寸布局
+            // （cardView 是固定自然宽 + WRAP_CONTENT 高），缩着画
+            // 正好填满缩放后的胶囊（LayoutParams 是缩放后的宽高）。
+            // 100% 时 scale=1，和原来一样。跟音乐卡
+            // （updateMusicCard 里给 musicCardView 设 scale）一个路子。
+            if (!isMusicCard) {
+                float s = cardScale();
+                cardView.setPivotX(0f);
+                cardView.setPivotY(0f);
+                cardView.setScaleX(s);
+                cardView.setScaleY(s);
+            }
         }
         if (musicCardView != null) {
             musicCardView.setVisibility(isMusicCard ? VISIBLE : GONE);
@@ -2605,19 +3120,37 @@ public class CapsuleView extends FrameLayout {
         // v162: truly adaptive — the card hugs its content instead
         // of snapping up to the 50dp grid (the ceil left up to a
         // whole extra row of blank space below, user 2026-11-19
-        // "减少下面留白"). Clamp to 2..8 rows so a very long message
-        // still does not make a full-screen card.
-        int pitch = dp(CARD_PITCH_DP);
+        // "减少下面留白"). Clamp to 2..maxRows rows so a very long
+        // message still does not make a full-screen card.
+        // v456: 行距跟胶囊高走（普通卡：高 + 6dp 间隙；音乐卡不动，
+        // 44 + 6 = 50dp）；最大行数走 cardMaxRows()（普通卡外观值，
+        // 音乐卡 8 行）。
+        int pitch = dp((data != null && data.isMusic)
+                ? CARD_PITCH_DP : baseHeightDp() + CARD_GAP_DP);
         int gap = dp(CARD_GAP_DP);
+        int maxRows = cardMaxRows();
         int minH = 2 * pitch - gap;
-        int maxH = 8 * pitch - gap;
+        int maxH = maxRows * pitch - gap;
+        int h;
         if (natural < minH) {
-            return minH;
+            h = minH;
+        } else if (natural > maxH) {
+            h = maxH;
+        } else {
+            h = natural;
         }
-        if (natural > maxH) {
-            return maxH;
+        // v462: 音乐卡片比例调整——高度也按比例缩（整张卡等比）。
+        // 歌词已固定 1 行（updateMusicCard 里把第二行藏了），
+        // 所以 natural 本来就比原来矮一行，再乘比例。
+        if (data != null && data.isMusic) {
+            h = Math.round(h * musicCardScale());
         }
-        return natural;
+        // v484: 展开卡片（普通卡）比例调整——高度也按比例缩
+        // （整张卡等比），跟音乐卡一个路子。
+        if (data != null && !data.isMusic) {
+            h = Math.round(h * cardScale());
+        }
+        return h;
     }
 
     public void setOnCardClose(Runnable r) {
@@ -2817,10 +3350,47 @@ public class CapsuleView extends FrameLayout {
                     data.lyrics != null ? data.lyrics : "");
         }
         // v174: a fresh card / new song has no previous line yet.
+        // v462（用户「歌名改成一行就可以了」）：歌词固定 1 行——
+        // 只显示当前歌词，第二行（上一行歌词）永远藏起来，卡片
+        // 矮一行。高度再走卡片比例调整一起缩。
         if (musicLyricNext != null) {
             musicLyricNext.setText("");
+            musicLyricNext.setVisibility(android.view.View.GONE);
+        }
+        // v462: 卡片比例调整——播放卡内容按比例缩放着画（左上角
+        // 为轴）。内容本身按自然尺寸布局（musicCardView 是固定
+        // 自然宽 + WRAP_CONTENT 高），缩着画正好填满缩放后的
+        // 胶囊（LayoutParams 是缩放后的宽高）。100% 时 scale=1，
+        // 和原来一样。
+        if (musicCardView != null) {
+            float s = musicCardScale();
+            musicCardView.setPivotX(0f);
+            musicCardView.setPivotY(0f);
+            musicCardView.setScaleX(s);
+            musicCardView.setScaleY(s);
         }
         updateMusicFav();
+    }
+
+    /** v465: 胶囊自动取色开关拨动后，把已经弹出来的胶囊按新开关
+     * 重新上色（跟 bind 里一个取图路子：icon → largeIcon → 现
+     * 读 App 图标；音乐胶囊的 largeIcon 是专辑图，照样走它）。 */
+    public void refreshTint() {
+        if (data == null) {
+            return;
+        }
+        android.graphics.Bitmap bmp = null;
+        if (data.icon != null) {
+            bmp = data.icon;
+        } else if (data.largeIcon != null) {
+            bmp = data.largeIcon;
+        } else {
+            android.graphics.drawable.Drawable d = loadAppIcon(data.pkg);
+            if (d != null) {
+                bmp = drawableToBitmap(d);
+            }
+        }
+        applyIconTint(bmp);
     }
 
     /** v218: live session album art (pushed when it first appears
@@ -3297,9 +3867,19 @@ public class CapsuleView extends FrameLayout {
             textView.setTextColor(Color.argb(204, 220, 230, 220));
             return;
         }
-        int color = dominantColor(icon);
-        if (color == 0) {
-            color = Color.rgb(30, 32, 38);
+        // v465: 胶囊自动取色开关关着时，不取图标主色，全部用默认
+        // 深色（跟没图标/没鲜艳色时一个 fallback）。来电胶囊上面
+        // 已经 return 了，不受这个开关管。
+        // v466: 用户 2026-11-23 “白色吧”——开关关着时改成白色，
+        // 不再是深色。没图标/没鲜艳色时（开关开着）还是深色兜底。
+        int color;
+        if (FeatureFlags.autoTint) {
+            color = dominantColor(icon);
+            if (color == 0) {
+                color = Color.rgb(30, 32, 38);
+            }
+        } else {
+            color = Color.rgb(255, 255, 255);
         }
         pillColor = Color.argb(204,
                 Color.red(color), Color.green(color), Color.blue(color));
@@ -3313,7 +3893,7 @@ public class CapsuleView extends FrameLayout {
                 + 0.114 * Color.blue(color);
         boolean light = lum > 140;
         pillLight = light;
-        updateStackStroke();
+        updateBorder();
         titleView.setTextColor(light
                 ? Color.argb(255, 26, 26, 26) : Color.WHITE);
         textView.setTextColor(light
@@ -3329,8 +3909,6 @@ public class CapsuleView extends FrameLayout {
         textView.setShadowLayer(2, 0, 1, halo);
         lyricsView.setShadowLayer(2, 0, 1, halo);
         updateCardColors();
-        // No border on a lone capsule (user 2026-11-19 "胶囊描边去掉");
-        // stacked capsules get one via updateStackStroke().
     }
 
     /** Most frequent vivid colour of a bitmap (downscaled to 16x16). */

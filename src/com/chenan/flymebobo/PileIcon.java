@@ -67,6 +67,15 @@ public class PileIcon extends FrameLayout {
         iconView.setImageDrawable(d);
     }
 
+    /** v460: 只给里面的图标（34dp）设透明度，不给外框（22dp）设。
+     * 外框设 alpha 会让系统把它渲染进一个 22dp 大小的图层，
+     * 34dp 图标溢出框外的 12dp 就被图层裁掉了——自动变淡后图标
+     * 只剩一半，就是这个原因。图标自己 34dp，图层就是 34dp，
+     * 整颗都在，不裁。 */
+    public void setIconAlpha(float alpha) {
+        iconView.setAlpha(alpha);
+    }
+
     public void setOnTap(Runnable onTap) {
         this.onTap = onTap;
     }

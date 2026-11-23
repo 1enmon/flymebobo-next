@@ -85,6 +85,21 @@ public class NotificationService extends NotificationListenerService {
      * "key" (notif/music/dl/code/live), "enabled" (boolean). */
     public static final String ACTION_FEATURE_TOGGLE =
             "com.chenan.flymebobo.FEATURE_TOGGLE";
+    /** v438/v439: APP -> SystemUI, an appearance slider moved.
+     * Extra: "dockPct" (int 0-85) — the anchor Y of the whole unit
+     * (capsules + fan, they are one piece). SystemUI re-reads the
+     * prefs and re-lays out at once, no restart needed. */
+    public static final String ACTION_APPEARANCE =
+            "com.chenan.flymebobo.APPEARANCE";
+    /** v471: APP -> SystemUI, reload all settings once. Sent by
+     * MainActivity.onCreate after restoreToPrefs() restores the
+     * local backup file into prefs (user 2026-11-23 “改成打开
+     * 自动加载一次”：文件写了但重启后不生效，是因为 SystemUI
+     * 在 App 打开之前已经按旧 prefs 载完了；打开 App 时推一次
+     * 重载，SystemUI 重新读一遍 FeatureFlags + Appearance 并
+     * 重排/重着色，开关和功能就对上了）。No extras. */
+    public static final String ACTION_RELOAD_SETTINGS =
+            "com.chenan.flymebobo.RELOAD_SETTINGS";
     /** v311: Amap live navigation (foot/ride) — Amap process ->
      * SystemUI, turn + distance from ModuleRoute.notifyNaviInfo.
      * Extras: "bizType" (footnavi/ridenavi), "title", "content",
@@ -847,6 +862,89 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    /** v490: dismiss by key with all three cancel attempts (same as
+     * cancelNotif, but the caller only has the key string, not the
+     * StatusBarNotification). The v488 hook sent ACTION_DISMISS with
+     * the key, but the 1-arg cancelNotification(key) alone does not
+     * remove delegated push notifications (CancelDiag stillActive=true
+     * 0.5s after the dismiss) — v408/v419 disagree on whether the
+     * notification is registered under the original package (key) or
+     * the posting package (com.meizu.cloud), so try all three, exactly
+     * like cancelNotif. The postPkg extra carries the posting package
+     * (not in the key); without it only the first two attempts run.
+     * Card-open dismiss (BubbleWindow, no postPkg) also routes here —
+     * strictly more robust than the old single key cancel. */
+    private void cancelByKey(final String key, String postPkg) {
+        if (key == null) {
+            return;
+        }
+        final String keyPkg = keyPackage(key);
+        String tag = null;
+        int id = 0;
+        boolean parsed = false;
+        try {
+            String[] parts = key.split("\\|");
+            if (parts.length >= 4) {
+                id = Integer.parseInt(parts[2]);
+                String t = parts[3];
+                tag = "null".equals(t) ? null : t;
+                parsed = true;
+            }
+        } catch (Throwable ignored) {
+        }
+        FileLog.i("cancelByKey key=" + key + " keyPkg=" + keyPkg
+                + " postPkg=" + postPkg + " tag=" + tag + " id=" + id);
+        try {
+            cancelNotification(key);
+        } catch (Throwable t) {
+            FileLog.i("cancelByKey key-cancel threw: " + t);
+        }
+        if (parsed && keyPkg != null && !keyPkg.isEmpty()) {
+            try {
+                cancelNotification(keyPkg, tag, id);
+            } catch (Throwable t) {
+                FileLog.i("cancelByKey keyPkg cancel threw: " + t);
+            }
+        }
+        if (parsed && postPkg != null && !postPkg.isEmpty()
+                && !postPkg.equals(keyPkg)) {
+            try {
+                cancelNotification(postPkg, tag, id);
+            } catch (Throwable t) {
+                FileLog.i("cancelByKey postPkg cancel threw: " + t);
+            }
+        }
+        // 500ms later, check whether it is still active (same
+        // diagnostic as cancelNotif).
+        try {
+            new android.os.Handler(
+                    android.os.Looper.getMainLooper()).postDelayed(
+                    new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        boolean stillThere = false;
+                        StatusBarNotification[] act =
+                                getActiveNotifications();
+                        if (act != null) {
+                            for (StatusBarNotification a : act) {
+                                if (a != null
+                                        && key.equals(a.getKey())) {
+                                    stillThere = true;
+                                    break;
+                                }
+                            }
+                        }
+                        FileLog.i("cancelByKey stillActive=" + stillThere
+                                + " key=" + key);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }, 500);
+        } catch (Throwable ignored) {
+        }
+    }
+
     /** v408: the package field (2nd) of a notification key
      * ("user|pkg|id|tag|uid"). For push-service notifications this
      * is the ORIGINAL app package, not the posting push service. */
@@ -1104,6 +1202,17 @@ public class NotificationService extends NotificationListenerService {
     private android.os.Handler lyricPollHandler;
     private Runnable lyricPollRunnable;
     private static final long LYRIC_POLL_MS = 500;
+    // v430: periodic update check (user 2026-11-23 "提示一下有更新
+    // 就行" — prompt only, never a silent install). The listener
+    // service is always on, so it hosts the background check: first
+    // run 60s after connect, then every 6 hours. A newer release
+    // posts one system notification (once per versionCode).
+    private android.os.Handler updateCheckHandler;
+    private Runnable updateCheckRunnable;
+    private boolean updateCheckStarted;
+    private static final long UPDATE_CHECK_FIRST_MS = 60 * 1000;
+    private static final long UPDATE_CHECK_INTERVAL_MS =
+            6 * 60 * 60 * 1000;
     // Network lyrics fallback (v88, LRCLIB). Only used when the
     // notification/MediaSession have no lyric. Lines are timed
     // (LRC), picked by playback position.
@@ -1342,6 +1451,60 @@ public class NotificationService extends NotificationListenerService {
         } catch (Throwable ignored) {
         }
         lyricPollRunnable = null;
+    }
+
+    /** v430: periodic update check (user 2026-11-23 "提示一下有更新
+     * 就行"). First run 60s after the listener connects, then every
+     * 6 hours. A newer GitHub release posts one system notification
+     * (once per versionCode) — never a silent install. Guarded so a
+     * reconnect does not start a second loop. */
+    private void startUpdateCheck() {
+        if (updateCheckStarted) {
+            return;
+        }
+        updateCheckStarted = true;
+        try {
+            if (updateCheckHandler == null) {
+                updateCheckHandler = new android.os.Handler(
+                        android.os.Looper.getMainLooper());
+            }
+            updateCheckRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        UpdateChecker.checkAsync(
+                                NotificationService.this,
+                                new UpdateChecker.Callback() {
+                                    @Override
+                                    public void onResult(
+                                            UpdateChecker.UpdateInfo
+                                                    info) {
+                                        if (info != null
+                                                && info.available) {
+                                            UpdateChecker.notifyUpdate(
+                                                    NotificationService
+                                                            .this,
+                                                    info);
+                                        }
+                                    }
+                                });
+                    } catch (Throwable ignored) {
+                    }
+                    try {
+                        if (updateCheckHandler != null
+                                && updateCheckRunnable != null) {
+                            updateCheckHandler.postDelayed(
+                                    updateCheckRunnable,
+                                    UPDATE_CHECK_INTERVAL_MS);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            };
+            updateCheckHandler.postDelayed(updateCheckRunnable,
+                    UPDATE_CHECK_FIRST_MS);
+        } catch (Throwable ignored) {
+        }
     }
 
     /**
@@ -3431,6 +3594,8 @@ public class NotificationService extends NotificationListenerService {
         // version on every connect, so a log file always shows
         // which build produced it.
         FileLog.i("Version: " + appVersion());
+        // v430: start the periodic update check (see fields above).
+        startUpdateCheck();
         // v133: the toggle command comes from SystemUI (another
         // process), so this receiver MUST be exported. A plain
         // 2-arg registerReceiver never receives a cross-app
@@ -3911,14 +4076,17 @@ public class NotificationService extends NotificationListenerService {
                         return;
                     }
                     // v143: dismiss a notification after the card
-                    // opened its app.
+                    // opened its app. v490: use cancelByKey (all
+                    // three cancel attempts) — the plain
+                    // cancelNotification(key) alone does not remove
+                    // delegated push notifications (v488 proved it:
+                    // HookCancel sent dismiss, CancelDiag still
+                    // stillActive=true 0.5s later).
                     if (ACTION_DISMISS.equals(intent.getAction())) {
                         String dkey = intent.getStringExtra("key");
                         if (dkey != null) {
-                            try {
-                                cancelNotification(dkey);
-                            } catch (Throwable ignored) {
-                            }
+                            cancelByKey(dkey,
+                                    intent.getStringExtra("postPkg"));
                         }
                         return;
                     }

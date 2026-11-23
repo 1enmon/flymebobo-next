@@ -29,7 +29,12 @@ import java.util.List;
 public class DockedPile extends FrameLayout {
     private static final int FRAME_DP = 22;
     private static final int OVERFLOW_DP = 12;
-    private static final int NORMAL_STEP_DP = 18;
+    /** v456: 正常步距不再写死 18dp——走外观的扇子图标重叠度：
+     * 步距 = 框宽 22dp - 重叠度（默认重叠 4dp → 步距 18dp，跟原来一样）。
+     * 重叠 0 = 步距 22（不重叠），重叠 16 = 步距 6（重叠最多）。 */
+    private static int normalStepDp() {
+        return FRAME_DP - Appearance.fanOverlapDp;
+    }
     private static final int MIN_STEP_DP = 6;
     private static final int TOTAL_WIDE_DP = 136;
 
@@ -71,11 +76,11 @@ public class DockedPile extends FrameLayout {
     public int stepDp() {
         int n = icons.size();
         if (n <= 1) {
-            return NORMAL_STEP_DP;
+            return normalStepDp();
         }
         int fit = stepBudgetDp() / (n - 1);
-        if (fit >= NORMAL_STEP_DP) {
-            return NORMAL_STEP_DP;
+        if (fit >= normalStepDp()) {
+            return normalStepDp();
         }
         return Math.max(MIN_STEP_DP, fit);
     }
@@ -86,7 +91,23 @@ public class DockedPile extends FrameLayout {
         if (n == 0) {
             return 0;
         }
+        if (Appearance.fanDirection == Appearance.FAN_DIR_VERTICAL) {
+            return FRAME_DP + OVERFLOW_DP;
+        }
         return FRAME_DP + (n - 1) * stepDp() + OVERFLOW_DP;
+    }
+
+    /** Total fan height in dp — v456: 纵向时扇子往下叠，高 = 框 +
+     * 步距 + 溢出；横向时就是一颗图标高（框 22dp + 溢出）。 */
+    public int totalHeightDp() {
+        int n = icons.size();
+        if (n == 0) {
+            return 0;
+        }
+        if (Appearance.fanDirection == Appearance.FAN_DIR_VERTICAL) {
+            return FRAME_DP + (n - 1) * stepDp() + OVERFLOW_DP;
+        }
+        return FRAME_DP + OVERFLOW_DP;
     }
 
     /** The anchor: the newest icon (last added), flush at the edge. */
@@ -193,14 +214,32 @@ public class DockedPile extends FrameLayout {
         removeAllViews();
     }
 
+    /** v459: 扇子自动变淡——整排图标一起变半透明（0.5f）或恢复
+     * 不透明（1.0f）。只动 alpha，不动位置；relayout 不碰 alpha，
+     * 所以变淡状态不会被重排顶掉。
+     * v460: alpha 设在图标（iconView，34dp）上，不设在外框
+     * （PileIcon，22dp）上——外框设 alpha 会进 22dp 图层，图标
+     * 溢出的 12dp 被裁掉，变淡后只剩一半。 */
+    public void setDimmed(boolean dimmed) {
+        float a = dimmed ? 0.5f : 1.0f;
+        for (PileIcon icon : icons) {
+            if (icon != null) {
+                icon.setIconAlpha(a);
+            }
+        }
+    }
+
     /**
      * Lay the fan out. Oldest first so the newest (anchor) is drawn
      * last, on top. The anchor sits at offset 0 (flush at the edge);
      * each older icon is offset one more step toward the centre.
+     * v456: 纵向时往下叠（topMargin），横向时往中心扇开（left/rightMargin）。
      */
     public void relayout() {
         int n = icons.size();
         int step = dp(stepDp());
+        boolean vertical = Appearance.fanDirection
+                == Appearance.FAN_DIR_VERTICAL;
         for (int i = 0; i < n; i++) {
             PileIcon icon = icons.get(i);
             // Never leave an icon stuck translated (v25: a translated
@@ -217,12 +256,17 @@ public class DockedPile extends FrameLayout {
                     new FrameLayout.LayoutParams(dp(FRAME_DP),
                             LayoutParams.WRAP_CONTENT,
                             dockLeft ? android.view.Gravity.START : android.view.Gravity.END);
-            if (dockLeft) {
+            if (vertical) {
+                lp.topMargin = gi * step;
+            } else if (dockLeft) {
                 lp.leftMargin = gi * step;
             } else {
                 lp.rightMargin = gi * step;
             }
             icon.setLayoutParams(lp);
+            // v459: 手动透明度已撤，relayout 不动 alpha——变淡只走
+            // 自动变淡（setDimmed），由 BubbleWindow 的 5 秒定时器
+            // 管；新图标进来时那边先取消变淡再重计时。
         }
         requestLayout();
     }
