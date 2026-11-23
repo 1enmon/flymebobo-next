@@ -314,6 +314,7 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_CALL_RESULT);
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
+        filter.addAction(NotificationService.ACTION_APP_RULES);
         filter.addAction(NotificationService.ACTION_APPEARANCE);
         // v471: 打开 App 时恢复本地备份后推一次全量重载（见
         // ACTION_RELOAD_SETTINGS）。
@@ -566,6 +567,25 @@ public class XposedEntry extends XposedModule {
                 // 功能就对上了。Application context 走
                 // ActivityThread.currentApplication()（receiver
                 // 的 context 是受限的，createPackageContext 会炸）。
+                // v504 (2.4.2): a per-app bubble rule changed —
+                // reload the rule map at once (same restricted-
+                // context dance as ACTION_RELOAD_SETTINGS below).
+                if (NotificationService.ACTION_APP_RULES.equals(
+                        intent.getAction())) {
+                    try {
+                        Class<?> at = Class.forName(
+                                "android.app.ActivityThread");
+                        java.lang.reflect.Method m =
+                                at.getMethod("currentApplication");
+                        android.app.Application app =
+                                (android.app.Application) m.invoke(null);
+                        if (app != null) {
+                            AppRules.load(app);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    return;
+                }
                 if (NotificationService.ACTION_RELOAD_SETTINGS.equals(
                         intent.getAction())) {
                     try {
@@ -578,6 +598,7 @@ public class XposedEntry extends XposedModule {
                         if (app != null) {
                             FeatureFlags.load(app);
                             Appearance.load(app);
+                            AppRules.load(app);
                             BubbleWindow bw = BubbleWindow.getInstance();
                             if (bw != null) {
                                 bw.onAppearanceChanged();
@@ -986,6 +1007,8 @@ public class XposedEntry extends XposedModule {
         FeatureFlags.load(app);
         // v438: read the APP's saved appearance (pop/fan position).
         Appearance.load(app);
+        // v504 (2.4.2): read the APP's per-app bubble rules.
+        AppRules.load(app);
         log(4, TAG, "flymebobo bubble window ready");
     }
 

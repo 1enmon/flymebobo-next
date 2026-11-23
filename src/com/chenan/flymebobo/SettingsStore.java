@@ -68,6 +68,9 @@ public class SettingsStore {
     public static final String PREFIX_FEATURE = "f.";
     /** 外观值在文件里的前缀。 */
     public static final String PREFIX_APPEARANCE = "a.";
+    /** v504 (2.4.2): 按应用气泡规则在文件里的前缀
+     * （r.<包名>=never|edge，见 AppRules）。 */
+    public static final String PREFIX_RULE = "r.";
 
     /** 读的候选位置（按顺序，第一个有内容的胜出）。 */
     private static String[] readPaths() {
@@ -161,6 +164,16 @@ public class SettingsStore {
                     continue;
                 }
                 sb.append(PREFIX_APPEARANCE).append(e.getKey()).append('=')
+                        .append(e.getValue().toString()).append('\n');
+            }
+            // v504 (2.4.2): 按应用规则一并备份（r.<包名>=never|edge）。
+            SharedPreferences rPrefs = appCtx.getSharedPreferences(
+                    AppRules.PREFS, Context.MODE_PRIVATE);
+            for (Map.Entry<String, ?> e : rPrefs.getAll().entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                sb.append(PREFIX_RULE).append(e.getKey()).append('=')
                         .append(e.getValue().toString()).append('\n');
             }
             return sb.toString();
@@ -288,8 +301,11 @@ public class SettingsStore {
                     "flymebobo_features", Context.MODE_PRIVATE).edit();
             SharedPreferences.Editor aEd = appCtx.getSharedPreferences(
                     Appearance.PREFS, Context.MODE_PRIVATE).edit();
+            SharedPreferences.Editor rEd = appCtx.getSharedPreferences(
+                    AppRules.PREFS, Context.MODE_PRIVATE).edit();
             boolean fChanged = false;
             boolean aChanged = false;
+            boolean rChanged = false;
             for (Map.Entry<String, String> e : map.entrySet()) {
                 String k = e.getKey();
                 String v = e.getValue();
@@ -312,6 +328,16 @@ public class SettingsStore {
                     } catch (NumberFormatException ignored) {
                         // 坏行跳过。
                     }
+                } else if (k.startsWith(PREFIX_RULE)) {
+                    // v504 (2.4.2): 按应用规则是字符串，必须按
+                    // 字符串恢复，不能混进 f.* 的布尔恢复里
+                    // （v482 musicLed_taps 同款坑）。
+                    String key = k.substring(PREFIX_RULE.length());
+                    if (!key.isEmpty()
+                            && AppRules.parse(v) != AppRules.DEFAULT) {
+                        rEd.putString(key, v);
+                        rChanged = true;
+                    }
                 }
             }
             if (fChanged) {
@@ -320,7 +346,10 @@ public class SettingsStore {
             if (aChanged) {
                 aEd.commit();
             }
-            return fChanged || aChanged;
+            if (rChanged) {
+                rEd.commit();
+            }
+            return fChanged || aChanged || rChanged;
         } catch (Throwable ignored) {
             // 恢复失败不影响主流程。
             return false;

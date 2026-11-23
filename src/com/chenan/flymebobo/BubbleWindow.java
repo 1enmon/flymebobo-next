@@ -1959,6 +1959,40 @@ public class BubbleWindow {
         if (dock == null) {
             return;
         }
+        // v504 (2.4.2): per-app rules (AppRulesActivity, backlog
+        // #5). NEVER = this app's notifications never become
+        // bubbles (the system notification itself is untouched).
+        // EDGE = no capsule pop — the notification goes straight
+        // into the docked fan via the same addPileIconForGroup
+        // path a manual dock uses, so tapping the fan expands it
+        // back out unchanged. Calls are exempt (same as the scene
+        // guard); music / download / live / navi keep their own
+        // capsule behaviour and are exempt from EDGE.
+        if (data != null && !data.isCall && data.pkg != null) {
+            int rule = AppRules.modeFor(data.pkg);
+            if (rule == AppRules.NEVER) {
+                return;
+            }
+            if (rule == AppRules.EDGE && !data.isMusic
+                    && !data.isDownload && !data.isLive
+                    && !data.isNavi && !data.isBus) {
+                NotifGroup stored = dockedGroups.get(data.pkg);
+                if (stored != null && data.key != null) {
+                    for (int i = stored.items.size() - 1; i >= 0;
+                            i--) {
+                        NotifData old = stored.items.get(i);
+                        if (old != null
+                                && data.key.equals(old.key)) {
+                            stored.items.remove(i);
+                        }
+                    }
+                }
+                NotifGroup dg = new NotifGroup(data.pkg);
+                dg.add(data);
+                addPileIconForGroup(dg);
+                return;
+            }
+        }
         // v259: APP feature switches (real-time, no restart).
         // Master switch off = no capsule at all; the others gate
         // only their own kind. Switches on = exactly the old path.

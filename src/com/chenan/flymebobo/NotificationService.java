@@ -85,6 +85,11 @@ public class NotificationService extends NotificationListenerService {
      * "key" (notif/music/dl/code/live), "enabled" (boolean). */
     public static final String ACTION_FEATURE_TOGGLE =
             "com.chenan.flymebobo.FEATURE_TOGGLE";
+    /** v504 (2.4.2): APP -> SystemUI, a per-app bubble rule
+     * changed in AppRulesActivity. SystemUI reloads AppRules at
+     * once, no restart needed. */
+    public static final String ACTION_APP_RULES =
+            "com.chenan.flymebobo.APP_RULES";
     /** v438/v439: APP -> SystemUI, an appearance slider moved.
      * Extra: "dockPct" (int 0-85) — the anchor Y of the whole unit
      * (capsules + fan, they are one piece). SystemUI re-reads the

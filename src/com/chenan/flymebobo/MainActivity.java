@@ -374,6 +374,10 @@ public class MainActivity extends Activity {
         for (int i = 0; i < TOP_FEATURES.length; i++) {
             list.addView(buildFeatureCard(TOP_FEATURES[i]));
         }
+        // v504 (2.4.2): 应用规则入口（功能储备 #5，用户点名先做；
+        // 界面先预览后落地）。和功能卡同款式，点一下进
+        // AppRulesActivity 给每个应用单独设规则。
+        list.addView(buildAppRulesCard());
 
         // ---- Appearance (v439): 一个滑块，扇子位置 ----
         // 胶囊和扇子是一个整体（用户 “他们是一个整体” / “胶囊始终
@@ -831,6 +835,71 @@ public class MainActivity extends Activity {
     }
 
     // One feature card: coloured bubble header + expandable body.
+    /** v504 (2.4.2): 应用规则入口卡。和功能卡同款式（彩色圆角
+     * 卡 + 白图标砖 + 白字标题/副标题），右侧箭头，点一下进
+     * AppRulesActivity。 */
+    private View buildAppRulesCard() {
+        final int color = Color.rgb(6, 182, 212);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(rounded(color, dp(22)));
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(10);
+        card.setLayoutParams(clp);
+
+        TextView icon = new TextView(this);
+        icon.setText("规");
+        icon.setTextSize(15);
+        icon.setTextColor(color);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(36), dp(36)));
+        card.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("应用规则");
+        title.setTextSize(15);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("每个应用单独设：永不弹 / 只贴边");
+        sub.setTextSize(12);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        card.addView(texts);
+
+        TextView chev = new TextView(this);
+        chev.setText("›");
+        chev.setTextSize(24);
+        chev.setTextColor(Color.WHITE);
+        card.addView(chev);
+
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(MainActivity.this,
+                            AppRulesActivity.class));
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        return card;
+    }
+
     private View buildFeatureCard(final Feature f) {
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
