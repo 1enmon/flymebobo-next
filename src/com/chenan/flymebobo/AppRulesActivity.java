@@ -1,6 +1,7 @@
 package com.chenan.flymebobo;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -58,6 +59,7 @@ public class AppRulesActivity extends Activity {
         String label;
         Drawable icon;
         int color;
+        boolean system;
     }
 
     private final Map<String, Integer> myRules = new HashMap<>();
@@ -199,69 +201,54 @@ public class AppRulesActivity extends Activity {
         }).start();
     }
 
-    /** 有桌面入口的应用 + 已设过规则但没入口的应用；设过规则的
-     * 排前面，其余按名称排序。 */
+    /** 全部已安装应用（用户 + 系统都包含）：清单里已声明
+     * QUERY_ALL_PACKAGES（v505，用户“权限给够”“包涵系统和
+     * 用户的”），getInstalledApplications 拿全量。排序：
+     * 已设规则 > 用户应用 > 系统应用，组内按名称。 */
     private List<AppEntry> loadApps() {
         PackageManager pm = getPackageManager();
-        Map<String, AppEntry> byPkg = new HashMap<>();
+        List<AppEntry> apps = new ArrayList<>();
         try {
-            Intent main = new Intent(Intent.ACTION_MAIN);
-            main.addCategory(Intent.CATEGORY_LAUNCHER);
-            List<ResolveInfo> ris = pm.queryIntentActivities(main, 0);
-            Set<String> seen = new HashSet<>();
-            for (ResolveInfo ri : ris) {
-                if (ri == null || ri.activityInfo == null
-                        || ri.activityInfo.packageName == null) {
-                    continue;
-                }
-                String pkg = ri.activityInfo.packageName;
-                if (!seen.add(pkg)) {
+            List<ApplicationInfo> ais =
+                    pm.getInstalledApplications(0);
+            for (ApplicationInfo ai : ais) {
+                if (ai == null || ai.packageName == null) {
                     continue;
                 }
                 AppEntry e = new AppEntry();
-                e.pkg = pkg;
-                CharSequence label = ri.loadLabel(pm);
-                e.label = label == null ? pkg : label.toString();
-                try {
-                    e.icon = ri.loadIcon(pm);
-                } catch (Throwable ignored) {
-                }
-                e.color = colorFor(pkg, e.icon);
-                byPkg.put(pkg, e);
-            }
-        } catch (Throwable ignored) {
-        }
-        // 已设规则但没桌面入口的应用也列出来，不然规则改不回来。
-        for (String pkg : myRules.keySet()) {
-            if (byPkg.containsKey(pkg)) {
-                continue;
-            }
-            try {
-                ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
-                AppEntry e = new AppEntry();
-                e.pkg = pkg;
+                e.pkg = ai.packageName;
                 CharSequence label = pm.getApplicationLabel(ai);
-                e.label = label == null ? pkg : label.toString();
+                e.label = label == null ? ai.packageName
+                        : label.toString();
+                e.system = (ai.flags & (ApplicationInfo.FLAG_SYSTEM
+                        | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))
+                        != 0;
                 try {
                     e.icon = pm.getApplicationIcon(ai);
                 } catch (Throwable ignored) {
                 }
-                e.color = colorFor(pkg, e.icon);
-                byPkg.put(pkg, e);
-            } catch (Throwable ignored) {
+                e.color = colorFor(e.pkg, e.icon);
+                apps.add(e);
             }
+        } catch (Throwable ignored) {
         }
-        List<AppEntry> apps = new ArrayList<>(byPkg.values());
         final Collator collator = Collator.getInstance(Locale.CHINA);
         Collections.sort(apps, new Comparator<AppEntry>() {
             @Override
             public int compare(AppEntry a, AppEntry b) {
-                boolean ra = myRules.containsKey(a.pkg);
-                boolean rb = myRules.containsKey(b.pkg);
+                int ra = rank(a);
+                int rb = rank(b);
                 if (ra != rb) {
-                    return ra ? -1 : 1;
+                    return ra - rb;
                 }
                 return collator.compare(a.label, b.label);
+            }
+
+            private int rank(AppEntry e) {
+                if (myRules.containsKey(e.pkg)) {
+                    return 0;
+                }
+                return e.system ? 2 : 1;
             }
         });
         return apps;
@@ -319,7 +306,7 @@ public class AppRulesActivity extends Activity {
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         texts.addView(name);
         TextView pkg = new TextView(this);
-        pkg.setText(e.pkg);
+        pkg.setText(e.pkg + (e.system ? " · 系统" : ""));
         pkg.setTextSize(10.5f);
         pkg.setTextColor(Color.argb(230, 255, 255, 255));
         pkg.setSingleLine(true);
