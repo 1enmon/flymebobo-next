@@ -1,0 +1,17 @@
+# flymebobo 线上游戏名单 (v511+)
+# 场景识别认不出某些游戏时靠这份名单兜底：
+# 没声明系统「游戏分类」、前台 Activity 又不带引擎特征的游戏，
+# 把包名加进来即可，一行一个。模块每 6 小时自动拉取一次，
+# 改这里不用发新版。# 开头是注释行。
+com.tencent.jkchess
+com.tencent.tmgp.sgame
+com.tencent.tmgp.pubgmhd
+com.tencent.tmgp.cf
+com.tencent.tmgp.cod
+com.tencent.tmgp.dfm
+com.tencent.lolm
+com.miHoYo.Yuanshen
+com.miHoYo.hkrpg
+com.miHoYo.Nap
+com.netease.onmyoji
+com.netease.dwrg
