@@ -2,16 +2,95 @@
 # 场景识别认不出某些游戏时靠这份名单兜底：
 # 没声明系统「游戏分类」、前台 Activity 又不带引擎特征的游戏，
 # 把包名加进来即可，一行一个。模块每 6 小时自动拉取一次，
-# 改这里不用发新版。# 开头是注释行。
-com.tencent.jkchess
-com.tencent.tmgp.sgame
-com.tencent.tmgp.pubgmhd
-com.tencent.tmgp.cf
-com.tencent.tmgp.cod
-com.tencent.tmgp.dfm
-com.tencent.lolm
-com.miHoYo.Yuanshen
-com.miHoYo.hkrpg
-com.miHoYo.Nap
-com.netease.onmyoji
-com.netease.dwrg
+# 改这里不用发新版。# 开头是注释行，包名后可跟 # 备注。
+# （渠道服包名常带 .huawei/.mi/.vivo 等后缀，这里只收官服；
+#   遇到漏的把完整包名补进来即可。）
+
+# ---- 腾讯 ----
+com.tencent.tmgp.sgame          # 王者荣耀
+com.tencent.tmgp.pubgmhd        # 和平精英
+com.tencent.jkchess             # 金铲铲之战
+com.tencent.lolm                # 英雄联盟手游
+com.tencent.tmgp.cf             # 穿越火线：枪战王者
+com.tencent.tmgp.cod            # 使命召唤手游
+com.tencent.tmgp.dfm            # 三角洲行动
+com.tencent.tmgp.codev          # 无畏契约：源能行动
+com.tencent.mf.uam              # 暗区突围
+com.tencent.tmgp.dnf            # 地下城与勇士：起源
+com.tencent.KiHan               # 火影忍者
+com.tencent.tmgp.speedmobile    # QQ飞车
+com.tencent.tmgp.wuxia          # 天涯明月刀
+com.tencent.letsgo              # 元梦之星
+com.tencent.toaa                # 黎明觉醒：生机
+com.tencent.tmgp.dragonraja     # 龙族幻想
+com.tencent.tmgp.hotta          # 幻塔（应用宝渠道）
+
+# ---- 网易 ----
+com.netease.onmyoji             # 阴阳师
+com.netease.dwrg                # 第五人格
+com.netease.nshm                # 逆水寒
+com.netease.wyclx               # 一梦江湖
+com.netease.my                  # 梦幻西游
+com.netease.party               # 蛋仔派对
+com.netease.sky                 # 光·遇
+com.bilibili.sky                # 光·遇（B站版）
+com.netease.moba                # 决战！平安京
+com.netease.hyxd                # 荒野行动
+com.netease.mrzh                # 明日之后
+com.netease.pes                 # 实况足球
+com.netease.harrypotter         # 哈利波特：魔法觉醒
+com.netease.aceracer            # 王牌竞速
+com.netease.race                # 巅峰极速
+com.netease.x19                 # 我的世界
+
+# ---- 米哈游 ----
+com.miHoYo.Yuanshen             # 原神
+com.miHoYo.bh3                  # 崩坏3
+com.miHoYo.hkrpg                # 崩坏：星穹铁道
+com.miHoYo.Nap                  # 绝区零
+
+# ---- 其他国内 ----
+com.kurogame.haru.hero          # 战双帕弥什
+com.kurogame.wutheringwaves     # 鸣潮
+com.hypergryph.arknights        # 明日方舟
+com.bilibili.azurlane           # 碧蓝航线
+com.bilibili.fatego             # 命运-冠位指定
+com.bilibili.deadcells.mobile   # 重生细胞
+com.shenlan.m.reverse1999       # 重返未来：1999
+com.pwrd.hotta.laohu            # 幻塔（官服）
+com.aligames.sgzzlb             # 三国志·战略版
+com.aligames.sgzzlb.aligames    # 三国志·战略版（渠道）
+com.sofunny.chicken             # 香肠派对
+com.sofunny.chickendinnerfirst  # 香肠派对（先行服）
+com.minitech.miniworld          # 迷你世界
+com.ztgame.bob                  # 球球大作战
+
+# ---- 国际版 ----
+com.levelinfinite.sgameGlobal         # 王者荣耀国际版
+com.tencent.ig                        # PUBG Mobile
+com.miHoYo.GenshinImpact              # 原神国际版
+com.HoYoverse.hkrpgoversea            # 星穹铁道国际版
+com.HoYoverse.Nap                     # 绝区零国际版
+com.kurogame.wutheringwaves.global    # 鸣潮国际版
+com.bluepoch.m.en.reverse1999         # 重返未来：1999 国际版
+com.levelinfinite.hotta.gp            # 幻塔国际版
+com.zloong.eu.dr.gp                   # 龙族幻想国际版
+com.netease.racerna                   # 王牌竞速国际版
+com.riotgames.league.wildrift         # 英雄联盟手游国际版
+com.riotgames.league.teamfighttactics # 云顶之弈国际版
+com.activision.callofduty.shooter     # 使命召唤手游国际版
+com.epicgames.fortnite                # Fortnite
+com.supercell.clashofclans            # 部落冲突
+com.supercell.brawlstars              # 荒野乱斗
+com.blizzard.wtcg.hearthstone         # 炉石传说
+com.blizzard.diablo.immortal          # 暗黑破坏神：不朽
+com.innersloth.spacemafia             # Among Us
+com.chucklefish.stardewvalley         # 星露谷物语
+com.playdigious.deadcells             # Dead Cells 国际版
+com.mojang.minecraftpe                # Minecraft 国际版
+com.roblox.client                     # Roblox
+com.mobile.legends                    # Mobile Legends
+com.dts.freefireth                    # Free Fire
+com.dts.freefiremax                   # Free Fire MAX
+com.ea.gp.fifamobile                  # FC Mobile
+com.konami.pesam                      # eFootball
