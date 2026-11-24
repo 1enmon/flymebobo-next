@@ -71,6 +71,12 @@ public class SettingsStore {
     /** v504 (2.4.2): 按应用气泡规则在文件里的前缀
      * （r.<包名>=never|edge，见 AppRules）。 */
     public static final String PREFIX_RULE = "r.";
+    /** v508: 场景例外在文件里的前缀
+     * （x.<包名>=break|follow，见 SceneExceptions）。 */
+    public static final String PREFIX_SCENE_EXC = "x.";
+    /** v511: 线上游戏名单在文件里的前缀
+     * （g.<包名>=1，见 GamePackages）。 */
+    public static final String PREFIX_GAME = "g.";
 
     /** 读的候选位置（按顺序，第一个有内容的胜出）。 */
     private static String[] readPaths() {
@@ -174,6 +180,28 @@ public class SettingsStore {
                     continue;
                 }
                 sb.append(PREFIX_RULE).append(e.getKey()).append('=')
+                        .append(e.getValue().toString()).append('\n');
+            }
+            // v508: 场景例外一并备份（x.<包名>=break|follow）。
+            SharedPreferences xPrefs = appCtx.getSharedPreferences(
+                    SceneExceptions.PREFS, Context.MODE_PRIVATE);
+            for (Map.Entry<String, ?> e : xPrefs.getAll().entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                sb.append(PREFIX_SCENE_EXC).append(e.getKey())
+                        .append('=')
+                        .append(e.getValue().toString()).append('\n');
+            }
+            // v511: 线上游戏名单一并备份（g.<包名>=1）。
+            SharedPreferences gPrefs = appCtx.getSharedPreferences(
+                    GamePackages.PREFS, Context.MODE_PRIVATE);
+            for (Map.Entry<String, ?> e : gPrefs.getAll().entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                sb.append(PREFIX_GAME).append(e.getKey())
+                        .append('=')
                         .append(e.getValue().toString()).append('\n');
             }
             return sb.toString();
@@ -303,9 +331,15 @@ public class SettingsStore {
                     Appearance.PREFS, Context.MODE_PRIVATE).edit();
             SharedPreferences.Editor rEd = appCtx.getSharedPreferences(
                     AppRules.PREFS, Context.MODE_PRIVATE).edit();
+            SharedPreferences.Editor xEd = appCtx.getSharedPreferences(
+                    SceneExceptions.PREFS, Context.MODE_PRIVATE).edit();
+            SharedPreferences.Editor gEd = appCtx.getSharedPreferences(
+                    GamePackages.PREFS, Context.MODE_PRIVATE).edit();
             boolean fChanged = false;
             boolean aChanged = false;
             boolean rChanged = false;
+            boolean xChanged = false;
+            boolean gChanged = false;
             for (Map.Entry<String, String> e : map.entrySet()) {
                 String k = e.getKey();
                 String v = e.getValue();
@@ -338,6 +372,25 @@ public class SettingsStore {
                         rEd.putString(key, v);
                         rChanged = true;
                     }
+                } else if (k.startsWith(PREFIX_SCENE_EXC)) {
+                    // v508: 场景例外也是字符串；break / follow
+                    // 都是有效存值（follow 是用户对默认突破应用
+                    // 的明确改判，不能丢）。
+                    String key = k.substring(
+                            PREFIX_SCENE_EXC.length());
+                    if (!key.isEmpty()
+                            && SceneExceptions.parse(v) >= 0) {
+                        xEd.putString(key, v);
+                        xChanged = true;
+                    }
+                } else if (k.startsWith(PREFIX_GAME)) {
+                    // v511: 线上游戏名单，值恒为 "1"。
+                    String key = k.substring(
+                            PREFIX_GAME.length());
+                    if (!key.isEmpty()) {
+                        gEd.putString(key, "1");
+                        gChanged = true;
+                    }
                 }
             }
             if (fChanged) {
@@ -349,7 +402,14 @@ public class SettingsStore {
             if (rChanged) {
                 rEd.commit();
             }
-            return fChanged || aChanged || rChanged;
+            if (xChanged) {
+                xEd.commit();
+            }
+            if (gChanged) {
+                gEd.commit();
+            }
+            return fChanged || aChanged || rChanged || xChanged
+                    || gChanged;
         } catch (Throwable ignored) {
             // 恢复失败不影响主流程。
             return false;

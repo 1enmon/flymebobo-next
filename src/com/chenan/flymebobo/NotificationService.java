@@ -90,6 +90,16 @@ public class NotificationService extends NotificationListenerService {
      * once, no restart needed. */
     public static final String ACTION_APP_RULES =
             "com.chenan.flymebobo.APP_RULES";
+    /** v508: APP -> SystemUI, a scene exception changed in
+     * SceneExceptionsActivity. Extra: "sceneexc_flat" (the whole
+     * stored set, flattened). SystemUI applies it at once. */
+    public static final String ACTION_SCENE_EXC =
+            "com.chenan.flymebobo.SCENE_EXC";
+    /** v511: APP -> SystemUI, the online game list was
+     * refreshed. Extra: "gamelist_flat" (the whole list,
+     * flattened). SystemUI applies it at once. */
+    public static final String ACTION_GAME_LIST =
+            "com.chenan.flymebobo.GAME_LIST";
     /** v438/v439: APP -> SystemUI, an appearance slider moved.
      * Extra: "dockPct" (int 0-85) — the anchor Y of the whole unit
      * (capsules + fan, they are one piece). SystemUI re-reads the
@@ -1477,6 +1487,12 @@ public class NotificationService extends NotificationListenerService {
                 @Override
                 public void run() {
                     try {
+                        // v511: ride the same periodic wake as
+                        // the version check to refresh the
+                        // online game list (internally throttled
+                        // to one attempt per 6h).
+                        GamePackages.fetchIfStale(
+                                NotificationService.this);
                         UpdateChecker.checkAsync(
                                 NotificationService.this,
                                 new UpdateChecker.Callback() {

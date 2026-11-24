@@ -315,6 +315,8 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
         filter.addAction(NotificationService.ACTION_APP_RULES);
+        filter.addAction(NotificationService.ACTION_SCENE_EXC);
+        filter.addAction(NotificationService.ACTION_GAME_LIST);
         filter.addAction(NotificationService.ACTION_APPEARANCE);
         // v471: 打开 App 时恢复本地备份后推一次全量重载（见
         // ACTION_RELOAD_SETTINGS）。
@@ -572,17 +574,84 @@ public class XposedEntry extends XposedModule {
                 // context dance as ACTION_RELOAD_SETTINGS below).
                 if (NotificationService.ACTION_APP_RULES.equals(
                         intent.getAction())) {
+                    // v2.4.3: rules ride the intent (flattened
+                    // extra) — the live channel; load() from
+                    // cross-process prefs can serve a stale map.
+                    String flatRules = intent.getStringExtra(
+                            AppRules.EXTRA_RULES);
+                    if (flatRules != null) {
+                        AppRules.applyFlat(flatRules);
+                    } else {
+                        try {
+                            Class<?> at = Class.forName(
+                                    "android.app.ActivityThread");
+                            java.lang.reflect.Method m =
+                                    at.getMethod("currentApplication");
+                            android.app.Application app =
+                                    (android.app.Application) m.invoke(null);
+                            if (app != null) {
+                                AppRules.load(app);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    // v507: a rule change also evicts capsules
+                    // already on screen for NEVER-ruled apps.
                     try {
-                        Class<?> at = Class.forName(
-                                "android.app.ActivityThread");
-                        java.lang.reflect.Method m =
-                                at.getMethod("currentApplication");
-                        android.app.Application app =
-                                (android.app.Application) m.invoke(null);
-                        if (app != null) {
-                            AppRules.load(app);
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.evictNeverRuled();
                         }
                     } catch (Throwable ignored) {
+                    }
+                    return;
+                }
+                // v508: a scene exception changed — same live
+                // channel as app rules (flattened extra wins,
+                // prefs load is only the fallback).
+                if (NotificationService.ACTION_SCENE_EXC.equals(
+                        intent.getAction())) {
+                    String flatExc = intent.getStringExtra(
+                            SceneExceptions.EXTRA_EXC);
+                    if (flatExc != null) {
+                        SceneExceptions.applyFlat(flatExc);
+                    } else {
+                        try {
+                            Class<?> at = Class.forName(
+                                    "android.app.ActivityThread");
+                            java.lang.reflect.Method m =
+                                    at.getMethod("currentApplication");
+                            android.app.Application app =
+                                    (android.app.Application) m.invoke(null);
+                            if (app != null) {
+                                SceneExceptions.load(app);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    return;
+                }
+                // v511: the online game list was refreshed —
+                // same live channel as scene exceptions.
+                if (NotificationService.ACTION_GAME_LIST.equals(
+                        intent.getAction())) {
+                    String flatGames = intent.getStringExtra(
+                            GamePackages.EXTRA_LIST);
+                    if (flatGames != null) {
+                        GamePackages.applyFlat(flatGames);
+                    } else {
+                        try {
+                            Class<?> at = Class.forName(
+                                    "android.app.ActivityThread");
+                            java.lang.reflect.Method m =
+                                    at.getMethod("currentApplication");
+                            android.app.Application app =
+                                    (android.app.Application) m.invoke(null);
+                            if (app != null) {
+                                GamePackages.load(app);
+                            }
+                        } catch (Throwable ignored) {
+                        }
                     }
                     return;
                 }
@@ -599,6 +668,8 @@ public class XposedEntry extends XposedModule {
                             FeatureFlags.load(app);
                             Appearance.load(app);
                             AppRules.load(app);
+                            SceneExceptions.load(app);
+                            GamePackages.load(app);
                             BubbleWindow bw = BubbleWindow.getInstance();
                             if (bw != null) {
                                 bw.onAppearanceChanged();
@@ -1009,6 +1080,10 @@ public class XposedEntry extends XposedModule {
         Appearance.load(app);
         // v504 (2.4.2): read the APP's per-app bubble rules.
         AppRules.load(app);
+        // v508: read the APP's scene exception list.
+        SceneExceptions.load(app);
+        // v511: read the APP's cached online game list.
+        GamePackages.load(app);
         log(4, TAG, "flymebobo bubble window ready");
     }
 

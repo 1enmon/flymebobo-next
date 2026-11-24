@@ -378,6 +378,7 @@ public class MainActivity extends Activity {
         // 界面先预览后落地）。和功能卡同款式，点一下进
         // AppRulesActivity 给每个应用单独设规则。
         list.addView(buildAppRulesCard());
+        list.addView(buildSceneExceptionsCard());
 
         // ---- Appearance (v439): 一个滑块，扇子位置 ----
         // 胶囊和扇子是一个整体（用户 “他们是一个整体” / “胶囊始终
@@ -607,6 +608,9 @@ public class MainActivity extends Activity {
      * prompt (dialog + notification) — never a silent install.
      * manual=true (the "检查更新" link) also toasts the result. */
     private void checkForUpdate(final boolean manual) {
+        // v511: opening the app also refreshes the online game
+        // list when stale (throttled inside fetchIfStale).
+        GamePackages.fetchIfStale(this);
         if (manual) {
             Toast.makeText(this, "正在检查更新…",
                     Toast.LENGTH_SHORT).show();
@@ -893,6 +897,70 @@ public class MainActivity extends Activity {
                 try {
                     startActivity(new Intent(MainActivity.this,
                             AppRulesActivity.class));
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        return card;
+    }
+
+    /** v508: 场景例外入口卡。和应用规则卡同款式，橙色（预览
+     * 定版），点一下进 SceneExceptionsActivity。 */
+    private View buildSceneExceptionsCard() {
+        final int color = Color.rgb(249, 115, 22);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(rounded(color, dp(22)));
+        card.setPadding(dp(12), dp(12), dp(12), dp(12));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(10);
+        card.setLayoutParams(clp);
+
+        TextView icon = new TextView(this);
+        icon.setText("景");
+        icon.setTextSize(15);
+        icon.setTextColor(color);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(36), dp(36)));
+        card.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("场景例外");
+        title.setTextSize(15);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("游戏/视频时这些应用照常弹");
+        sub.setTextSize(12);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        card.addView(texts);
+
+        TextView chev = new TextView(this);
+        chev.setText("›");
+        chev.setTextSize(24);
+        chev.setTextColor(Color.WHITE);
+        card.addView(chev);
+
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new Intent(MainActivity.this,
+                            SceneExceptionsActivity.class));
                 } catch (Throwable ignored) {
                 }
             }

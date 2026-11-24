@@ -61,6 +61,101 @@ public class ImmersiveSceneGuard {
             "com.baidu.video"               // 百度视频
     ));
 
+    /** v510: known game packages — the fallback for games that
+     * declare no appCategory and whose top Activity carries no
+     * engine keyword. 金铲铲之战 (com.tencent.jkchess) is the
+     * proven case (user 2026-11-24): landscape, foreground for
+     * long stretches, yet detect() never fired — no category,
+     * no engine hint in its Activity names. */
+    // v511: 与线上 games.txt 同步的内置名单 (断网兜底;
+    // 线上名单由 GamePackages 叠加, 以线上为准持续扩充)。
+    private static final Set<String> GAME_PACKAGES = new HashSet<>(Arrays.asList(
+            // 腾讯
+            "com.tencent.tmgp.sgame",       // 王者荣耀
+            "com.tencent.tmgp.pubgmhd",     // 和平精英
+            "com.tencent.jkchess",          // 金铲铲之战
+            "com.tencent.lolm",             // 英雄联盟手游
+            "com.tencent.tmgp.cf",          // 穿越火线手游
+            "com.tencent.tmgp.cod",         // 使命召唤手游
+            "com.tencent.tmgp.dfm",         // 三角洲行动
+            "com.tencent.tmgp.codev",       // 无畏契约: 源能行动
+            "com.tencent.mf.uam",           // 暗区突围
+            "com.tencent.tmgp.dnf",         // 地下城与勇士: 起源
+            "com.tencent.KiHan",            // 火影忍者
+            "com.tencent.tmgp.speedmobile", // QQ飞车
+            "com.tencent.tmgp.wuxia",       // 天涯明月刀
+            "com.tencent.letsgo",           // 元梦之星
+            "com.tencent.toaa",             // 黎明觉醒: 生机
+            "com.tencent.tmgp.dragonraja",  // 龙族幻想
+            "com.tencent.tmgp.hotta",       // 幻塔 (应用宝渠道)
+            // 网易
+            "com.netease.onmyoji",          // 阴阳师
+            "com.netease.dwrg",             // 第五人格
+            "com.netease.nshm",             // 逆水寒
+            "com.netease.wyclx",            // 一梦江湖
+            "com.netease.my",               // 梦幻西游
+            "com.netease.party",            // 蛋仔派对
+            "com.netease.sky",              // 光·遇
+            "com.bilibili.sky",             // 光·遇 (B站版)
+            "com.netease.moba",             // 决战! 平安京
+            "com.netease.hyxd",             // 荒野行动
+            "com.netease.mrzh",             // 明日之后
+            "com.netease.pes",              // 实况足球
+            "com.netease.harrypotter",      // 哈利波特: 魔法觉醒
+            "com.netease.aceracer",         // 王牌竞速
+            "com.netease.race",             // 巅峰极速
+            "com.netease.x19",              // 我的世界
+            // 米哈游
+            "com.miHoYo.Yuanshen",          // 原神
+            "com.miHoYo.bh3",               // 崩坏3
+            "com.miHoYo.hkrpg",             // 崩坏: 星穹铁道
+            "com.miHoYo.Nap",               // 绝区零
+            // 其他国内
+            "com.kurogame.haru.hero",       // 战双帕弥什
+            "com.kurogame.wutheringwaves",  // 鸣潮
+            "com.hypergryph.arknights",     // 明日方舟
+            "com.bilibili.azurlane",        // 碧蓝航线
+            "com.bilibili.fatego",          // 命运-冠位指定
+            "com.bilibili.deadcells.mobile",// 重生细胞
+            "com.shenlan.m.reverse1999",    // 重返未来: 1999
+            "com.pwrd.hotta.laohu",         // 幻塔 (官服)
+            "com.aligames.sgzzlb",          // 三国志·战略版
+            "com.aligames.sgzzlb.aligames", // 三国志·战略版 (渠道)
+            "com.sofunny.chicken",          // 香肠派对
+            "com.sofunny.chickendinnerfirst", // 香肠派对 (先行服)
+            "com.minitech.miniworld",       // 迷你世界
+            "com.ztgame.bob",               // 球球大作战
+            // 国际版
+            "com.levelinfinite.sgameGlobal",
+            "com.tencent.ig",
+            "com.miHoYo.GenshinImpact",
+            "com.HoYoverse.hkrpgoversea",
+            "com.HoYoverse.Nap",
+            "com.kurogame.wutheringwaves.global",
+            "com.bluepoch.m.en.reverse1999",
+            "com.levelinfinite.hotta.gp",
+            "com.zloong.eu.dr.gp",
+            "com.netease.racerna",
+            "com.riotgames.league.wildrift",
+            "com.riotgames.league.teamfighttactics",
+            "com.activision.callofduty.shooter",
+            "com.epicgames.fortnite",
+            "com.supercell.clashofclans",
+            "com.supercell.brawlstars",
+            "com.blizzard.wtcg.hearthstone",
+            "com.blizzard.diablo.immortal",
+            "com.innersloth.spacemafia",
+            "com.chucklefish.stardewvalley",
+            "com.playdigious.deadcells",
+            "com.mojang.minecraftpe",
+            "com.roblox.client",
+            "com.mobile.legends",
+            "com.dts.freefireth",
+            "com.dts.freefiremax",
+            "com.ea.gp.fifamobile",
+            "com.konami.pesam"
+    ));
+
     /** 前台 Activity 类名里出现这些片段, 按视频播放场景处理 (名单外的播放器靠它兜底)。 */
     private static final String[] VIDEO_ACTIVITY_HINTS = {
             "Player", "Video", "Cinema", "Playback", "FullScreen", "Landscape"
@@ -78,6 +173,10 @@ public class ImmersiveSceneGuard {
     private boolean running;
     private boolean immersive;
     private String lastTopPkg;
+    // v510 diagnostics (see detect() / refresh()).
+    private String lastTopCls;
+    private int lastCat = -999;
+    private String peekedPkg;
 
     private final Runnable pollTask = new Runnable() {
         @Override
@@ -132,10 +231,50 @@ public class ImmersiveSceneGuard {
         return immersive;
     }
 
+    // v507: exit debounce — leaving a scene must be stable for
+    // this long before it counts. Games flicker out of
+    // "immersive" for portrait ads / menus / cutscenes; without
+    // the hold, every flicker restored the windows and flushed
+    // the queue, and frequently-reposting music notifications
+    // visibly re-popped each time (user 2026-11-24). Entering
+    // a scene stays instant — hiding fast is the point.
+    private static final long EXIT_HOLD_MS = 1600L;
+    private long exitCandidateSince = 0L;
+
     /** 立即重算一次场景, 变化时回调 Listener。可在主线程安全调用。 */
     public synchronized void refresh() {
         boolean now = detect();
-        if (now == immersive) return;
+        // v510 diagnostics: one line per foreground-app change,
+        // so the next detection miss is self-explaining.
+        if (lastTopPkg != null && !lastTopPkg.equals(peekedPkg)) {
+            peekedPkg = lastTopPkg;
+            try {
+                FileLog.i("ScenePeek pkg=" + lastTopPkg
+                        + " cls=" + lastTopCls
+                        + " cat=" + lastCat
+                        + " land=" + (app.getResources()
+                                .getConfiguration().orientation
+                                == Configuration.ORIENTATION_LANDSCAPE));
+            } catch (Throwable ignored) {
+            }
+        }
+        if (now == immersive) {
+            exitCandidateSince = 0L;
+            return;
+        }
+        if (immersive && !now) {
+            long t = android.os.SystemClock.uptimeMillis();
+            if (exitCandidateSince == 0L) {
+                exitCandidateSince = t;
+                return;
+            }
+            if (t - exitCandidateSince < EXIT_HOLD_MS) {
+                return;
+            }
+            exitCandidateSince = 0L;
+        } else {
+            exitCandidateSince = 0L;
+        }
         immersive = now;
         if (DEBUG_LOG) {
             try {
@@ -167,12 +306,31 @@ public class ImmersiveSceneGuard {
             if (pkg == null || NEVER_SUPPRESS.contains(pkg)) return false;
             if (isLauncher(pkg)) return false;
 
+            // v510 diagnostics: stash what the guard sees, so a
+            // detection miss explains itself in the log (see the
+            // ScenePeek line in refresh()).
+            String cls = top.getClassName();
+            lastTopCls = cls;
+            int cat = -999;
+            try {
+                ApplicationInfo ai = app.getPackageManager()
+                        .getApplicationInfo(pkg, 0);
+                if (ai != null) cat = ai.category;
+            } catch (Throwable ignored) {
+            }
+            lastCat = cat;
+
             // 3a) 游戏: 系统分类, 最可靠
-            if (isGameApp(pkg)) return true;
+            if (cat == ApplicationInfo.CATEGORY_GAME) return true;
+
+            // 3a1) v510: 游戏包名兜底 (没声明分类的游戏)
+            if (GAME_PACKAGES.contains(pkg)) return true;
+
+            // 3a1b) v511: 线上游戏名单 (games.txt, 见 GamePackages)
+            if (GamePackages.contains(pkg)) return true;
 
             // 3a2) 游戏: 引擎 Activity 特征兜底 (没声明分类的游戏靠这行:
             // Unity/Unreal/Cocos/Godot 的主 Activity 类名都带这些特征)
-            String cls = top.getClassName();
             if (cls != null && (cls.contains("UnityPlayer") || cls.contains("GameActivity") || cls.contains("Cocos2dx") || cls.contains("Unreal") || cls.contains("Godot"))) return true;
 
             // 3b) 视频: 名单命中

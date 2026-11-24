@@ -18,6 +18,7 @@
             </intent-filter>
         </activity>
         <activity android:exported="false" android:name=".AppRulesActivity" android:label="应用规则"/>
+        <activity android:exported="false" android:name=".SceneExceptionsActivity" android:label="场景例外"/>
         <service android:exported="true" android:name=".NotificationService" android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService"/>

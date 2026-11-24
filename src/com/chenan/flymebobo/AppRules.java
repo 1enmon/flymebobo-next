@@ -52,6 +52,45 @@ public final class AppRules {
         return v == null ? DEFAULT : v;
     }
 
+    /** Intent extra carrying the whole rule set flattened as
+     * "pkg=value;pkg=value" — the live channel to SystemUI.
+     * Cross-process SharedPreferences reads can serve a stale
+     * cached map (proven on 1.x v209), so rules ride the
+     * broadcast itself, like 1.x v210. */
+    public static final String EXTRA_RULES = "apprules_flat";
+
+    public static String flatten(Map<String, Integer> rules) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Integer> e : rules.entrySet()) {
+            String v = value(e.getValue());
+            if (v == null) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(';');
+            }
+            sb.append(e.getKey()).append('=').append(v);
+        }
+        return sb.toString();
+    }
+
+    public static void applyFlat(String flat) {
+        Map<String, Integer> m = new HashMap<>();
+        if (flat != null) {
+            for (String part : flat.split(";")) {
+                int eq = part.indexOf('=');
+                if (eq <= 0) {
+                    continue;
+                }
+                int mode = parse(part.substring(eq + 1).trim());
+                if (mode != DEFAULT) {
+                    m.put(part.substring(0, eq).trim(), mode);
+                }
+            }
+        }
+        rules = m;
+    }
+
     public static int parse(String v) {
         if (VALUE_NEVER.equals(v)) {
             return NEVER;
@@ -157,13 +196,22 @@ public final class AppRules {
             } else {
                 ed.putString(pkg, v);
             }
-            ed.apply();
+            // commit, not apply: SystemUI reads the rules back
+            // from the prefs file, so the write must be on disk
+            // before the broadcast below arrives.
+            ed.commit();
         } catch (Throwable ignored) {
         }
         SettingsStore.saveAll(appCtx);
         try {
-            appCtx.sendBroadcast(new Intent(
-                    NotificationService.ACTION_APP_RULES));
+            // Explicit package — an implicit broadcast to
+            // SystemUI gets dropped (same lesson as 1.x v208).
+            Intent intent = new Intent(
+                    NotificationService.ACTION_APP_RULES);
+            intent.setPackage("com.android.systemui");
+            intent.putExtra(EXTRA_RULES,
+                    flatten(readAll(appCtx)));
+            appCtx.sendBroadcast(intent);
         } catch (Throwable ignored) {
         }
     }

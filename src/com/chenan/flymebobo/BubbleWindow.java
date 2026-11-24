@@ -653,7 +653,17 @@ public class BubbleWindow {
                     if (immersive) {
                         BubbleWindow.this.root.setVisibility(View.GONE);
                         BubbleWindow.this.pileRoot.setVisibility(View.GONE);
+                        // v507: the music LED is its own window —
+                        // the scene hide above never covered it,
+                        // so it kept glowing through games.
+                        BubbleWindow.this.hideMusicLed();
                     } else {
+                        // v507: restore the LED with the windows
+                        // if music is still playing.
+                        if (BubbleWindow.this.musicLedPlaying
+                                && FeatureFlags.musicLed) {
+                            BubbleWindow.this.showMusicLed();
+                        }
                         try {
                             android.os.PowerManager pm2 = (android.os.PowerManager)
                                     BubbleWindow.this.app.getSystemService(
@@ -793,7 +803,7 @@ public class BubbleWindow {
             hideMusicLed();
             return;
         }
-        if (musicLedPlaying) {
+        if (musicLedPlaying && !sceneSuppressed) {
             showMusicLed();
         }
     }
@@ -900,8 +910,21 @@ public class BubbleWindow {
         // dedup below on purpose — a queued notification must not
         // consume its dedup slot, or the flush would be swallowed.
         // Calls are exempt: a ringing call still shows in-game.
+        // v508: scene exceptions break through — an excepted
+        // app's notification skips the queue and pops normally.
+        // v509 diagnostics: every in-scene decision is logged —
+        // v508 shipped this gate silent and a "no effect" report
+        // could not be settled from the log.
         if (!data.isCall && this.sceneGuard != null
                 && this.sceneGuard.isSuppressed()) {
+            FileLog.i("SceneGate pkg=" + data.pkg
+                    + " excepted=" + SceneExceptions.isExcepted(data.pkg)
+                    + " stored=" + SceneExceptions.flatten(
+                            SceneExceptions.snapshot()));
+        }
+        if (!data.isCall && this.sceneGuard != null
+                && this.sceneGuard.isSuppressed()
+                && !SceneExceptions.isExcepted(data.pkg)) {
             synchronized (this.suppressedQueue) {
                 java.util.Iterator<NotifData> qit =
                         this.suppressedQueue.iterator();
@@ -973,6 +996,9 @@ public class BubbleWindow {
         synchronized (this.suppressedQueue) {
             copy = new java.util.ArrayList<>(this.suppressedQueue);
             this.suppressedQueue.clear();
+        }
+        if (!copy.isEmpty()) {
+            FileLog.i("SceneFlush n=" + copy.size());
         }
         for (NotifData d : copy) {
             onNotification(d);
@@ -1966,14 +1992,16 @@ public class BubbleWindow {
         // into the docked fan via the same addPileIconForGroup
         // path a manual dock uses, so tapping the fan expands it
         // back out unchanged. Calls are exempt (same as the scene
-        // guard); music / download / live / navi keep their own
-        // capsule behaviour and are exempt from EDGE.
+        // guard); download / live / navi keep their own capsule
+        // behaviour and are exempt from EDGE. v507: music is NO
+        // LONGER exempt from EDGE (user 2026-11-24: music apps
+        // must obey the rule like everything else).
         if (data != null && !data.isCall && data.pkg != null) {
             int rule = AppRules.modeFor(data.pkg);
             if (rule == AppRules.NEVER) {
                 return;
             }
-            if (rule == AppRules.EDGE && !data.isMusic
+            if (rule == AppRules.EDGE
                     && !data.isDownload && !data.isLive
                     && !data.isNavi && !data.isBus) {
                 NotifGroup stored = dockedGroups.get(data.pkg);
@@ -2798,6 +2826,51 @@ public class BubbleWindow {
         if (changed) {
             rebuildDock();
         }
+    }
+
+    /** v507: app rules just reloaded — evict capsules that are
+     * already on screen for apps now ruled NEVER. The popCapsule
+     * gate only stops NEW pops; a music capsule already showing
+     * kept refreshing in place via MediaSession updates and
+     * looked like the rule did nothing (user 2026-11-24). Also
+     * clears the app's docked (pile) group. Calls are exempt,
+     * matching every other rule path. */
+    public void evictNeverRuled() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    boolean changed = false;
+                    for (int i = groups.size() - 1; i >= 0; i--) {
+                        NotifGroup g = groups.get(i);
+                        if (g != null && g.pkg != null
+                                && !CALL_PKG.equals(g.pkg)
+                                && AppRules.modeFor(g.pkg)
+                                        == AppRules.NEVER) {
+                            groups.remove(i);
+                            changed = true;
+                        }
+                    }
+                    java.util.Iterator<String> it =
+                            dockedGroups.keySet().iterator();
+                    while (it.hasNext()) {
+                        String pkg = it.next();
+                        if (pkg != null
+                                && AppRules.modeFor(pkg)
+                                        == AppRules.NEVER) {
+                            it.remove();
+                            if (pile != null) {
+                                pile.removeIconForPkg(pkg);
+                            }
+                        }
+                    }
+                    if (changed) {
+                        rebuildDock();
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
     }
 
     /** v443: 模拟来电开关（APP「来电」卡片里）——弹一颗假来电
@@ -5598,7 +5671,8 @@ public class BubbleWindow {
             if (playing != musicLedPlaying) {
                 musicLedPlaying = playing;
                 if (playing) {
-                    if (FeatureFlags.musicLed) {
+                    // v507: not while a game/video scene is up.
+                    if (FeatureFlags.musicLed && !sceneSuppressed) {
                         showMusicLed();
                     }
                 } else {
