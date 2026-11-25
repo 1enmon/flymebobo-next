@@ -1,22 +1,31 @@
 package com.chenan.flymebobo;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
@@ -31,9 +40,11 @@ import java.net.URL;
  * latest release of 1enmon/flymebobo-next, parses the versionCode
  * out of the APK asset name (flymebobo-2.4-v430.apk -> 430) and
  * compares it with the installed versionCode. A newer release
- * shows a dialog (in the app) and/or a system notification that
- * opens the release download page in the browser — the user taps
- * to download and installs it himself, as before.
+ * shows a dialog (in the app) and/or a system notification.
+ * v521: the download happens in-app (progress dialog, no
+ * browser round-trip) and hands the finished APK to the system
+ * installer; the final install tap is still the user's, as
+ * before — Android never allows a silent install here.
  *
  * Built fresh for 2.0 (not copied from 1.x). Only framework APIs:
  * HttpURLConnection + org.json, no new dependencies.
@@ -231,13 +242,15 @@ public final class UpdateChecker {
                         NotificationManager.IMPORTANCE_DEFAULT);
                 nm.createNotificationChannel(ch);
             }
-            Intent view = new Intent(Intent.ACTION_VIEW,
-                    Uri.parse(info.downloadUrl));
+            // v521: tapping the notification opens the app; its
+            // on-open check shows the download dialog in-app.
+            Intent view = new Intent(ctx, MainActivity.class);
+            view.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             PendingIntent pi = PendingIntent.getActivity(ctx, 0, view,
                     PendingIntent.FLAG_UPDATE_CURRENT
                             | PendingIntent.FLAG_IMMUTABLE);
             String text = "v" + info.latestName + "（版本 "
-                    + info.latestCode + "）已发布，点此前往下载";
+                    + info.latestCode + "）已发布，点此打开应用更新";
             Notification.Builder b;
             if (Build.VERSION.SDK_INT >= 26) {
                 b = new Notification.Builder(ctx, CHANNEL_ID);
@@ -255,8 +268,8 @@ public final class UpdateChecker {
     }
 
     /** The in-app prompt: a dialog with the new version and a
-     * "去下载" button that opens the release page. No install —
-     * the user downloads and installs it himself. Call on the
+     * "下载更新" button that downloads inside the app (v521) and
+     * then hands the APK to the system installer. Call on the
      * main thread (checkAsync's callback already is). */
     public static void showUpdateDialog(final Activity activity,
             final UpdateInfo info) {
@@ -266,30 +279,243 @@ public final class UpdateChecker {
         }
         try {
             String msg = "煤气泡 v" + info.latestName + "（版本 "
-                    + info.latestCode + "）已发布，是否前往下载？";
-            new android.app.AlertDialog.Builder(activity)
+                    + info.latestCode + "）已发布，是否下载更新？";
+            new AlertDialog.Builder(activity)
                     .setTitle("发现新版本")
                     .setMessage(msg)
-                    .setPositiveButton("去下载",
-                            new android.content.DialogInterface
-                                    .OnClickListener() {
+                    .setPositiveButton("下载更新",
+                            new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(
-                                        android.content.DialogInterface d,
+                                        DialogInterface d,
                                         int which) {
-                                    try {
-                                        activity.startActivity(
-                                                new Intent(
-                                                        Intent.ACTION_VIEW,
-                                                        Uri.parse(info
-                                                                .downloadUrl)));
-                                    } catch (Throwable ignored) {
-                                    }
+                                    downloadAndInstall(activity,
+                                            info);
                                 }
                             })
                     .setNegativeButton("稍后", null)
                     .show();
         } catch (Throwable ignored) {
+        }
+    }
+
+    // ---- in-app download + install (v521) ----
+
+    private static volatile boolean sDownloadCancelled;
+
+    private static File updateDir(Context ctx) {
+        File dir = new File(ctx.getCacheDir(), "update");
+        if (!dir.exists()) {
+            dir.mkdirs();
+        }
+        return dir;
+    }
+
+    private static File updateFile(Context ctx, UpdateInfo info) {
+        return new File(updateDir(ctx),
+                "flymebobo-update-" + info.latestCode + ".apk");
+    }
+
+    /** Download the release APK inside the app, with a progress
+     * dialog, then hand it to the system installer. A finished
+     * download for the same versionCode is reused, so the
+     * grant-install-permission round trip never re-downloads. */
+    public static void downloadAndInstall(final Activity activity,
+            final UpdateInfo info) {
+        if (activity == null || info == null
+                || info.downloadUrl == null) {
+            return;
+        }
+        final File target = updateFile(activity, info);
+        if (target.isFile() && target.length() > 0) {
+            installDownloaded(activity, target);
+            return;
+        }
+
+        final Handler main = new Handler(Looper.getMainLooper());
+        int pad = (int) (20 * activity.getResources()
+                .getDisplayMetrics().density);
+        LinearLayout box = new LinearLayout(activity);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(pad, pad / 2, pad, 0);
+        final TextView status = new TextView(activity);
+        status.setText("正在下载 " + target.getName());
+        final ProgressBar bar = new ProgressBar(activity, null,
+                android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setIndeterminate(true);
+        LinearLayout.LayoutParams barLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        barLp.topMargin = pad / 2;
+        box.addView(status);
+        box.addView(bar, barLp);
+
+        sDownloadCancelled = false;
+        final AlertDialog dlg = new AlertDialog.Builder(activity)
+                .setTitle("下载更新")
+                .setView(box)
+                .setNegativeButton("取消",
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface d,
+                                    int which) {
+                                sDownloadCancelled = true;
+                            }
+                        })
+                .setCancelable(false)
+                .create();
+        dlg.show();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                File tmp = new File(target.getParentFile(),
+                        target.getName() + ".part");
+                try {
+                    URL url = new URL(info.downloadUrl);
+                    conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestProperty("User-Agent",
+                            "flymebobo");
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(30000);
+                    int code = conn.getResponseCode();
+                    if (code != HttpURLConnection.HTTP_OK) {
+                        throw new java.io.IOException(
+                                "HTTP " + code);
+                    }
+                    final long total = conn.getContentLength();
+                    InputStream in = conn.getInputStream();
+                    FileOutputStream out =
+                            new FileOutputStream(tmp);
+                    byte[] buf = new byte[16384];
+                    long done = 0;
+                    int n;
+                    while ((n = in.read(buf)) >= 0) {
+                        if (sDownloadCancelled) {
+                            try { out.close(); } catch (Throwable ignored) {}
+                            try { in.close(); } catch (Throwable ignored) {}
+                            tmp.delete();
+                            main.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    try { dlg.dismiss(); } catch (Throwable ignored) {}
+                                }
+                            });
+                            return;
+                        }
+                        out.write(buf, 0, n);
+                        done += n;
+                        final long doneF = done;
+                        main.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (total > 0) {
+                                    bar.setIndeterminate(false);
+                                    bar.setProgress((int) (doneF
+                                            * 100 / total));
+                                    status.setText("正在下载 "
+                                            + (doneF / 1024)
+                                            + " KB / "
+                                            + (total / 1024)
+                                            + " KB");
+                                } else {
+                                    status.setText("正在下载 "
+                                            + (doneF / 1024)
+                                            + " KB");
+                                }
+                            }
+                        });
+                    }
+                    out.close();
+                    in.close();
+                    if (!tmp.renameTo(target)) {
+                        throw new java.io.IOException(
+                                "保存安装包失败");
+                    }
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            try { dlg.dismiss(); } catch (Throwable ignored) {}
+                            installDownloaded(activity, target);
+                        }
+                    });
+                } catch (final Throwable t) {
+                    tmp.delete();
+                    main.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            try { dlg.dismiss(); } catch (Throwable ignored) {}
+                            new AlertDialog.Builder(activity)
+                                    .setTitle("下载失败")
+                                    .setMessage(String.valueOf(
+                                            t.getMessage()))
+                                    .setPositiveButton("知道了", null)
+                                    .show();
+                        }
+                    });
+                } finally {
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+        }).start();
+    }
+
+    /** Hand a downloaded APK to the system installer. On
+     * Android 8+ the user must first allow this app to install
+     * packages; the downloaded file stays cached, so after
+     * granting they just tap 检查更新 again to continue. */
+    private static void installDownloaded(final Activity activity,
+            final File file) {
+        if (Build.VERSION.SDK_INT >= 26
+                && !activity.getPackageManager()
+                        .canRequestPackageInstalls()) {
+            new AlertDialog.Builder(activity)
+                    .setTitle("需要安装权限")
+                    .setMessage("系统要求先允许煤气泡安装应用。"
+                            + "开启后回来再点一次「检查更新」即可继续"
+                            + "安装（安装包已下载好，不用重下）。")
+                    .setPositiveButton("去设置",
+                            new DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(
+                                        DialogInterface d,
+                                        int which) {
+                                    try {
+                                        Intent it = new Intent(
+                                                Settings
+                                                .ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                Uri.parse("package:"
+                                                        + activity
+                                                        .getPackageName()));
+                                        activity.startActivity(it);
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
+                            })
+                    .setNegativeButton("取消", null)
+                    .show();
+            return;
+        }
+        try {
+            Uri uri = new Uri.Builder()
+                    .scheme("content")
+                    .authority(ApkFileProvider.AUTHORITY)
+                    .appendPath(file.getName())
+                    .build();
+            Intent it = new Intent(Intent.ACTION_VIEW);
+            it.setDataAndType(uri,
+                    "application/vnd.android.package-archive");
+            it.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_ACTIVITY_NEW_TASK);
+            activity.startActivity(it);
+        } catch (Throwable t) {
+            Toast.makeText(activity, "打开安装界面失败",
+                    Toast.LENGTH_LONG).show();
         }
     }
 }
