@@ -159,6 +159,33 @@ public class BubbleWindow {
     private int footTotalTime;
     private double footTraveled;
     private String footLastShownText;
+    /** v512: last time a live footnavi info arrived via
+     * onNaviInfo (Label.setText parse or notifyNaviInfo). While
+     * fresh (< 10s) the v322 computed capsule stands down, so the
+     * two sources never fight over the "navi:footnavi" key. */
+    private volatile long footLabelFreshAt;
+    /** v514: navi keys that have received a live instruction
+     * this session. The Amap notification re-posts all trip
+     * long and lands ~100ms after each live push; without this
+     * guard its static placeholder (title = the nav-type label,
+     * status 1) overwrites the live instruction every time
+     * (user log 2026-11-25 14:41–14:42). Cleared on navi end. */
+    private final java.util.Set<String> liveNaviKeys =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<
+                            String, Boolean>());
+    /** v516: navi keys the user manually unpinned (collapsed
+     * the auto-pinned card) during this navigation session.
+     * While a key is in here, popCapsule must not auto-pin the
+     * navi card open again — the live updates keep coming for
+     * the whole trip and would otherwise re-expand it within a
+     * second, fighting the user's explicit collapse. Cleared
+     * on navi end (onNaviEnd), so the next trip auto-pins
+     * afresh. */
+    private final java.util.Set<String> naviUserUnpinned =
+            java.util.Collections.newSetFromMap(
+                    new java.util.concurrent.ConcurrentHashMap<
+                            String, Boolean>());
     private boolean footLocListening;
     private LocationManager footLocMgr;
     private LocationListener footLocListener;
@@ -1017,6 +1044,15 @@ public class BubbleWindow {
     // stays out while navigating; removed on NAVI_END.
     public void onNaviInfo(final String bizType, final String title,
             final String content, final int status, final int icon) {
+        onNaviInfo(bizType, title, content, status, icon, 0);
+    }
+
+    /** v515: totalMeters = the route's total length when the
+     * sender knows it (foot label stream: walked + remaining);
+     * 0 = unknown (ride, notification placeholder). */
+    public void onNaviInfo(final String bizType, final String title,
+            final String content, final int status, final int icon,
+            final int totalMeters) {
         if (bizType == null || app == null) {
             return;
         }
@@ -1026,11 +1062,16 @@ public class BubbleWindow {
         try {
             FileLog.i("NaviInfo bizType=" + bizType + " title=" + title
                     + " content=" + content + " status=" + status
-                    + " icon=" + icon);
+                    + " icon=" + icon + " total=" + totalMeters);
         } catch (Throwable ignored) {
         }
         if (!"footnavi".equals(bizType) && !"ridenavi".equals(bizType)) {
             return;
+        }
+        // v512: live foot info flowing — the v322 computed capsule
+        // stands down while this is fresh.
+        if ("footnavi".equals(bizType)) {
+            footLabelFreshAt = System.currentTimeMillis();
         }
         final String key = "navi:" + bizType;
         // v317: the engine puts the live instruction in title OR
@@ -1041,6 +1082,22 @@ public class BubbleWindow {
         // "从当前位置出发") keeps both fields as-is.
         String navLabel = "footnavi".equals(bizType) ? "步行导航"
                 : "骑行导航";
+        // v514: placeholder pushes (the Amap notification's
+        // static start text, title == navLabel / status 1) pop
+        // the capsule at nav start, but once a live instruction
+        // has arrived for this key they must never overwrite it.
+        boolean placeholderPush = status == 1
+                || navLabel.equals(title);
+        if (!placeholderPush) {
+            liveNaviKeys.add(key);
+        } else if (liveNaviKeys.contains(key)) {
+            try {
+                FileLog.i("NaviInfo placeholder suppressed key="
+                        + key);
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
         boolean hasTitle = title != null && !title.isEmpty();
         boolean hasContent = content != null && !content.isEmpty();
         String dispTitle;
@@ -1064,6 +1121,16 @@ public class BubbleWindow {
                 null, null);
         data.isLive = true;
         data.isNavi = true;
+        // v513: the v322 foot route total (when the route hook
+        // delivered one) feeds the navi card's progress bar.
+        // v515: the sender's own total (foot label stream:
+        // walked + remaining) wins — the v322 total is silent
+        // in most real walks.
+        if (totalMeters > 0) {
+            data.naviTotalMeters = totalMeters;
+        } else if ("footnavi".equals(bizType) && footTotalLen > 0) {
+            data.naviTotalMeters = (int) Math.round(footTotalLen);
+        }
         onNotification(data);
     }
 
@@ -1073,6 +1140,13 @@ public class BubbleWindow {
             return;
         }
         final String key = "navi:" + bizType;
+        liveNaviKeys.remove(key);
+        // v516: the manual-unpin memory is per navigation
+        // session — the next trip auto-pins the card afresh.
+        // (removeNotifByKey below already drops the key from
+        // pinnedCardKeys and the group's pin table, so no
+        // pinned-card state survives the removal either.)
+        naviUserUnpinned.remove(key);
         handler.post(new Runnable() {
             @Override
             public void run() {
@@ -1484,6 +1558,7 @@ public class BubbleWindow {
         footTotalTime = totalTime;
         footTraveled = 0;
         footLastShownText = null;
+        footLabelFreshAt = 0;
         startFootLocation();
         // Show the capsule immediately with the total, so the user
         // sees it even before the first fix arrives.
@@ -1616,6 +1691,11 @@ public class BubbleWindow {
     // Only pops when the text changed, so a dismissed capsule
     // does not re-pop on every fix.
     private void updateFootCapsule() {
+        // v512: label-driven foot info is flowing — do not
+        // overwrite its capsule with the computed projection.
+        if (System.currentTimeMillis() - footLabelFreshAt < 10_000L) {
+            return;
+        }
         if (footPtsLat == null || footPtsLat.length < 2) {
             return;
         }
@@ -1644,6 +1724,8 @@ public class BubbleWindow {
                 System.currentTimeMillis(), null, null);
         data.isLive = true;
         data.isNavi = true;
+        // v513: route total for the navi card's progress bar.
+        data.naviTotalMeters = (int) Math.round(footTotalLen);
         onNotification(data);
     }
 
@@ -1750,6 +1832,7 @@ public class BubbleWindow {
         footTotalTime = 0;
         footTraveled = 0;
         footLastShownText = null;
+        footLabelFreshAt = 0;
         stopFootLocation();
         handler.post(new Runnable() {
             @Override
@@ -2427,6 +2510,19 @@ public class BubbleWindow {
             if (firstPin) {
                 group.pinned = true;
                 group.pinnedAt = System.currentTimeMillis();
+            }
+            // v516: foot/ride navi also auto-pins AS A CARD — the
+            // capsule pops already expanded (the dashboard card)
+            // and stays expanded for the whole trip, refreshed in
+            // place by the live updates. Same bookkeeping a user
+            // pinning the open card produces: the key joins
+            // pinnedCardKeys, and rebuildDock's Phase 1 renders
+            // pinned-card keys expanded. Bus keeps the v311
+            // stay-out pin only. A key the user manually
+            // unpinned this session (naviUserUnpinned) is NOT
+            // re-pinned as a card by the live updates.
+            if (data.isNavi && !naviUserUnpinned.contains(data.key)) {
+                pinnedCardKeys.add(data.key);
             }
         }
         // Is any group expanded (before adding this notification)?
@@ -3771,7 +3867,6 @@ public class BubbleWindow {
             int bigPinnedH = 0;
             if (isCardPinned) {
                 cap.setCardExpanded(true);
-                bindCardCapsule(cap, d, group);
                 // v180: pinned card goes to FIRST position (row 0).
                 // v236: a pinned card that is not the open card
                 // sits at its pin-order row (y), not forced to 0.
@@ -3780,8 +3875,22 @@ public class BubbleWindow {
                 // and is reset to 0 when it closes; a pinned
                 // card left behind would be squeezed to a 44dp
                 // strip (video 01:27).
+                // v517: measure BEFORE bindCardCapsule — the
+                // open-card path (Phase 2) takes its height from
+                // a scratch view measured before any card wiring
+                // (showCardAfterRipple), so the pin badges are
+                // still hidden while measuring. Measuring after
+                // bindCardCapsule measured with the pins shown.
                 pinnedCardH = cap.cardHeightForWidth(
                         dp(CapsuleView.cardWidthDp(app)));
+                bindCardCapsule(cap, d, group);
+                // v517: evidence line for the auto-pinned navi
+                // card missing its icon (user report 2026-11-25):
+                // which surface ended up VISIBLE for this frame.
+                if (d.isNavi) {
+                    FileLog.i("NaviCard phase1 key=" + d.key
+                            + " " + cap.naviCardDiag());
+                }
                 cap.setLayoutParams(cardLp(y, pinnedCardH, cap));
                 // Left edge starts after the retracted slivers.
                 cap.setTranslationX(dp(CARD_LEFT_OFFSET_DP));
@@ -7320,6 +7429,15 @@ public class BubbleWindow {
             group.pinnedAtByKey.remove(d.key);
             // v236: unpinning a pinned card reverts it to a capsule.
             pinnedCardKeys.remove(d.key);
+            // v516: a MANUAL unpin of a navi card is remembered
+            // for the rest of this navigation session, so the
+            // live updates do not auto-pin the card open again
+            // (togglePin is only invoked by user gestures, so
+            // this records user intent only). Cleared on navi
+            // end in onNaviEnd.
+            if (d.isNavi) {
+                naviUserUnpinned.add(d.key);
+            }
             // v238: a pinned card that is unpinned stays in
             // place — it does NOT jump back to its group
             // position. Remember its pin time so Phase 1 keeps

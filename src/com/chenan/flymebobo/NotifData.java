@@ -51,6 +51,12 @@ public class NotifData {
      * stop / remaining stations). Auto-pins on pop like a nav
      * capsule. Set by BubbleWindow.onBusInfo after construction. */
     public boolean isBus;
+    /** v513: total route length in meters for the navi card's
+     * progress bar. Set by BubbleWindow.onNaviInfo from the
+     * v322 foot route total (footTotalLen) when one is known;
+     * 0 = unknown (ride broadcasts carry no total) and the
+     * card hides the bar. */
+    public int naviTotalMeters;
     /** The notification's tap action (contentIntent), for the card's
      * 全屏打开 / 小窗打开 buttons (v143). Passed across processes as a
      * Parcelable extra in the ACTION_NOTIFY broadcast, like 1.x

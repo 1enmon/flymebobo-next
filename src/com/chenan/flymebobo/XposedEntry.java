@@ -799,8 +799,13 @@ public class XposedEntry extends XposedModule {
                     String nContent = intent.getStringExtra("content");
                     int nStatus = intent.getIntExtra("status", 0);
                     int nIcon = intent.getIntExtra("icon", 0);
+                    // v515: foot label stream's route total
+                    // (walked + remaining); absent (0) for ride.
+                    int nTotal = intent.getIntExtra(
+                            "totalMeters", 0);
                     BubbleWindow.getInstance().onNaviInfo(
-                            bizType, nTitle, nContent, nStatus, nIcon);
+                            bizType, nTitle, nContent, nStatus,
+                            nIcon, nTotal);
                     return;
                 }
                 // v312: Amap hook install status — FileLog it so

@@ -64,6 +64,7 @@ public final class AmapNaviHook {
             installNotifyChangeHook();
             installFootRouteHook();
             installRouteJumpHook();
+            installFootLabelHook();
         } catch (Throwable th) {
             Log.i(TAG, "AmapNaviHook install failed: " + th);
             sendHookStatus("failed", String.valueOf(th));
@@ -690,6 +691,668 @@ public final class AmapNaviHook {
         } catch (Throwable ignored) {
             return null;
         }
+    }
+
+    // v512: foot navigation from AJX Label.setText clusters.
+    //
+    // The 2026-11-24 real walk (NaviLog v0.3, 3.5 km to Wuliudian)
+    // proved foot has NO structured channel: FOOT-PRESENTER /
+    // FOOT-PAGE / notifyNaviInfo / PerfOpt never fired once, while
+    // Label.setText carried everything — turn direction, countdown
+    // distance, remaining km/minutes, ETA, walked meters, elapsed
+    // time. So parse the label stream here and broadcast it as the
+    // same ACTION_NAVI_INFO (bizType=footnavi) the ride path uses;
+    // BubbleWindow.onNaviInfo needs no change.
+    //
+    // What the nav screen looks like as labels (from that log):
+    //   instruction cluster, re-rendered with fresh instances:
+    //     "直行" + "128" + "米"        -> 直行 128米
+    //     "128" + "米后" + "直行"      -> 128米后直行
+    //     "18" + "米后" + "向左前方直行" + "进入" + "建新东路"
+    //     "沿" + "建新东路" + "直行" + "188" + "米"
+    //   stats, stable instances, updated in place:
+    //     number + "公里" (remaining), number + "分钟" (remaining),
+    //     "到达" + "HH:MM" (ETA clock time),
+    //     "已行走(m)" + meters, "已用时" + "MM:SS" (ticks each second),
+    //     "大卡" + kcal.
+    //
+    // Two traps the log shows: (1) the unit label ("米"/"米后")
+    // only fires setText when it CHANGES, so a countdown number can
+    // arrive with no unit beside it — and the instruction labels
+    // are re-created with fresh instances on every render, so no
+    // instance can be trusted to keep a role. The distance is
+    // therefore set the moment a number is followed by 米/米后,
+    // and bare numbers in between are accepted only while they
+    // keep counting down (smaller than the last, drop <= 30 m);
+    // the stats labels ARE stable instances, so their roles
+    // (remainKm / remainMin) are learned once from the
+    // number-followed-by-unit pair and stick. (2) The route-details
+    // page shows the same direction+distance words ("50米后左转进
+    // 入三钢二路") BEFORE navigation starts, so the parser stays
+    // gated off until the nav screen proves itself: the
+    // "已行走(m)"/"已用时" captions, or the elapsed "MM:SS"
+    // ticking up by exactly 1s (the ETA "HH:MM" moves by minutes,
+    // never +1s). The gate expires 5s after the last heartbeat,
+    // so leaving the screen stops the capsule updates; NAVI_END
+    // (notification removal) still drops the capsule itself.
+    private static final String[] FOOT_DIRS = {
+        "向左前方直行", "向右前方直行", "向左前方", "向右前方",
+        "直行", "左转", "右转", "向左转", "向右转",
+        "掉头", "上过街天桥", "下过街天桥", "靠左", "靠右",
+    };
+    private boolean footLabelInstalled;
+    private boolean footNavActive;
+    private long footNavLastTick;
+    private int footElapsedLastSec = -1;
+    private long footElapsedSeenAt;
+    private long footEtaPendingUntil;
+    // instance id -> role ("remainKm" / "remainMin"), learned
+    // from number-immediately-followed-by-unit pairs. Only the
+    // stats labels keep a stable instance; the instruction labels
+    // are re-created every render, so they carry no role.
+    private final java.util.HashMap<Integer, String> footLabelRoles =
+            new java.util.HashMap<>();
+    // Recent label events while the nav screen is up (pruned to
+    // the last 1200 ms on every event).
+    private static final class FootLabelEvent {
+        final long time;
+        final String text;
+        FootLabelEvent(long t, String s) { time = t; text = s; }
+    }
+    private final java.util.ArrayList<FootLabelEvent> footLabelWindow =
+            new java.util.ArrayList<>();
+    private String footDir;
+    private String footDistNum;
+    private long footDistAt;
+    private String footDistUnit = "米";
+    private String footRoadPrefix;
+    private String footRoadName;
+    private long footRoadAt;
+    private String footArriveName;
+    private long footArriveAt;
+    private String footRemainKm;
+    private String footRemainMin;
+    private String footEta;
+    // v515: walked-meters capture for the route total. The
+    // stats labels are value-first: the walked value fires
+    // right BEFORE its "已行走(m)" caption, so the caption
+    // learns the value's (stable) instance from the most
+    // recent number token; later tokens from that instance
+    // keep footWalkedMeters fresh.
+    private int footWalkedMeters = -1;
+    private int footWalkedId = -1;
+    private int footLastNumId = -1;
+    private String footLastNumText;
+    private long footLastNumAt;
+    // v515: most recent clock token (ETA look-back — in the
+    // stats cluster the ETA clock fires BEFORE its "到达"
+    // caption, so the v512 forward arm usually misses it) and
+    // the elapsed-timer instance (learned from its +1s ticks;
+    // its clocks must never be taken for the ETA).
+    private String footLastClockText;
+    private int footLastClockId = -1;
+    private long footLastClockAt;
+    private int footElapsedId = -1;
+    // v520: ETA trust bookkeeping. Cold start bit hard here:
+    // on the first navigation after the app process starts,
+    // the elapsed timer is not learned yet, so the 到达
+    // look-back grabbed the timer's own reading ("00:01") as
+    // the ETA — and footEta then stuck for the whole trip
+    // (user 2026-11-25: first nav ETA wrong until cancel +
+    // restart, second nav fine because the learning survived
+    // in-process). So: remember which instance the accepted
+    // ETA came from (learning the timer retro-invalidates a
+    // capture from it), keep a candidate record of the most
+    // recent clock from a not-known-elapsed instance (the
+    // look-back reads this, not the raw last clock, which is
+    // usually the timer's latest tick), remember the timer's
+    // last reading (an "ETA" equal to it is the timer), and
+    // validate every capture against now + remaining (see
+    // footEtaPlausible) — an ETA that stops agreeing is
+    // dropped and re-captured instead of sticking.
+    private int footEtaId = -1;
+    private String footEtaCandText;
+    private int footEtaCandId = -1;
+    private long footEtaCandAt;
+    private String footElapsedText;
+    private String footLastBroadcast;
+    private long footLastBroadcastAt;
+
+    private void installFootLabelHook() {
+        if (footLabelInstalled) {
+            return;
+        }
+        try {
+            Class<?> label = Class.forName(
+                    "com.autonavi.minimap.ajx3.widget.view.Label",
+                    false, app.getClassLoader());
+            int n = 0;
+            for (final Method m : label.getDeclaredMethods()) {
+                if (!"setText".equals(m.getName())) {
+                    continue;
+                }
+                try {
+                    bridge.hook(m).intercept(
+                            new XposedInterface.Hooker() {
+                        @Override
+                        public Object intercept(
+                                XposedInterface.Chain chain)
+                                throws Throwable {
+                            Object r = chain.proceed();
+                            try {
+                                Object arg = chain.getArgs() == null
+                                        || chain.getArgs().isEmpty()
+                                        ? null : chain.getArg(0);
+                                if (arg != null) {
+                                    int id = System
+                                            .identityHashCode(
+                                                    chain
+                                                    .getThisObject());
+                                    onFootLabel(id,
+                                            String.valueOf(arg));
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                            return r;
+                        }
+                    });
+                    n++;
+                } catch (Throwable ignored) {
+                }
+            }
+            footLabelInstalled = true;
+            Log.i(TAG, "AmapNaviHook: foot Label.setText hooks=" + n);
+        } catch (Throwable th) {
+            Log.i(TAG, "AmapNaviHook foot label hook failed: " + th);
+        }
+    }
+
+    private static String stripLabelTags(String s) {
+        if (s == null) {
+            return "";
+        }
+        if (s.indexOf('<') >= 0) {
+            s = s.replaceAll("<[^>]*>", "");
+        }
+        if (s.indexOf('&') >= 0) {
+            s = s.replace("&apos;", "'").replace("&nbsp;", " ")
+                    .replace("&amp;", "&").replace("&lt;", "<")
+                    .replace("&gt;", ">");
+        }
+        return s.trim();
+    }
+
+    private static boolean isFootNumber(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        int dots = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '.') {
+                if (++dots > 1) {
+                    return false;
+                }
+            } else if (c < '0' || c > '9') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isFootClock(String s) {
+        if (s == null || s.length() != 5 || s.charAt(2) != ':') {
+            return false;
+        }
+        return isFootNumber(s.substring(0, 2))
+                && isFootNumber(s.substring(3, 5));
+    }
+
+    private static int footClockSeconds(String s) {
+        try {
+            return Integer.parseInt(s.substring(0, 2)) * 60
+                    + Integer.parseInt(s.substring(3, 5));
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    /** v520: is this clock text a believable ETA? With the
+     * remaining minutes known, the ETA must agree with
+     * now + remaining (±5 min, circular on the day); without
+     * them it must at least be a wall-clock time in the next
+     * 12 hours and not the elapsed timer's current reading.
+     * A cold-start capture of the timer ("00:01" at 16:04
+     * with 57 min left, real ETA ~17:01) fails both forms. */
+    private boolean footEtaPlausible(String eta) {
+        int etaMin = footClockSeconds(eta);
+        if (etaMin < 0) {
+            return false;
+        }
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        int nowMin = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60
+                + cal.get(java.util.Calendar.MINUTE);
+        if (footRemainMin != null) {
+            try {
+                int remain = Integer.parseInt(footRemainMin.trim());
+                int d = Math.abs(etaMin - (nowMin + remain)) % 1440;
+                if (d > 720) {
+                    d = 1440 - d;
+                }
+                return d <= 5;
+            } catch (Throwable ignored) {
+            }
+        }
+        int delta = (etaMin - nowMin) % 1440;
+        if (delta < 0) {
+            delta += 1440;
+        }
+        return delta <= 720 && !eta.equals(footElapsedText);
+    }
+
+    private static String footDirOf(String s) {
+        for (String d : FOOT_DIRS) {
+            if (d.equals(s)) {
+                return d;
+            }
+        }
+        return null;
+    }
+
+    private void onFootLabel(int id, String raw) {
+        String text = stripLabelTags(raw);
+        if (text.isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        // Nav-screen captions: prove navigation is up.
+        if ("已行走(m)".equals(text) || "已用时".equals(text)
+                || "大卡".equals(text)) {
+            footNavActive = true;
+            footNavLastTick = now;
+            // v515: learn the walked value's instance from the
+            // number token that just preceded this caption
+            // (value-first layout). A unit pairing later can
+            // still reclaim the instance (see below) if this
+            // guess was wrong.
+            if ("已行走(m)".equals(text) && footWalkedId < 0
+                    && footLastNumText != null
+                    && now - footLastNumAt <= 400
+                    && footLastNumText.indexOf('.') < 0
+                    && footLabelRoles.get(footLastNumId) == null) {
+                try {
+                    footWalkedMeters = Integer.parseInt(
+                            footLastNumText);
+                    footWalkedId = footLastNumId;
+                    footLabelRoles.put(footWalkedId, "walked");
+                } catch (Throwable ignored) {
+                }
+            }
+            return;
+        }
+        // "到达" marks the NEXT clock token as the ETA, not the
+        // elapsed timer; a following name token is the destination.
+        if ("到达".equals(text)) {
+            footEtaPendingUntil = now + 800;
+            footArrivePendingUntil = now + 800;
+            // v515: in the stats cluster the ETA clock fires
+            // BEFORE this caption (value-first, like 已行走),
+            // so take the most recent clock token as the ETA —
+            // unless it came from the elapsed-timer instance.
+            // v520: read the candidate record (most recent
+            // clock from a not-known-elapsed instance) instead
+            // of the raw last clock — the timer ticks every
+            // second, so the raw last clock is almost always
+            // the timer — and validate it before trusting it.
+            if (footEtaCandText != null
+                    && now - footEtaCandAt <= 1500
+                    && footEtaPlausible(footEtaCandText)) {
+                footEta = footEtaCandText;
+                footEtaId = footEtaCandId;
+            }
+            return;
+        }
+        if (text.startsWith("到达") && text.length() > 2) {
+            // Single label "到达 五里店(地铁站)". Only trusted
+            // while the nav screen is already proven active —
+            // the route-details page shows the same label before
+            // navigation starts and must not activate the parser.
+            if (footNavActive) {
+                footArriveName = text.substring(2).trim();
+                footArriveAt = now;
+                footNavLastTick = now;
+            }
+            return;
+        }
+        // Clock tokens: ETA (after 到达) or the elapsed timer.
+        if (isFootClock(text)) {
+            // v515: remember every clock for the 到达 look-back.
+            footLastClockText = text;
+            footLastClockId = id;
+            footLastClockAt = now;
+            // v520: candidate record — the most recent clock
+            // from an instance not (yet) known to be the
+            // elapsed timer. If this instance is later learned
+            // to BE the timer, the record is wiped there.
+            if (id != footElapsedId) {
+                footEtaCandText = text;
+                footEtaCandId = id;
+                footEtaCandAt = now;
+            }
+            if (now < footEtaPendingUntil) {
+                footEtaPendingUntil = 0;
+                // v520: validate before trusting — on a cold
+                // start the clock right after 到达 can be the
+                // elapsed timer ("00:01"), not the ETA. A
+                // rejected token falls through so the tick
+                // learner below can still learn from it.
+                if (footEtaPlausible(text)) {
+                    footEta = text;
+                    footEtaId = id;
+                    // The clock after 到达 is the ETA, not a name.
+                    footArrivePendingUntil = 0;
+                    return;
+                }
+            }
+            int sec = footClockSeconds(text);
+            if (sec >= 0) {
+                if (footElapsedLastSec >= 0
+                        && sec == footElapsedLastSec + 1
+                        && now - footElapsedSeenAt <= 3000) {
+                    // Elapsed timer ticking +1s: nav is live.
+                    footNavActive = true;
+                    footNavLastTick = now;
+                    // v515: this instance is the elapsed timer;
+                    // its clocks are never the ETA.
+                    footElapsedId = id;
+                    footElapsedText = text;
+                    // v520: retro-invalidate — an ETA (or ETA
+                    // candidate) sourced from this instance
+                    // was the timer all along.
+                    if (footEtaId == id) {
+                        footEta = null;
+                        footEtaId = -1;
+                    }
+                    if (footEtaCandId == id) {
+                        footEtaCandText = null;
+                        footEtaCandId = -1;
+                    }
+                    // v520: value-level guard — an accepted
+                    // ETA string identical to the timer's
+                    // current reading is the timer itself.
+                    if (footEta != null && footEta.equals(text)) {
+                        footEta = null;
+                        footEtaId = -1;
+                    }
+                }
+                if (sec != footElapsedLastSec) {
+                    footElapsedLastSec = sec;
+                    footElapsedSeenAt = now;
+                }
+            }
+            // v520: continuous correction — once the timer
+            // instance is known, a clock from any other
+            // instance on the live nav screen is the ETA
+            // clock; take it (validated), so a wrong early
+            // ETA gets overwritten instead of sticking for
+            // the whole trip.
+            if (footNavActive && footElapsedId >= 0
+                    && id != footElapsedId
+                    && footEtaPlausible(text)) {
+                footEta = text;
+                footEtaId = id;
+            }
+            return;
+        }
+        // v515: record the latest number token even before the
+        // gate opens — on the first stats render the walked
+        // value fires BEFORE its 已行走(m) caption (which is
+        // what opens the gate), and the caption's look-back
+        // learn needs it. Recording alone changes nothing;
+        // the caption (nav-screen only) is the learn trigger.
+        if (isFootNumber(text)) {
+            footLastNumId = id;
+            footLastNumText = text;
+            footLastNumAt = now;
+        }
+        if (!footNavActive) {
+            return;
+        }
+        if (now - footNavLastTick > 5000) {
+            footNavActive = false;
+            footLabelRoles.clear();
+            footLabelWindow.clear();
+            // v520: a stale ETA must not leak into the next
+            // trip; it is re-captured on the nav screen.
+            footEta = null;
+            footEtaId = -1;
+            return;
+        }
+        // Learn roles from number-immediately-followed-by-unit
+        // pairs, and keep the slots the capsule is built from.
+        // The unit fires only when it changes, so a paired unit
+        // also sets the distance right away; the number's instance
+        // role only matters for the stats labels (stable) and for
+        // bare countdown numbers (see below).
+        String prevText = null;
+        long prevAt = 0;
+        int wsize = footLabelWindow.size();
+        if (wsize > 0) {
+            FootLabelEvent prev = footLabelWindow.get(wsize - 1);
+            prevText = prev.text;
+            prevAt = prev.time;
+        }
+        if (prevText != null && isFootNumber(prevText)
+                && now - prevAt <= 400) {
+            if ("米".equals(text) || "米后".equals(text)) {
+                footDistNum = prevText;
+                footDistAt = now;
+                footDistUnit = text;
+                // v515: a unit pairing proves this instance is
+                // the distance, not the walked value — undo a
+                // wrong walked learn.
+                if (footWalkedId == footPendingNumId) {
+                    footWalkedId = -1;
+                    footWalkedMeters = -1;
+                    footLabelRoles.remove(footPendingNumId);
+                }
+            } else if ("公里".equals(text)) {
+                footLabelRoles.put(footPendingNumId, "remainKm");
+                footRemainKm = prevText;
+                if (footWalkedId == footPendingNumId) {
+                    footWalkedId = -1;
+                    footWalkedMeters = -1;
+                }
+            } else if ("分钟".equals(text)) {
+                footLabelRoles.put(footPendingNumId, "remainMin");
+                footRemainMin = prevText;
+                if (footWalkedId == footPendingNumId) {
+                    footWalkedId = -1;
+                    footWalkedMeters = -1;
+                }
+            }
+        }
+        if (isFootNumber(text)) {
+            footPendingNumId = id;
+            // v515: most-recent number token (the 已行走(m)
+            // caption learns its value's instance from this).
+            footLastNumId = id;
+            footLastNumText = text;
+            footLastNumAt = now;
+            String role = footLabelRoles.get(id);
+            if ("walked".equals(role)) {
+                try {
+                    footWalkedMeters = Integer.parseInt(text);
+                } catch (Throwable ignored) {
+                }
+            } else if ("remainKm".equals(role)) {
+                footRemainKm = text;
+            } else if ("remainMin".equals(role)) {
+                footRemainMin = text;
+            } else if (role == null && text.indexOf('.') < 0
+                    && footDistNum != null
+                    && now - footDistAt <= 5000) {
+                // Bare countdown number: the unit label only
+                // fires on change, so between full clusters the
+                // distance arrives alone (128 -> 121 -> 118 ...).
+                // The instruction instances are fresh every
+                // render, so roles cannot identify it — accept it
+                // only when it continues the countdown (smaller
+                // than the last distance, drop <= 30 m/s). Walked
+                // meters rise instead, and kcal drops far more.
+                try {
+                    int v = Integer.parseInt(text);
+                    int last = Integer.parseInt(footDistNum);
+                    if (v >= 0 && v < last && last - v <= 30) {
+                        footDistNum = text;
+                        footDistAt = now;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } else {
+            String dir = footDirOf(text);
+            if (dir != null) {
+                footDir = dir;
+            } else if ("进入".equals(text) || "沿".equals(text)) {
+                footRoadPrefix = text;
+                footRoadAt = now;
+                footRoadName = null;
+            } else if (now < footArrivePendingUntil
+                    && !"米".equals(text) && !"米后".equals(text)
+                    && !"公里".equals(text) && !"分钟".equals(text)) {
+                // Name token right after a bare "到达".
+                footArriveName = text;
+                footArriveAt = now;
+                footArrivePendingUntil = 0;
+            } else if (footRoadPrefix != null
+                    && footRoadName == null
+                    && now - footRoadAt <= 800
+                    && !"米".equals(text) && !"米后".equals(text)
+                    && !"公里".equals(text) && !"分钟".equals(text)
+                    && !"到达".equals(text)) {
+                // Token right after 进入/沿 is the road name.
+                footRoadName = text;
+            }
+        }
+        // Keep a short window for the arrival branch ("到达" was
+        // handled above, so this is only the name that follows
+        // a road prefix or a bare arrival name).
+        footLabelWindow.add(new FootLabelEvent(now, text));
+        while (!footLabelWindow.isEmpty()
+                && now - footLabelWindow.get(0).time > 1200) {
+            footLabelWindow.remove(0);
+        }
+        if (footLabelWindow.size() > 64) {
+            footLabelWindow.remove(0);
+        }
+        tryFootLabelBroadcast(now);
+    }
+
+    private int footPendingNumId;
+    private long footArrivePendingUntil;
+
+    private void tryFootLabelBroadcast(long now) {
+        // Slots are long-lived while the nav screen is up: the
+        // direction / road only change when the maneuver changes
+        // (which re-renders the whole cluster), and the distance
+        // counts down ~1/s — so only the distance needs a
+        // freshness bound. Arrival wins over the instruction:
+        // it means the trip is over.
+        String title = null;
+        if (footArriveName != null
+                && now - footArriveAt <= 5000) {
+            title = "到达" + footArriveName;
+        } else if (footDir != null && footDistNum != null
+                && now - footDistAt <= 5000) {
+            String roadPart = "";
+            boolean roadFresh = footRoadName != null
+                    && now - footRoadAt <= 30_000;
+            if (roadFresh) {
+                roadPart = footRoadPrefix + footRoadName;
+            }
+            // The unit form ("米" vs "米后") only changes with
+            // the maneuver, so the last-known form stays valid
+            // until a new unit token arrives.
+            if ("米后".equals(footDistUnit)) {
+                title = footDistNum + "米后" + footDir + roadPart;
+            } else if ("沿".equals(footRoadPrefix) && roadFresh) {
+                title = "沿" + footRoadName + footDir
+                        + footDistNum + "米";
+            } else {
+                title = footDir + footDistNum + "米" + roadPart;
+            }
+        }
+        if (title == null) {
+            return;
+        }
+        // v520: an accepted ETA must STAY plausible. As the
+        // remaining minutes land (and then tick down with the
+        // clock), a bogus cold-start capture stops agreeing
+        // with now + remaining and is dropped here, so the
+        // bottom line loses the wrong segment within seconds
+        // instead of keeping it all trip; the genuine ETA
+        // clock re-fills it via the capture paths above. A
+        // real ETA stays plausible all trip: now + remaining
+        // is anchored to it by construction.
+        if (footEta != null && !footEtaPlausible(footEta)) {
+            footEta = null;
+            footEtaId = -1;
+        }
+        String content;
+        if (footRemainKm != null && footRemainMin != null) {
+            content = "剩" + footRemainKm + "公里 · "
+                    + footRemainMin + "分钟";
+        } else if (footRemainKm != null) {
+            content = "剩" + footRemainKm + "公里";
+        } else if (footRemainMin != null) {
+            content = "剩" + footRemainMin + "分钟";
+        } else {
+            content = "步行导航";
+        }
+        if (footEta != null) {
+            content = content + " · 预计" + footEta + "到达";
+        }
+        // v515: route total from the label stream itself —
+        // walked + remaining (the v322 route hook's total is
+        // usually silent). Both inputs required; the total
+        // rides the broadcast so BubbleWindow can fill the
+        // navi card's progress bar.
+        int totalMeters = -1;
+        if (footWalkedMeters >= 0 && footRemainKm != null) {
+            try {
+                totalMeters = footWalkedMeters
+                        + (int) Math.round(Double.parseDouble(
+                                footRemainKm) * 1000.0);
+            } catch (Throwable ignored) {
+            }
+        }
+        String shown = title + "|" + content + "|" + totalMeters;
+        if (shown.equals(footLastBroadcast)) {
+            return;
+        }
+        if (now - footLastBroadcastAt < 700) {
+            return;
+        }
+        footLastBroadcast = shown;
+        footLastBroadcastAt = now;
+        footNavLastTick = now;
+        try {
+            Intent intent =
+                    new Intent(NotificationService.ACTION_NAVI_INFO);
+            intent.putExtra("bizType", "footnavi");
+            intent.putExtra("title", title);
+            intent.putExtra("content", content);
+            intent.putExtra("status", 0);
+            intent.putExtra("icon", 0);
+            if (totalMeters > 0) {
+                intent.putExtra("totalMeters", totalMeters);
+            }
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+        Log.i(TAG, "FootLabel \"" + title + "\" / \"" + content
+                + "\" total=" + totalMeters);
     }
 
     private void onNaviInfo(JSONObject json) {

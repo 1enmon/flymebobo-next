@@ -141,6 +141,10 @@ public class CapsuleView extends FrameLayout {
         // setScale 缩着画。
         if (data != null && !data.isMusic && cardExpanded
                 && cardScale() < 1.0f) {
+            // v516: navi cards lay out at the generic card
+            // width too (v515's navi-only natural width is
+            // reverted — card size follows the one global
+            // adjustment, user 2026-11-25).
             int naturalW = dp(Appearance.cardWidthDp);
             int wSpec = android.view.View.MeasureSpec.makeMeasureSpec(
                     naturalW, android.view.View.MeasureSpec.EXACTLY);
@@ -182,6 +186,10 @@ public class CapsuleView extends FrameLayout {
             return Math.round(
                     Appearance.musicCardWidthDp * musicCardScale());
         }
+        // v516: navi cards take the generic card width like
+        // every other non-music card (the v515 navi-only
+        // 340dp width is reverted — one global card-size
+        // adjustment for all cards, user 2026-11-25).
         return Math.round(Appearance.cardWidthDp * cardScale());
     }
 
@@ -520,6 +528,24 @@ public class CapsuleView extends FrameLayout {
             + "-8.77s-2.99-7.86-7-8.77z";
     // v171: music card control icons (Material, 24x24 viewport).
     private static final String ICON_PLAY = "M8 5v14l11-7z";
+    // v513: navi maneuver icon for the capsule icon disc and
+    // the navi card; the Material "flag" replaces it on
+    // arrival. v518: AMap-style per-maneuver stroke glyphs
+    // (naviGlyphPath / renderNaviGlyph below) — one dedicated
+    // shape per maneuver instead of a single rotated arrow.
+    private static final String ICON_FLAG =
+            "M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z";
+    private static final int NAVI_BLUE = Color.rgb(2, 119, 189);
+    // v518: maneuver types for the AMap-style glyph set.
+    private static final int NAVI_STRAIGHT = 0;
+    private static final int NAVI_FRONT_LEFT = 1;
+    private static final int NAVI_LEFT = 2;
+    private static final int NAVI_REAR_LEFT = 3;
+    private static final int NAVI_UTURN = 4;
+    private static final int NAVI_FRONT_RIGHT = 5;
+    private static final int NAVI_RIGHT = 6;
+    private static final int NAVI_REAR_RIGHT = 7;
+    private static final int NAVI_ROUNDABOUT = 8;
     private static final String ICON_PAUSE =
             "M6 19h4V5H6v14zm8-14v14h4V5h-4z";
     private static final String ICON_PREV =
@@ -769,6 +795,44 @@ public class CapsuleView extends FrameLayout {
     private boolean dragStartLogged;
     /** True while the window is widened for the current drag. */
     private boolean dragWindowOpen;
+    // v513: navi capsule/card redesign (wei-approved preview).
+    // The capsule keeps the standard pill shape; only the
+    // content changes: the icon spot becomes a white disc with
+    // a Material navigation arrow rotated to the maneuver,
+    // line 1 is "动作 · 路名", line 2 "距离 · 还剩", <50m to
+    // the turn warms the tint and arrival turns it green. The
+    // expanded card is a dedicated naviCardView (music-card
+    // precedent): big arrow disc + big distance + route
+    // progress + remaining line. All display state below is
+    // re-parsed from data.title/data.text on every bind — the
+    // Amap broadcasts carry strings only, no new protocol.
+    private LinearLayout naviCardView;
+    private FrameLayout naviDisc;
+    private GradientDrawable naviDiscBg;
+    private ImageView naviCardArrow;
+    private TextView naviCardDist;
+    private TextView naviCardAction;
+    private android.widget.FrameLayout naviProgBox;
+    private android.view.View naviProgFill;
+    private GradientDrawable naviProgFillBg;
+    private GradientDrawable naviProgTrackBg;
+    private TextView naviCardBottom;
+    // v517: the navi card's own pin icon (musicPin precedent) —
+    // bindCardCapsule wired setOnCardPinToggle for navi too,
+    // but naviCardView never had a button to tap.
+    private FrameLayout naviPin;
+    private GradientDrawable naviIconBg;
+    private boolean naviParsed;
+    private boolean naviArrived;
+    private String naviAction;
+    private String naviRoadPart;
+    private int naviDistMeters = -1;
+    private String naviDistSeg;
+    private int naviRemainMeters = -1;
+    private String naviRemainSeg;
+    private String naviRemainMinSeg;
+    private String naviEtaSeg;
+    private int naviManeuver = NAVI_STRAIGHT;
 
     public CapsuleView(Context context) {
         super(context);
@@ -1054,9 +1118,12 @@ public class CapsuleView extends FrameLayout {
         // v164: hidden by default (user 2026-11-19 "平时不显示") —
         // the pin icon only appears once the card is pinned.
         cardPin.setVisibility(GONE);
+        // v517: pin placeholder shrunk (user 2026-11-25) — the
+        // frame goes 24dp -> 22dp and the left margin 8dp -> 4dp;
+        // the balloon bitmap itself stays 20dp.
         LinearLayout.LayoutParams cardPinLp =
-                new LinearLayout.LayoutParams(dp(24), dp(24));
-        cardPinLp.leftMargin = dp(8);
+                new LinearLayout.LayoutParams(dp(22), dp(22));
+        cardPinLp.leftMargin = dp(4);
         cardHead.addView(cardPin, cardPinLp);
         cardPin.setOnClickListener(new OnClickListener() {
             @Override
@@ -1121,6 +1188,139 @@ public class CapsuleView extends FrameLayout {
         cardView.addView(cardCabinet, cabLp);
         cardCabinet.setVisibility(GONE);
 
+
+        // v513: navi card — dedicated dashboard card for navi
+        // capsules (music-card precedent), shown instead of the
+        // generic card when the notification is navi. Big arrow
+        // disc + big distance, "动作 · 路名", route progress
+        // bar, bottom remaining line. Shares cardBg (same tint
+        // as the pill, like the music card).
+        naviCardView = new LinearLayout(context);
+        naviCardView.setOrientation(LinearLayout.VERTICAL);
+        naviCardView.setPadding(dp(14), dp(14), dp(14), dp(14));
+        naviCardView.setBackground(cardBg);
+        naviCardView.setVisibility(GONE);
+        // v516: same LayoutParams as the generic cardView
+        // (MATCH_PARENT x MATCH_PARENT) — the navi card fills
+        // the capsule exactly like a generic card; its size
+        // comes from cardWidthDp() / cardHeightForWidth, i.e.
+        // the global card width + card scale (the v515 fixed
+        // 340dp natural width is reverted, user 2026-11-25).
+        addView(naviCardView, new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+        LinearLayout naviTop = new LinearLayout(context);
+        naviTop.setOrientation(LinearLayout.HORIZONTAL);
+        naviTop.setGravity(Gravity.CENTER_VERTICAL);
+        naviCardView.addView(naviTop, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        naviDisc = new FrameLayout(context);
+        naviDiscBg = new GradientDrawable();
+        naviDiscBg.setShape(GradientDrawable.OVAL);
+        naviDiscBg.setColor(Color.WHITE);
+        naviDisc.setBackground(naviDiscBg);
+        naviCardArrow = new ImageView(context);
+        naviCardArrow.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        naviDisc.addView(naviCardArrow, new FrameLayout.LayoutParams(
+                dp(34), dp(34), Gravity.CENTER));
+        naviTop.addView(naviDisc, new LinearLayout.LayoutParams(
+                dp(56), dp(56)));
+        LinearLayout naviTexts = new LinearLayout(context);
+        naviTexts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams naviTextsLp =
+                new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        naviTextsLp.leftMargin = dp(14);
+        naviTop.addView(naviTexts, naviTextsLp);
+        // v517: the navi card gets its own pin icon (musicPin
+        // precedent, v174) — same white disc + balloon, only
+        // visible when pinned (setCardPinned), tap toggles pin
+        // through the same onCardPinToggle callback. New v517
+        // placeholder size: 22dp frame, 4dp left margin, the
+        // bitmap itself stays 20dp.
+        naviPin = new FrameLayout(context);
+        GradientDrawable naviPinBg = new GradientDrawable();
+        naviPinBg.setShape(GradientDrawable.OVAL);
+        naviPinBg.setColor(Color.WHITE);
+        naviPinBg.setStroke(dp(2), Color.WHITE);
+        naviPin.setBackground(naviPinBg);
+        ImageView naviPinIcon = new ImageView(context);
+        naviPinIcon.setImageBitmap(pinBalloonBitmap());
+        naviPinIcon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        naviPin.addView(naviPinIcon, new FrameLayout.LayoutParams(
+                dp(20), dp(20), Gravity.CENTER));
+        naviPin.setVisibility(GONE);
+        LinearLayout.LayoutParams naviPinLp =
+                new LinearLayout.LayoutParams(dp(22), dp(22));
+        naviPinLp.leftMargin = dp(4);
+        naviTop.addView(naviPin, naviPinLp);
+        naviPin.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(android.view.View v) {
+                if (onCardPinToggle != null) {
+                    onCardPinToggle.run();
+                }
+            }
+        });
+        naviCardDist = new TextView(context);
+        naviCardDist.setSingleLine(true);
+        naviCardDist.setEllipsize(TextUtils.TruncateAt.END);
+        naviCardDist.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f);
+        naviCardDist.setTypeface(naviCardDist.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        naviCardDist.setTextColor(Color.WHITE);
+        naviTexts.addView(naviCardDist, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        naviCardAction = new TextView(context);
+        naviCardAction.setSingleLine(true);
+        naviCardAction.setEllipsize(TextUtils.TruncateAt.END);
+        naviCardAction.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        naviCardAction.setTextColor(Color.argb(235, 255, 255, 255));
+        LinearLayout.LayoutParams naviActLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        naviActLp.topMargin = dp(2);
+        naviTexts.addView(naviCardAction, naviActLp);
+        // Route progress: translucent track + fill scaled from
+        // the left (same pivot trick as the download bar).
+        naviProgBox = new android.widget.FrameLayout(context);
+        LinearLayout.LayoutParams naviProgLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, dp(6));
+        naviProgLp.topMargin = dp(14);
+        naviCardView.addView(naviProgBox, naviProgLp);
+        android.view.View naviProgTrack = new android.view.View(context);
+        naviProgTrackBg = new GradientDrawable();
+        naviProgTrackBg.setCornerRadius(dp(3));
+        naviProgTrackBg.setColor(Color.argb(64, 255, 255, 255));
+        naviProgTrack.setBackground(naviProgTrackBg);
+        naviProgBox.addView(naviProgTrack,
+                new android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        naviProgFill = new android.view.View(context);
+        naviProgFillBg = new GradientDrawable();
+        naviProgFillBg.setCornerRadius(dp(3));
+        naviProgFillBg.setColor(Color.WHITE);
+        naviProgFill.setBackground(naviProgFillBg);
+        naviProgFill.setPivotX(0f);
+        naviProgBox.addView(naviProgFill,
+                new android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT));
+        naviCardBottom = new TextView(context);
+        naviCardBottom.setSingleLine(true);
+        naviCardBottom.setEllipsize(TextUtils.TruncateAt.END);
+        naviCardBottom.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        naviCardBottom.setTextColor(Color.argb(235, 255, 255, 255));
+        LinearLayout.LayoutParams naviBotLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        naviBotLp.topMargin = dp(8);
+        naviCardView.addView(naviCardBottom, naviBotLp);
 
         // v171: music card — dedicated player card for music
         // notifications (1.x buildPlayerView). Same background tint
@@ -1199,9 +1399,11 @@ public class CapsuleView extends FrameLayout {
         musicPin.addView(musicPinIcon, new FrameLayout.LayoutParams(
                 dp(20), dp(20), Gravity.CENTER));
         musicPin.setVisibility(GONE);
+        // v517: pin placeholder shrunk like cardPin — 22dp frame,
+        // 4dp left margin; the bitmap itself stays 20dp.
         LinearLayout.LayoutParams musicPinLp =
-                new LinearLayout.LayoutParams(dp(24), dp(24));
-        musicPinLp.leftMargin = dp(8);
+                new LinearLayout.LayoutParams(dp(22), dp(22));
+        musicPinLp.leftMargin = dp(4);
         musicTop.addView(musicPin, musicPinLp);
         musicPin.setOnClickListener(new OnClickListener() {
             @Override
@@ -2413,6 +2615,15 @@ public class CapsuleView extends FrameLayout {
             applyPillShape();
         }
         applyIconTint(tintBmp);
+        // v513: navi capsule presentation (arrow disc, two-line
+        // reformat, warm/green tints, open-card refresh); any
+        // other type resets the icon view's navi leftovers, since
+        // CapsuleViews are reused across notifications.
+        if (notifData.isNavi) {
+            applyNaviBind();
+        } else {
+            resetNaviIcon();
+        }
         updateMusicDisplay();
         applyScrollFlag();
         // v379: right-dock call capsule mirrors its pill contents.
@@ -2675,6 +2886,116 @@ public class CapsuleView extends FrameLayout {
                 android.graphics.Paint.ANTI_ALIAS_FLAG);
         paint.setColor(color);
         paint.setStyle(android.graphics.Paint.Style.FILL);
+        c.drawPath(p, paint);
+        return bmp;
+    }
+
+    /** v518: AMap-style maneuver glyphs on a 24x24 canvas,
+     * stroke-drawn (the fill-based renderIcon above cannot do
+     * them): one dedicated shape per maneuver — bent arrows
+     * for turns, a U for 掉头, a near-full arc for 环岛. The
+     * capsule disc and the navi card share these definitions. */
+    private static android.graphics.Path naviGlyphPath(int type) {
+        android.graphics.Path p = new android.graphics.Path();
+        switch (type) {
+            case NAVI_FRONT_LEFT:
+                p.moveTo(17.5f, 17.5f);
+                p.lineTo(8f, 8f);
+                p.moveTo(13.5f, 7.6f);
+                p.lineTo(7.6f, 7.6f);
+                p.lineTo(7.6f, 13.5f);
+                break;
+            case NAVI_LEFT:
+                p.moveTo(18.5f, 20.5f);
+                p.lineTo(18.5f, 12.5f);
+                p.arcTo(new android.graphics.RectF(
+                        7.5f, 7f, 18.5f, 18f), 0f, -90f);
+                p.lineTo(6f, 7f);
+                p.moveTo(9.8f, 3.4f);
+                p.lineTo(6.2f, 7f);
+                p.lineTo(9.8f, 10.6f);
+                break;
+            case NAVI_REAR_LEFT:
+                p.moveTo(17.5f, 6.5f);
+                p.lineTo(8f, 16f);
+                p.moveTo(7.6f, 10.5f);
+                p.lineTo(7.6f, 16.4f);
+                p.lineTo(13.5f, 16.4f);
+                break;
+            case NAVI_UTURN:
+                p.moveTo(8.5f, 20.5f);
+                p.lineTo(8.5f, 8.8f);
+                p.arcTo(new android.graphics.RectF(
+                        8.5f, 4f, 18.1f, 13.6f), 180f, 180f);
+                p.lineTo(18.1f, 15f);
+                p.moveTo(14.6f, 12.2f);
+                p.lineTo(18.1f, 16f);
+                p.lineTo(21.6f, 12.2f);
+                break;
+            case NAVI_FRONT_RIGHT:
+                p.moveTo(6.5f, 17.5f);
+                p.lineTo(16f, 8f);
+                p.moveTo(10.5f, 7.6f);
+                p.lineTo(16.4f, 7.6f);
+                p.lineTo(16.4f, 13.5f);
+                break;
+            case NAVI_RIGHT:
+                p.moveTo(5.5f, 20.5f);
+                p.lineTo(5.5f, 12.5f);
+                p.arcTo(new android.graphics.RectF(
+                        5.5f, 7f, 16.5f, 18f), 180f, 90f);
+                p.lineTo(18f, 7f);
+                p.moveTo(14.2f, 3.4f);
+                p.lineTo(17.8f, 7f);
+                p.lineTo(14.2f, 10.6f);
+                break;
+            case NAVI_REAR_RIGHT:
+                p.moveTo(6.5f, 6.5f);
+                p.lineTo(16f, 16f);
+                p.moveTo(16.4f, 10.5f);
+                p.lineTo(16.4f, 16.4f);
+                p.lineTo(10.5f, 16.4f);
+                break;
+            case NAVI_ROUNDABOUT:
+                p.arcTo(new android.graphics.RectF(
+                        3.8f, 3.8f, 20.2f, 20.2f), 317f, -300f);
+                p.moveTo(16.9f, 11.4f);
+                p.lineTo(20.2f, 14.5f);
+                p.lineTo(22.8f, 10.5f);
+                break;
+            case NAVI_STRAIGHT:
+            default:
+                p.moveTo(12f, 20.5f);
+                p.lineTo(12f, 6f);
+                p.moveTo(6.3f, 11.2f);
+                p.lineTo(12f, 5.5f);
+                p.lineTo(17.7f, 11.2f);
+                break;
+        }
+        return p;
+    }
+
+    /** v518: render a naviGlyphPath glyph to a bitmap with a
+     * round-capped stroke (stroke width scales with size:
+     * 2.4 units on the 24x24 canvas). No rotation — each
+     * glyph already points where its maneuver goes. */
+    private static android.graphics.Bitmap renderNaviGlyph(
+            int type, int color, int sizePx) {
+        android.graphics.Path p = naviGlyphPath(type);
+        android.graphics.Bitmap bmp =
+                android.graphics.Bitmap.createBitmap(sizePx, sizePx,
+                        android.graphics.Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas c = new android.graphics.Canvas(bmp);
+        android.graphics.Matrix m = new android.graphics.Matrix();
+        m.setScale(sizePx / 24f, sizePx / 24f);
+        p.transform(m);
+        android.graphics.Paint paint = new android.graphics.Paint(
+                android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setColor(color);
+        paint.setStyle(android.graphics.Paint.Style.STROKE);
+        paint.setStrokeWidth(2.4f * sizePx / 24f);
+        paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+        paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
         c.drawPath(p, paint);
         return bmp;
     }
@@ -3015,6 +3336,11 @@ public class CapsuleView extends FrameLayout {
             // (1.x updatePlayerContent), not the generic card.
             updateMusicCard();
         }
+        if (expanded && data != null && data.isNavi) {
+            // v513: navi dashboard card, filled in place like
+            // the music card.
+            updateNaviCard();
+        }
         if (expanded && data != null) {
             // Fill the card from the notification.
             if (cardIcon != null) {
@@ -3075,10 +3401,13 @@ public class CapsuleView extends FrameLayout {
         syncDownloadBar();
         // v171: music shows the player card, everything else the
         // generic card.
+        // v513: navi shows its dashboard card instead.
         boolean isMusicCard = expanded && data != null && data.isMusic;
+        boolean isNaviCard = expanded && data != null && data.isNavi;
         if (cardView != null) {
             cardView.setVisibility(
-                    isMusicCard ? GONE : (expanded ? VISIBLE : GONE));
+                    (isMusicCard || isNaviCard) ? GONE
+                            : (expanded ? VISIBLE : GONE));
             // v484: 展开卡片（普通卡）比例调整——卡片内容按比例
             // 缩放着画（左上角为轴）。内容本身按自然尺寸布局
             // （cardView 是固定自然宽 + WRAP_CONTENT 高），缩着画
@@ -3091,10 +3420,19 @@ public class CapsuleView extends FrameLayout {
                 cardView.setPivotY(0f);
                 cardView.setScaleX(s);
                 cardView.setScaleY(s);
+                if (naviCardView != null) {
+                    naviCardView.setPivotX(0f);
+                    naviCardView.setPivotY(0f);
+                    naviCardView.setScaleX(s);
+                    naviCardView.setScaleY(s);
+                }
             }
         }
         if (musicCardView != null) {
             musicCardView.setVisibility(isMusicCard ? VISIBLE : GONE);
+        }
+        if (naviCardView != null) {
+            naviCardView.setVisibility(isNaviCard ? VISIBLE : GONE);
         }
     }
 
@@ -3107,6 +3445,10 @@ public class CapsuleView extends FrameLayout {
         android.view.View measureView = cardView;
         if (data != null && data.isMusic && musicCardView != null) {
             measureView = musicCardView;
+        }
+        // v513: a navi card measures its own (dashboard) layout.
+        if (data != null && data.isNavi && naviCardView != null) {
+            measureView = naviCardView;
         }
         if (measureView == null) {
             return dp(DEFAULT_HEIGHT_DP);
@@ -3174,6 +3516,33 @@ public class CapsuleView extends FrameLayout {
             musicPin.setVisibility(pinned ? VISIBLE : GONE);
             musicPin.setAlpha(1f);
         }
+        // v517: the navi card's own pin icon follows the same rule.
+        if (naviPin != null) {
+            naviPin.setVisibility(pinned ? VISIBLE : GONE);
+            naviPin.setAlpha(1f);
+        }
+    }
+
+    /** v517: one-line diagnostic for the navi card path — which
+     * card surface is VISIBLE and whether the navi strings
+     * parsed. Used by BubbleWindow's Phase-1 FileLog line and
+     * updateNaviCard's own, to pin down the auto-pinned card
+     * missing its arrow disc (user report 2026-11-25). */
+    public String naviCardDiag() {
+        String surface = "none";
+        if (naviCardView != null
+                && naviCardView.getVisibility() == VISIBLE) {
+            surface = "naviCardView";
+        } else if (musicCardView != null
+                && musicCardView.getVisibility() == VISIBLE) {
+            surface = "musicCardView";
+        } else if (cardView != null
+                && cardView.getVisibility() == VISIBLE) {
+            surface = "cardView";
+        }
+        return "isNavi=" + (data != null && data.isNavi)
+                + " surface=" + surface
+                + " naviParsed=" + naviParsed;
     }
 
 
@@ -3372,6 +3741,420 @@ public class CapsuleView extends FrameLayout {
         updateMusicFav();
     }
 
+    // v513: navi actions, longest / most specific first so a
+    // contains-match picks "向左前方直行" over "直行".
+    // v518: added the rear / roundabout / 调头 keywords so the
+    // new maneuver classifier can actually see them.
+    private static final String[] NAVI_ACTIONS = {
+        "向左前方直行", "向右前方直行", "向左前方", "向右前方",
+        "向左转", "向右转", "左后方", "右后方", "环岛", "转盘",
+        "掉头", "调头", "上过街天桥", "下过街天桥",
+        "左转", "右转", "直行", "靠左", "靠右",
+    };
+
+    /** v518: classify an action string into a maneuver type
+     * for the AMap-style glyph set (replaces v513–v517's
+     * naviRotationFor: the dedicated glyphs are drawn already
+     * pointing the right way, nothing rotates). Keyword
+     * priority follows the shape specificity: U-turn and
+     * roundabout first, then rear, front, plain turns;
+     * anything unrecognized is STRAIGHT. Arrival is handled
+     * by naviArrived, not here. */
+    private static int naviManeuverFor(String action) {
+        if (action != null) {
+            if (action.contains("掉头") || action.contains("调头")) {
+                return NAVI_UTURN;
+            }
+            if (action.contains("环岛") || action.contains("转盘")) {
+                return NAVI_ROUNDABOUT;
+            }
+            if (action.contains("左后方")) {
+                return NAVI_REAR_LEFT;
+            }
+            if (action.contains("右后方")) {
+                return NAVI_REAR_RIGHT;
+            }
+            if (action.contains("左前方")
+                    || action.contains("靠左")) {
+                return NAVI_FRONT_LEFT;
+            }
+            if (action.contains("右前方")
+                    || action.contains("靠右")) {
+                return NAVI_FRONT_RIGHT;
+            }
+            if (action.contains("左转")) {
+                return NAVI_LEFT;
+            }
+            if (action.contains("右转")) {
+                return NAVI_RIGHT;
+            }
+        }
+        return NAVI_STRAIGHT;
+    }
+
+    /** v513: first "<number>米" / "<number>公里" at or after
+     * `from` in s. Returns {meters, 1 if followed by 后 else 0},
+     * or null when there is no distance. */
+    private static double[] scanDist(String s, int from) {
+        if (s == null) {
+            return null;
+        }
+        int n = s.length();
+        for (int i = Math.max(0, from); i < n; i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') {
+                continue;
+            }
+            int j = i;
+            boolean dot = false;
+            while (j < n) {
+                char d = s.charAt(j);
+                if (d >= '0' && d <= '9') {
+                    j++;
+                } else if (d == '.' && !dot) {
+                    dot = true;
+                    j++;
+                } else {
+                    break;
+                }
+            }
+            double mult = 0;
+            int unitLen = 0;
+            if (s.startsWith("公里", j)) {
+                mult = 1000;
+                unitLen = 2;
+            } else if (j < n && s.charAt(j) == '米') {
+                mult = 1;
+                unitLen = 1;
+            }
+            if (mult > 0) {
+                double v;
+                try {
+                    v = Double.parseDouble(s.substring(i, j));
+                } catch (Throwable th) {
+                    return null;
+                }
+                int after = j + unitLen;
+                double hou = (after < n && s.charAt(after) == '后')
+                        ? 1 : 0;
+                return new double[]{v * mult, hou};
+            }
+            i = j - 1;
+        }
+        return null;
+    }
+
+    /** v513: display distance, BubbleWindow.formatDist style
+     * with a space ("119 米" / "3.5 公里"). */
+    private static String fmtNaviDist(double meters) {
+        if (meters >= 1000) {
+            return String.format(java.util.Locale.ROOT,
+                    "%.1f 公里", meters / 1000.0);
+        }
+        return ((int) Math.round(meters)) + " 米";
+    }
+
+    /** v513: parse the navi display state out of data.title /
+     * data.text. Foot broadcasts compose the title as "119米后
+     * 直行进入建新东路" / "沿建新东路直行188米" / "直行128米"
+     * and the content as "剩3.5公里 · 57分钟 · 预计00:34到达";
+     * ride broadcasts carry only the instruction ("96米后左转",
+     * remaining fields stay empty); the v322 computed foot
+     * capsule uses "直行 200米" + "剩3.5公里 · 57分钟". Anything
+     * unrecognized leaves naviParsed=false and the generic
+     * title/text stand — degrade, never blank. */
+    private void parseNavi() {
+        naviParsed = false;
+        naviArrived = false;
+        naviAction = null;
+        naviRoadPart = null;
+        naviDistMeters = -1;
+        naviDistSeg = null;
+        naviRemainMeters = -1;
+        naviRemainSeg = null;
+        naviRemainMinSeg = null;
+        naviEtaSeg = null;
+        // v518: unparsed / placeholder state shows the
+        // straight-ahead glyph.
+        naviManeuver = NAVI_STRAIGHT;
+        if (data == null) {
+            return;
+        }
+        String title = data.title != null ? data.title : "";
+        String text = data.text != null ? data.text : "";
+        naviArrived = title.contains("到达");
+        for (String a : NAVI_ACTIONS) {
+            if (title.contains(a)) {
+                naviAction = a;
+                break;
+            }
+        }
+        double[] dist = scanDist(title, 0);
+        if (dist != null) {
+            naviDistMeters = (int) Math.round(dist[0]);
+            naviDistSeg = fmtNaviDist(dist[0])
+                    + (dist[1] > 0 ? "后" : "");
+        }
+        // Road: "…进入X路" (road at the end of the title) or
+        // "沿X路<动作>" (road before the action).
+        int enterIdx = title.lastIndexOf("进入");
+        if (enterIdx >= 0 && enterIdx + 2 < title.length()) {
+            naviRoadPart = title.substring(enterIdx);
+        } else if (title.startsWith("沿") && naviAction != null) {
+            int actIdx = title.indexOf(naviAction);
+            if (actIdx > 1) {
+                naviRoadPart = "沿" + title.substring(1, actIdx);
+            }
+        }
+        if (naviAction != null) {
+            naviManeuver = naviManeuverFor(naviAction);
+            naviParsed = true;
+        }
+        int sheng = text.indexOf('剩');
+        if (sheng >= 0) {
+            double[] rd = scanDist(text, sheng + 1);
+            if (rd != null) {
+                naviRemainMeters = (int) Math.round(rd[0]);
+                naviRemainSeg = fmtNaviDist(rd[0]);
+            }
+        }
+        int minIdx = text.indexOf("分钟");
+        if (minIdx > 0) {
+            int s = minIdx - 1;
+            while (s >= 0) {
+                char ch = text.charAt(s);
+                if ((ch >= '0' && ch <= '9') || ch == '.') {
+                    s--;
+                } else {
+                    break;
+                }
+            }
+            String num = text.substring(s + 1, minIdx).trim();
+            if (!num.isEmpty()) {
+                naviRemainMinSeg = num + " 分钟";
+            }
+        }
+        int etaIdx = text.indexOf("预计");
+        if (etaIdx >= 0) {
+            int end = text.indexOf("到达", etaIdx);
+            String eta = (end > etaIdx)
+                    ? text.substring(etaIdx + 2, end)
+                    : text.substring(etaIdx + 2);
+            eta = eta.replace("·", " ").trim();
+            if (!eta.isEmpty()) {
+                naviEtaSeg = eta;
+            }
+        }
+    }
+
+    /** v513: capsule-side navi presentation, run at the end of
+     * bind() for navi data (after applyIconTint, so the tint
+     * state is known). Reformats the two lines, swaps the app
+     * icon for the turn-arrow disc, applies the warm/green tint
+     * states, and refreshes the open card if there is one. */
+    private void applyNaviBind() {
+        parseNavi();
+        if (naviArrived) {
+            titleView.setText(
+                    data.title != null ? data.title : "");
+            textView.setText(data.text != null ? data.text : "");
+            textView.setVisibility(
+                    (data.text == null || data.text.isEmpty())
+                            ? GONE : VISIBLE);
+        } else if (naviParsed) {
+            titleView.setText(naviAction
+                    + (naviRoadPart != null
+                            ? " · " + naviRoadPart : ""));
+            String line2 = "";
+            if (naviDistSeg != null) {
+                line2 = naviDistSeg;
+            }
+            if (naviRemainSeg != null) {
+                line2 += (line2.isEmpty() ? "" : " · ")
+                        + "还剩 " + naviRemainSeg;
+            }
+            if (line2.isEmpty()) {
+                line2 = data.text != null ? data.text : "";
+            }
+            textView.setText(line2);
+            textView.setVisibility(
+                    line2.isEmpty() ? GONE : VISIBLE);
+        }
+        // Icon disc: white circle + the maneuver's AMap-style
+        // glyph (flag on arrival). v518: glyphs are dedicated
+        // shapes, drawn unrotated.
+        if (naviIconBg == null) {
+            naviIconBg = new GradientDrawable();
+            naviIconBg.setShape(GradientDrawable.OVAL);
+        }
+        naviIconBg.setColor(pillLight
+                ? Color.rgb(220, 230, 236) : Color.WHITE);
+        iconView.setBackground(naviIconBg);
+        iconView.setPadding(dp(6), dp(6), dp(6), dp(6));
+        iconView.setImageBitmap(naviArrived
+                ? renderIcon(ICON_FLAG, NAVI_BLUE, dp(24))
+                : renderNaviGlyph(naviManeuver, NAVI_BLUE, dp(24)));
+        iconView.setRotation(0f);
+        applyNaviTint();
+        if (cardExpanded) {
+            updateNaviCard();
+        }
+    }
+
+    /** v513: undo the navi icon-disc presentation when a view
+     * is re-bound to non-navi data (rotation / background /
+     * padding only — bind has just set the real icon image). */
+    private void resetNaviIcon() {
+        if (iconView == null) {
+            return;
+        }
+        iconView.setRotation(0f);
+        iconView.setBackground(null);
+        iconView.setPadding(0, 0, 0, 0);
+    }
+
+    /** v513: navi tint states on top of the icon-derived tint —
+     * arrival green, <50m-to-the-turn warm orange-red; otherwise
+     * whatever applyIconTint chose stands (the AMap-icon tint).
+     * bind() runs applyIconTint first, so dropping out of a
+     * state restores the normal tint on the next update.
+     * v515: navi tints were OPAQUE (alpha 255) in every state
+     * (anti-bleed-through fix). v519: user pointed out the
+     * navi tint no longer matched the other capsules — every
+     * state now uses the same alpha 204 as applyIconTint's
+     * pillColor, so navi follows the global translucency.
+     * The normal state keeps the icon-derived hue (pillColor
+     * as applyIconTint just left it), re-wrapped at 204. */
+    private void applyNaviTint() {
+        if (pillBg == null || data == null || !data.isNavi) {
+            return;
+        }
+        parseNavi();
+        int tint;
+        boolean stateTint = false;
+        if (naviArrived) {
+            tint = Color.argb(204, 34, 139, 34);
+            stateTint = true;
+        } else if (naviDistMeters >= 0 && naviDistMeters < 50) {
+            tint = Color.argb(204, 150, 62, 28);
+            stateTint = true;
+        } else {
+            tint = Color.argb(204, Color.red(pillColor),
+                    Color.green(pillColor), Color.blue(pillColor));
+        }
+        pillColor = tint;
+        pillBg.setColor(tint);
+        if (cardBg != null) {
+            cardBg.setColor(tint);
+        }
+        if (stateTint) {
+            pillLight = false;
+            titleView.setTextColor(Color.WHITE);
+            textView.setTextColor(Color.argb(235, 255, 255, 255));
+        }
+    }
+
+    /** v513: fill the navi dashboard card from the parsed state
+     * (called when the card opens and on every live re-bind
+     * while it is open). Missing data degrades: no route total
+     * or no remaining distance → no progress bar; no remaining
+     * fields at all → no bottom line. */
+    public void updateNaviCard() {
+        if (data == null || !data.isNavi || naviCardView == null) {
+            return;
+        }
+        parseNavi();
+        // v517: evidence line for the auto-pin icon report —
+        // note the surface is read before setCardExpanded flips
+        // visibility on the opening call; on live re-binds (and
+        // in BubbleWindow's Phase-1 line) it is the final state.
+        FileLog.i("NaviCard update " + naviCardDiag());
+        int main = pillLight
+                ? Color.argb(255, 26, 26, 26) : Color.WHITE;
+        int sub = pillLight
+                ? Color.argb(204, 60, 60, 60)
+                : Color.argb(235, 255, 255, 255);
+        if (naviDiscBg != null) {
+            naviDiscBg.setColor(pillLight
+                    ? Color.rgb(220, 230, 236) : Color.WHITE);
+        }
+        if (naviCardArrow != null) {
+            naviCardArrow.setImageBitmap(naviArrived
+                    ? renderIcon(ICON_FLAG, NAVI_BLUE, dp(34))
+                    : renderNaviGlyph(naviManeuver, NAVI_BLUE,
+                            dp(34)));
+            naviCardArrow.setRotation(0f);
+        }
+        String line1;
+        if (naviArrived || !naviParsed) {
+            line1 = data.title != null ? data.title : "";
+        } else {
+            line1 = naviAction
+                    + (naviRoadPart != null
+                            ? " · " + naviRoadPart : "");
+        }
+        if (naviCardDist != null) {
+            naviCardDist.setTextColor(main);
+            naviCardDist.setText(naviArrived ? "已到达"
+                    : (naviDistMeters >= 0
+                            ? fmtNaviDist(naviDistMeters)
+                            : line1));
+        }
+        if (naviCardAction != null) {
+            naviCardAction.setTextColor(sub);
+            naviCardAction.setText(line1);
+            // Hidden when the big line already shows line1
+            // (no distance parsed and not arrived).
+            naviCardAction.setVisibility(
+                    (naviArrived || naviDistMeters >= 0)
+                            ? VISIBLE : GONE);
+        }
+        boolean showProg = data.naviTotalMeters > 0
+                && naviRemainMeters >= 0;
+        if (naviProgBox != null) {
+            naviProgBox.setVisibility(showProg ? VISIBLE : GONE);
+        }
+        if (showProg && naviProgFill != null) {
+            double frac = naviArrived ? 1.0
+                    : 1.0 - (double) naviRemainMeters
+                            / data.naviTotalMeters;
+            if (frac < 0) {
+                frac = 0;
+            }
+            if (frac > 1) {
+                frac = 1;
+            }
+            naviProgFill.setScaleX((float) frac);
+            if (naviProgFillBg != null) {
+                naviProgFillBg.setColor(
+                        pillLight ? NAVI_BLUE : Color.WHITE);
+            }
+            if (naviProgTrackBg != null) {
+                naviProgTrackBg.setColor(pillLight
+                        ? Color.argb(60, 0, 0, 0)
+                        : Color.argb(64, 255, 255, 255));
+            }
+        }
+        String bottom = "";
+        if (naviRemainSeg != null) {
+            bottom = "还剩 " + naviRemainSeg;
+        }
+        if (naviRemainMinSeg != null) {
+            bottom += (bottom.isEmpty() ? "" : " · ")
+                    + "约 " + naviRemainMinSeg;
+        }
+        if (naviEtaSeg != null) {
+            bottom += (bottom.isEmpty() ? "" : " · ")
+                    + naviEtaSeg + " 到达";
+        }
+        if (naviCardBottom != null) {
+            naviCardBottom.setTextColor(sub);
+            naviCardBottom.setText(bottom);
+            naviCardBottom.setVisibility(
+                    bottom.isEmpty() ? GONE : VISIBLE);
+        }
+    }
+
     /** v465: 胶囊自动取色开关拨动后，把已经弹出来的胶囊按新开关
      * 重新上色（跟 bind 里一个取图路子：icon → largeIcon → 现
      * 读 App 图标；音乐胶囊的 largeIcon 是专辑图，照样走它）。 */
@@ -3391,6 +4174,10 @@ public class CapsuleView extends FrameLayout {
             }
         }
         applyIconTint(bmp);
+        // v513: re-apply the navi warm/green state on top.
+        if (data.isNavi) {
+            applyNaviTint();
+        }
     }
 
     /** v218: live session album art (pushed when it first appears
