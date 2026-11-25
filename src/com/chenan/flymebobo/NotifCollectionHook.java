@@ -106,6 +106,7 @@ public final class NotifCollectionHook {
                                         && !pkg.equals("com.chenan.flymebobo")
                                         && !pkg.equals("com.android.systemui")
                                         && !pkg.equals("android")
+                                        && !isMeituanLiveSbn(sbn)
                                         && !isCall(sbn,
                                                 sbn.getNotification())) {
                                     sbn.getNotification().visibility =
@@ -195,6 +196,14 @@ public final class NotifCollectionHook {
                 + " isMusic=" + isMusic
                 + " flags=" + n.flags
                 + " cat=" + n.category);
+        // v522 (user 2026-11-25): Meituan live pass-through —
+        // the system renders its native Flyme live window from
+        // this notification; do not convert it into a capsule.
+        if (isLive && ("com.sankuai.meituan".equals(liveDelegatedPkg)
+                || "com.sankuai.meituan".equals(pkg))) {
+            log("HookLivePass meituan key=" + sbn.getKey());
+            return;
+        }
         // v206: QQ Original placeholder — a bare status notification
         // ("QQ音乐 / 当前列表为空") with no session and no MediaStyle,
         // posted ~0.5s before the real player notification on the
@@ -1254,6 +1263,31 @@ public final class NotifCollectionHook {
     // Call check (subset of NotificationService.isCallNotification):
     // enough to recognise a call so the hook skips it. The full
     // call state machine stays in NotificationService.
+    /** v522: Meituan's Flyme live-activity notification — the
+     * system's own live window renders from it, so the module
+     * leaves it completely alone (no lock-screen SECRET rewrite,
+     * no capsule conversion). */
+    private static boolean isMeituanLiveSbn(StatusBarNotification sbn) {
+        try {
+            if (sbn == null || sbn.getNotification() == null
+                    || sbn.getNotification().extras == null) {
+                return false;
+            }
+            android.os.Bundle e = sbn.getNotification().extras;
+            boolean live = e.getBoolean("is_live", false)
+                    || e.getBundle("notification.live.capsule") != null;
+            if (!live) {
+                return false;
+            }
+            String delegated = e.getString(
+                    "notification.live.app.pkg.delegated");
+            return "com.sankuai.meituan".equals(delegated)
+                    || "com.sankuai.meituan".equals(sbn.getPackageName());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private static boolean isCall(StatusBarNotification sbn, Notification n) {
         if (n == null) {
             return false;

@@ -1253,6 +1253,12 @@ public class CapsuleView extends FrameLayout {
         LinearLayout.LayoutParams naviPinLp =
                 new LinearLayout.LayoutParams(dp(22), dp(22));
         naviPinLp.leftMargin = dp(4);
+        // v523: top-align like the other cards' pins (user
+        // 2026-11-26) — naviTop is 56dp tall (the arrow disc),
+        // so the row's CENTER_VERTICAL left the pin floating
+        // mid-row while the generic/music cards keep theirs at
+        // the top-right next to the title.
+        naviPinLp.gravity = Gravity.TOP;
         naviTop.addView(naviPin, naviPinLp);
         naviPin.setOnClickListener(new OnClickListener() {
             @Override
@@ -3882,7 +3888,13 @@ public class CapsuleView extends FrameLayout {
         }
         String title = data.title != null ? data.title : "";
         String text = data.text != null ? data.text : "";
-        naviArrived = title.contains("到达");
+        // v523: arrival is an arrival STATEMENT, not any title
+        // containing 到达 — ETA text ("02:21到达") and route
+        // summaries ("到达从当前位置出发") false-tripped the
+        // green arrived state during cycling.
+        naviArrived = title.contains("已到达")
+                || title.contains("到达目的地")
+                || title.trim().equals("到达");
         for (String a : NAVI_ACTIONS) {
             if (title.contains(a)) {
                 naviAction = a;

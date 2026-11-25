@@ -1098,6 +1098,14 @@ public class BubbleWindow {
             }
             return;
         }
+        // v523: one navigation, one capsule — a live push for
+        // this type evicts the other type's capsule (a phantom
+        // foot capsule otherwise survives next to the real
+        // ride capsule for the whole trip).
+        if (!placeholderPush) {
+            removeNotifByKey("footnavi".equals(bizType)
+                    ? "navi:ridenavi" : "navi:footnavi");
+        }
         boolean hasTitle = title != null && !title.isEmpty();
         boolean hasContent = content != null && !content.isEmpty();
         String dispTitle;

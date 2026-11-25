@@ -4172,6 +4172,32 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    /** v522: true for Meituan's Flyme live-activity notification
+     * (is_live / live capsule extras, delegated to or posted by
+     * com.sankuai.meituan). These belong to the system's own live
+     * window; the module must not intercept them. */
+    private static boolean isMeituanLiveNotif(
+            StatusBarNotification sbn, android.app.Notification n) {
+        try {
+            if (sbn == null || n == null || n.extras == null) {
+                return false;
+            }
+            boolean live = n.extras.getBoolean("is_live", false)
+                    || n.extras.getBundle(
+                            "notification.live.capsule") != null;
+            if (!live) {
+                return false;
+            }
+            String delegated = n.extras.getString(
+                    "notification.live.app.pkg.delegated");
+            return "com.sankuai.meituan".equals(delegated)
+                    || "com.sankuai.meituan".equals(
+                            sbn.getPackageName());
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
         if (sbn == null || sbn.getNotification() == null) {
@@ -4357,6 +4383,17 @@ public class NotificationService extends NotificationListenerService {
                     && (android.app.Notification.CATEGORY_TRANSPORT
                             .equals(n.category) || mediaToken != null
                             || isKnownMusicApp(sbn.getPackageName(), n));
+            // v522 (user 2026-11-25): Meituan's Flyme live activity
+            // is posted by com.meizu.suggestion (delegated to
+            // com.sankuai.meituan) and the SYSTEM renders its live
+            // window from that very notification. Converting it to
+            // a bubble and cancelling the original kills the native
+            // live display — hands off entirely: no bubble, no
+            // cancel, no dedup.
+            if (isMeituanLiveNotif(sbn, n)) {
+                FileLog.i("LivePass meituan key=" + sbn.getKey());
+                return;
+            }
             // Skip ongoing / foreground-service notifications unless
             // they carry download progress (or are music).
             boolean ongoing = (n.flags & android.app.Notification.FLAG_ONGOING_EVENT) != 0

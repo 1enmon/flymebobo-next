@@ -743,6 +743,14 @@ public final class AmapNaviHook {
     private boolean footLabelInstalled;
     private boolean footNavActive;
     private long footNavLastTick;
+    // v523: cycling veto — a ridenavi push (notifyNaviInfo) or
+    // the cycling stats caption "已骑行(m)" proves the current
+    // navigation is a RIDE; the foot label assembler must stand
+    // down (cycling shares 已用时 / 剩余 / 到达 labels and
+    // otherwise spawns a phantom foot capsule that even reads
+    // as "已到达" next to the real ride capsule).
+    private long lastRidePushAt;
+    private long rideLabelSeenAt;
     private int footElapsedLastSec = -1;
     private long footElapsedSeenAt;
     private long footEtaPendingUntil;
@@ -965,9 +973,23 @@ public final class AmapNaviHook {
             return;
         }
         long now = System.currentTimeMillis();
+        // v523: the cycling stats caption proves a RIDE screen —
+        // the foot assembler stands down.
+        if ("已骑行(m)".equals(text)) {
+            rideLabelSeenAt = now;
+            footNavActive = false;
+            return;
+        }
         // Nav-screen captions: prove navigation is up.
         if ("已行走(m)".equals(text) || "已用时".equals(text)
                 || "大卡".equals(text)) {
+            if (now - lastRidePushAt < 15000
+                    || now - rideLabelSeenAt < 15000) {
+                // Cycling screen wearing foot vocabulary
+                // (已用时 / 剩余 / 到达 are shared labels).
+                footNavActive = false;
+                return;
+            }
             footNavActive = true;
             footNavLastTick = now;
             // v515: learn the walked value's instance from the
@@ -1327,6 +1349,11 @@ public final class AmapNaviHook {
             } catch (Throwable ignored) {
             }
         }
+        // v523: never emit a foot push while a ride is live.
+        if (now - lastRidePushAt < 15000
+                || now - rideLabelSeenAt < 15000) {
+            return;
+        }
         String shown = title + "|" + content + "|" + totalMeters;
         if (shown.equals(footLastBroadcast)) {
             return;
@@ -1365,6 +1392,10 @@ public final class AmapNaviHook {
         // see whether the engine calls this at all and with what
         // bizType. The capsule gate stays in BubbleWindow.
         String bizType = json.optString("bizType");
+        if ("ridenavi".equals(bizType)) {
+            lastRidePushAt = System.currentTimeMillis();
+            footNavActive = false;
+        }
         String title = json.optString("title");
         String content = json.optString("content");
         int status = json.optInt("status");
