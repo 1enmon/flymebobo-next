@@ -5,6 +5,7 @@ doNotCompress:
 - resources.arsc
 - classes.dex
 - png
+- wav
 isFrameworkApk: false
 packageInfo:
   forcedPackageId: '127'
@@ -21,5 +22,5 @@ usesFramework:
   tag: null
 version: 2.7.0-dirty
 versionInfo:
-  versionCode: 523
+  versionCode: 538
   versionName: 2.4.4

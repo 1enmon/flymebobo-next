@@ -1221,19 +1221,62 @@ public final class NotifCollectionHook {
         if (isSongRecognition(n)) {
             return false;
         }
+        boolean music;
         if (Notification.CATEGORY_TRANSPORT.equals(n.category)) {
-            return true;
-        }
-        Bundle ex = n.extras;
-        if (ex != null) {
-            try {
-                if (ex.getParcelable(Notification.EXTRA_MEDIA_SESSION) != null) {
-                    return true;
+            music = true;
+        } else {
+            Bundle ex = n.extras;
+            boolean hasSession = false;
+            if (ex != null) {
+                try {
+                    hasSession = ex.getParcelable(Notification.EXTRA_MEDIA_SESSION) != null;
+                } catch (Throwable ignored) {
                 }
-            } catch (Throwable ignored) {
             }
+            music = hasSession
+                    || isKnownMusicApp(sbn != null ? sbn.getPackageName() : null, n);
         }
-        return isKnownMusicApp(sbn != null ? sbn.getPackageName() : null, n);
+        // v532: 视频App开关（FeatureFlags.musicVideo，默认开 =
+        // 现状）。判别口径：上面的音乐信号（TRANSPORT 类别 /
+        // MediaSession token）是媒体播放的通用信号，不分音频
+        // 视频，链路里没有"这是视频"的现成类型信号，所以用
+        // 下面的内置视频 App 包名集合判别来源。开关关时，视频
+        // App 的播放不算音乐——它就按普通通知走后面的流程
+        // （ongoing 该拦还拦，与任何普通通知同等待遇，不误伤
+        // 通知本身）；正经音乐 App 不在集合里，不受影响。
+        if (music && !FeatureFlags.musicVideo
+                && isVideoApp(sbn != null ? sbn.getPackageName() : null)) {
+            return false;
+        }
+        return music;
+    }
+
+    // v532: 内置视频 App 包名集合（主流长视频/短视频平台）。
+    // 与 NotificationService.isVideoApp 保持一致，改一处改两处。
+    private static final java.util.Set<String> VIDEO_APP_PACKAGES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "tv.danmaku.bili",            // 哔哩哔哩
+                    "com.bilibili.app.in",        // 哔哩哔哩国际版
+                    "tv.danmaku.bilibilihd",      // 哔哩哔哩 HD
+                    "com.ss.android.ugc.aweme",   // 抖音
+                    "com.ss.android.ugc.aweme.lite", // 抖音极速版
+                    "com.smile.gifmaker",         // 快手
+                    "com.kuaishou.nebula",        // 快手极速版
+                    "com.tencent.qqlive",         // 腾讯视频
+                    "com.qiyi.video",             // 爱奇艺
+                    "com.youku.phone",            // 优酷
+                    "com.ss.android.article.video", // 西瓜视频
+                    "com.hunantv.imgo.activity",  // 芒果TV
+                    "com.google.android.youtube", // YouTube
+                    "com.netflix.mediaclient",    // Netflix
+                    "com.sohu.sohuvideo",         // 搜狐视频
+                    "com.letv.android.client",    // 乐视视频
+                    "com.baidu.video",            // 百度视频
+                    "com.baidu.haokan"            // 好看视频
+            ));
+
+    private static boolean isVideoApp(String pkg) {
+        return pkg != null && VIDEO_APP_PACKAGES.contains(pkg);
     }
 
     // v186: the ongoing requirement is dropped for the hook path.

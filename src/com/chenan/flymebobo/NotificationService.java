@@ -95,6 +95,12 @@ public class NotificationService extends NotificationListenerService {
      * stored set, flattened). SystemUI applies it at once. */
     public static final String ACTION_SCENE_EXC =
             "com.chenan.flymebobo.SCENE_EXC";
+    /** v535: APP -> SystemUI, a per-app bubble-sound rule
+     * changed in the MainActivity sound card. Extra: "soundrules_flat"
+     * (the whole rule set, flattened). SystemUI applies it at
+     * once, no restart needed. */
+    public static final String ACTION_SOUND_RULES =
+            "com.chenan.flymebobo.SOUND_RULES";
     /** v511: APP -> SystemUI, the online game list was
      * refreshed. Extra: "gamelist_flat" (the whole list,
      * flattened). SystemUI applies it at once. */
@@ -115,6 +121,21 @@ public class NotificationService extends NotificationListenerService {
      * 重排/重着色，开关和功能就对上了）。No extras. */
     public static final String ACTION_RELOAD_SETTINGS =
             "com.chenan.flymebobo.RELOAD_SETTINGS";
+    /** v525: APP -> SystemUI, temporary-silence state changed.
+     * Extras: "ts_until" (long, 0 = off), "ts_callBreak" (bool),
+     * "ts_linkDnd" (bool), optional "ts_note" (diagnostic string
+     * the SystemUI receiver logs). Sent on start / end / any
+     * settings change in TempSilenceActivity. */
+    public static final String ACTION_TEMP_SILENCE =
+            "com.chenan.flymebobo.TEMP_SILENCE";
+    /** v533: SystemUI -> APP, the end-of-silence flush ran.
+     * Extra: TempSilence.EXTRA_FLUSHED (int) — how many queued
+     * notifications were re-delivered. Sent on every silence
+     * session end (any road); MainActivity only consumes it
+     * right after its own cancel tap, to print the real count
+     * in the in-app exit animation. */
+    public static final String ACTION_TEMP_SILENCE_FLUSHED =
+            "com.chenan.flymebobo.TEMP_SILENCE_FLUSHED";
     /** v311: Amap live navigation (foot/ride) — Amap process ->
      * SystemUI, turn + distance from ModuleRoute.notifyNaviInfo.
      * Extras: "bizType" (footnavi/ridenavi), "title", "content",
@@ -1354,6 +1375,34 @@ public class NotificationService extends NotificationListenerService {
                 || pkg.contains("qqmusic")
                 || pkg.contains("kugou")
                 || pkg.contains("kuwo");
+    }
+
+    // v532: 内置视频 App 包名集合（主流长视频/短视频平台）。
+    // 与 NotifCollectionHook.isVideoApp 保持一致，改一处改两处。
+    private static final java.util.Set<String> VIDEO_APP_PACKAGES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "tv.danmaku.bili",            // 哔哩哔哩
+                    "com.bilibili.app.in",        // 哔哩哔哩国际版
+                    "tv.danmaku.bilibilihd",      // 哔哩哔哩 HD
+                    "com.ss.android.ugc.aweme",   // 抖音
+                    "com.ss.android.ugc.aweme.lite", // 抖音极速版
+                    "com.smile.gifmaker",         // 快手
+                    "com.kuaishou.nebula",        // 快手极速版
+                    "com.tencent.qqlive",         // 腾讯视频
+                    "com.qiyi.video",             // 爱奇艺
+                    "com.youku.phone",            // 优酷
+                    "com.ss.android.article.video", // 西瓜视频
+                    "com.hunantv.imgo.activity",  // 芒果TV
+                    "com.google.android.youtube", // YouTube
+                    "com.netflix.mediaclient",    // Netflix
+                    "com.sohu.sohuvideo",         // 搜狐视频
+                    "com.letv.android.client",    // 乐视视频
+                    "com.baidu.video",            // 百度视频
+                    "com.baidu.haokan"            // 好看视频
+            ));
+
+    private static boolean isVideoApp(String pkg) {
+        return pkg != null && VIDEO_APP_PACKAGES.contains(pkg);
     }
 
     // v171: music progress ticker (1s) — broadcasts position /
@@ -3702,6 +3751,29 @@ public class NotificationService extends NotificationListenerService {
             } catch (Throwable ignored) {
             }
         }
+        // v525: temporary silence — watch the system DND state
+        // from this (persistent, system-bound) service: if the
+        // user turns DND off by hand while a silence that opened
+        // it is running, that counts as an early cancel and the
+        // silence ends here (TempSilence re-checks the live
+        // filter before doing anything).
+        // v529: the same watcher also sees the on direction —
+        // a DND opened any other way pulls the silence up by
+        // linkage, and TempSilence turns that into the start
+        // animation receipt on the SystemUI side.
+        try {
+            registerReceiver(new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(android.content.Context c,
+                        android.content.Intent intent) {
+                    TempSilence.onFilterBroadcast(
+                            NotificationService.this);
+                }
+            }, new android.content.IntentFilter(
+                    android.app.NotificationManager
+                            .ACTION_INTERRUPTION_FILTER_CHANGED));
+        } catch (Throwable ignored) {
+        }
         // Pre-fill the dedup cache with the currently active
         // notifications (key + content), so a service reconnect
         // re-delivery does not re-pop everything (1.x fixed9).
@@ -4383,6 +4455,15 @@ public class NotificationService extends NotificationListenerService {
                     && (android.app.Notification.CATEGORY_TRANSPORT
                             .equals(n.category) || mediaToken != null
                             || isKnownMusicApp(sbn.getPackageName(), n));
+            // v532: 视频App开关（FeatureFlags.musicVideo，默认
+            // 开 = 现状）——判别口径与 NotifCollectionHook 一致：
+            // 音乐信号不分音频视频，用内置视频 App 包名集合判
+            // 来源；关时视频 App 的播放不算音乐，按普通通知走
+            // 后面的流程（见 isVideoApp）。
+            if (isMusic && !FeatureFlags.musicVideo
+                    && isVideoApp(sbn.getPackageName())) {
+                isMusic = false;
+            }
             // v522 (user 2026-11-25): Meituan's Flyme live activity
             // is posted by com.meizu.suggestion (delegated to
             // com.sankuai.meituan) and the SYSTEM renders its live

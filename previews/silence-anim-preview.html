@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>临时静默开启动画 · 预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:380px; }
+  .stage { position:relative; width:100%; max-width:380px; height:560px; border-radius:26px; overflow:hidden; background:#f4f5f7; box-shadow:0 10px 30px rgba(30,40,60,.18); }
+  /* 假设置页背景 */
+  .fake { position:absolute; inset:0; padding:16px 14px; }
+  .fake .hd { height:74px; border-radius:20px; background:#22c55e; margin-bottom:12px; }
+  .fake .cd { height:64px; border-radius:20px; margin-bottom:10px; }
+  .fake .b1 { background:#3b82f6; } .fake .b2 { background:#ec4899; } .fake .b3 { background:#f59e0b; }
+  .fake .b4 { background:#6366f1; } .fake .b5 { background:#14b8a6; } .fake .b6 { background:#a855f7; }
+  .fake .btn { position:absolute; left:50%; bottom:26px; transform:translateX(-50%); background:#6366f1; color:#fff; font-size:15px; font-weight:600; padding:12px 26px; border-radius:999px; box-shadow:0 6px 16px rgba(99,102,241,.45); cursor:pointer; z-index:5; }
+  /* 全屏动画层 */
+  .veil { position:absolute; inset:0; z-index:10; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(16,18,38,0); opacity:0; pointer-events:none; }
+  .veil.play { pointer-events:auto; animation:veilIn 2.6s ease forwards; }
+  @keyframes veilIn {
+    0% { opacity:0; background:rgba(16,18,38,0); }
+    10% { opacity:1; background:rgba(16,18,38,.88); }
+    82% { opacity:1; background:rgba(16,18,38,.88); }
+    100% { opacity:0; background:rgba(16,18,38,0); }
+  }
+  .halo { position:absolute; width:120px; height:120px; border-radius:50%; border:2px solid rgba(129,140,248,.0); }
+  .veil.play .halo { animation:halo 2.6s ease forwards; }
+  @keyframes halo {
+    0%,18% { transform:scale(.55); border-color:rgba(129,140,248,0); }
+    30% { border-color:rgba(129,140,248,.75); }
+    62% { transform:scale(2.15); border-color:rgba(129,140,248,0); }
+    100% { transform:scale(2.15); border-color:rgba(129,140,248,0); }
+  }
+  .capsule { position:relative; width:118px; height:118px; border-radius:50%; background:linear-gradient(145deg,#818cf8,#6366f1 55%,#4f46e5); display:flex; align-items:center; justify-content:center; color:#fff; font-size:52px; font-weight:700; box-shadow:0 14px 44px rgba(99,102,241,.55), inset 0 2px 6px rgba(255,255,255,.35); opacity:0; transform:scale(.4); }
+  .veil.play .capsule { animation:capIn 2.6s cubic-bezier(.22,1.36,.4,1) forwards; }
+  @keyframes capIn {
+    0% { opacity:0; transform:scale(.4) translateY(14px); }
+    16% { opacity:1; transform:scale(1.06) translateY(0); }
+    22% { transform:scale(1); }
+    82% { opacity:1; transform:scale(1); }
+    100% { opacity:0; transform:scale(.96); }
+  }
+  .moon { position:absolute; top:16px; right:18px; font-size:19px; opacity:0; }
+  .veil.play .moon { animation:txtIn 2.6s ease forwards; }
+  .big { margin-top:26px; color:#fff; font-size:21px; font-weight:700; letter-spacing:2px; opacity:0; transform:translateY(8px); }
+  .small { margin-top:9px; color:rgba(255,255,255,.72); font-size:13px; opacity:0; transform:translateY(8px); }
+  .veil.play .big { animation:txtIn 2.6s ease forwards; animation-delay:.12s; }
+  .veil.play .small { animation:txtIn 2.6s ease forwards; animation-delay:.22s; }
+  @keyframes txtIn {
+    0%,14% { opacity:0; transform:translateY(8px); }
+    26% { opacity:1; transform:translateY(0); }
+    82% { opacity:1; }
+    100% { opacity:0; }
+  }
+  .note { max-width:380px; margin-top:14px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+  .replay { margin-top:12px; background:#1c2434; color:#fff; border:none; font-size:14px; padding:10px 22px; border-radius:999px; cursor:pointer; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 动画设计预览，没写进 App · 点页面里的紫色按钮播放<br>全程约 2.6 秒，点任意处可立即跳过</div>
+  <div class="stage" id="stage">
+    <div class="fake">
+      <div class="hd"></div>
+      <div class="cd b1"></div><div class="cd b2"></div><div class="cd b3"></div>
+      <div class="cd b4"></div><div class="cd b5"></div><div class="cd b6"></div>
+      <div class="btn" id="playBtn">开启临时静默</div>
+    </div>
+    <div class="veil" id="veil">
+      <div class="halo"></div>
+      <div class="capsule">静<span class="moon">🌙</span></div>
+      <div class="big">临时静默已开启</div>
+      <div class="small">到 11:05 自动恢复 · 期间消息先排队，结束时补弹</div>
+    </div>
+  </div>
+  <button class="replay" id="replayBtn">↻ 再播一次</button>
+  <div class="note">
+    <b>设计说明：</b>点开启成功的那一刻才播（失败不播、直接弹原因）。深色幕布淡入 → 靛蓝「静」字圆盘带回弹放大、一圈光晕扩散 → 主文案「临时静默已开启」+ 结束时间。2.6 秒自动淡出，点任意处立即关，不挡事。<br>
+    备选方向（想要就说）：① 月亮升起+星点版（更安静文艺）② 胶囊从顶部滑入变大版（跟气泡语言更贴）。
+  </div>
+<script>
+  var veil = document.getElementById('veil');
+  function play() {
+    veil.classList.remove('play');
+    void veil.offsetWidth;
+    veil.classList.add('play');
+  }
+  document.getElementById('playBtn').addEventListener('click', play);
+  document.getElementById('replayBtn').addEventListener('click', play);
+  veil.addEventListener('click', function () { veil.classList.remove('play'); });
+  setTimeout(play, 600);
+</script>
+</body>
+</html>

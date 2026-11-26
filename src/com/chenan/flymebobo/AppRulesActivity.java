@@ -76,12 +76,15 @@ public class AppRulesActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // v527: 状态栏沉浸（与主页/安静规则页统一）。
+        applyEdgeToEdge();
         myRules.putAll(AppRules.readAll(this));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
-        root.setPadding(dp(16), dp(16), dp(16), 0);
+        root.setPadding(dp(16), dp(16) + statusBarHeight(),
+                dp(16), 0);
 
         TextView title = new TextView(this);
         title.setText("应用规则");
@@ -451,6 +454,25 @@ public class AppRulesActivity extends Activity {
         } catch (Throwable ignored) {
             return 0;
         }
+    }
+
+    private void applyEdgeToEdge() {
+        try {
+            android.view.Window w = getWindow();
+            w.setStatusBarColor(Color.TRANSPARENT);
+            w.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private int statusBarHeight() {
+        int id = getResources().getIdentifier(
+                "status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id)
+                : dp(24);
     }
 
     private int dp(int v) {

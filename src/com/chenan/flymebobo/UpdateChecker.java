@@ -75,6 +75,9 @@ public final class UpdateChecker {
         public String latestName;
         /** The APK's browser download URL (null when unavailable). */
         public String downloadUrl;
+        /** v524: the release notes (GitHub release "body") so the
+         * update dialog can show what's new before downloading. */
+        public String releaseNotes;
         /** Non-null when the check itself failed (network / parse). */
         public String error;
     }
@@ -151,6 +154,10 @@ public final class UpdateChecker {
             String tag = release.optString("tag_name", "");
             info.latestName = tag.startsWith("v")
                     ? tag.substring(1) : tag;
+            // v524: release notes ride along in the same response
+            // (user 2026-11-26 "更新内容预览") — the dialog shows
+            // them before offering the download.
+            info.releaseNotes = release.optString("body", "");
             JSONArray assets = release.optJSONArray("assets");
             if (assets == null) {
                 info.error = "no assets";
@@ -279,7 +286,18 @@ public final class UpdateChecker {
         }
         try {
             String msg = "煤气泡 v" + info.latestName + "（版本 "
-                    + info.latestCode + "）已发布，是否下载更新？";
+                    + info.latestCode + "）已发布";
+            // v524: show the release notes first, so the user sees
+            // what's new before choosing download or ignore.
+            if (info.releaseNotes != null
+                    && !info.releaseNotes.trim().isEmpty()) {
+                String notes = info.releaseNotes.trim();
+                if (notes.length() > 800) {
+                    notes = notes.substring(0, 800) + "…";
+                }
+                msg += "\n\n更新内容：\n" + notes;
+            }
+            msg += "\n\n是否下载更新？";
             new AlertDialog.Builder(activity)
                     .setTitle("发现新版本")
                     .setMessage(msg)

@@ -316,6 +316,7 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
         filter.addAction(NotificationService.ACTION_APP_RULES);
         filter.addAction(NotificationService.ACTION_SCENE_EXC);
+        filter.addAction(NotificationService.ACTION_SOUND_RULES);
         filter.addAction(NotificationService.ACTION_GAME_LIST);
         filter.addAction(NotificationService.ACTION_APPEARANCE);
         // v471: 打开 App 时恢复本地备份后推一次全量重载（见
@@ -345,6 +346,16 @@ public class XposedEntry extends XposedModule {
         // screen is off so they never show on the AOD.
         filter.addAction(Intent.ACTION_SCREEN_ON);
         filter.addAction(Intent.ACTION_SCREEN_OFF);
+        // v524: unlock — re-render code capsules for the masking
+        // state (a masked capsule gets its full text back).
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        // v525: temporary-silence state pushes from the APP, and
+        // the system DND state changing under our feet (the
+        // queue flush on DND-off must not depend on the APP
+        // process being alive).
+        filter.addAction(NotificationService.ACTION_TEMP_SILENCE);
+        filter.addAction(android.app.NotificationManager
+                .ACTION_INTERRUPTION_FILTER_CHANGED);
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -361,8 +372,104 @@ public class XposedEntry extends XposedModule {
                                 intent.getAction())) {
                     BubbleWindow bw = BubbleWindow.getInstance();
                     if (bw != null) {
-                        bw.setScreenOn(Intent.ACTION_SCREEN_ON.equals(
-                                intent.getAction()));
+                        boolean on = Intent.ACTION_SCREEN_ON.equals(
+                                intent.getAction());
+                        bw.setScreenOn(on);
+                        // v524: waking to the lockscreen re-renders
+                        // visible code capsules masked; the unlock
+                        // itself comes through ACTION_USER_PRESENT.
+                        if (on) {
+                            bw.refreshMasking();
+                        }
+                    }
+                    return;
+                }
+                // v524: unlock — a masked code capsule gets its
+                // full text back (and a capsule that popped while
+                // unlocked gets masked if recording started since).
+                if (Intent.ACTION_USER_PRESENT.equals(
+                        intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.refreshMasking();
+                    }
+                    return;
+                }
+                // v525: temporary-silence state pushed by the
+                // APP (start / end / settings change). Apply it
+                // at once; the note rides along so APP-side
+                // events (DND opened, grant denied, end reason)
+                // land in this process's log.
+                if (NotificationService.ACTION_TEMP_SILENCE.equals(
+                        intent.getAction())) {
+                    String tsSource = intent.getStringExtra(
+                            TempSilence.EXTRA_SOURCE);
+                    TempSilence.applyState(
+                            intent.getLongExtra(
+                                    TempSilence.EXTRA_UNTIL, 0),
+                            intent.getBooleanExtra(
+                                    TempSilence.EXTRA_CALL_BREAK,
+                                    true),
+                            intent.getBooleanExtra(
+                                    TempSilence.EXTRA_LINK_DND,
+                                    true),
+                            "broadcast", tsSource);
+                    String tsNote = intent.getStringExtra(
+                            TempSilence.EXTRA_NOTE);
+                    if (tsNote != null) {
+                        FileLog.i("TempSilence " + tsNote);
+                    }
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        // v533: the end reason rides along —
+                        // BubbleWindow routes the silence-exit
+                        // animation by it (an in-app "cancel"
+                        // is receipted by the APP itself, every
+                        // other road by SystemUI).
+                        bw.onTempSilenceStateChanged(
+                                intent.getStringExtra(
+                                        TempSilence
+                                                .EXTRA_END_REASON));
+                        // v529: a fresh DND-linkage activation
+                        // gets the same start-animation receipt
+                        // the in-app button plays — here, since
+                        // the APP UI is not on screen. Source
+                        // keeps the two roads from double-playing:
+                        // app starts carry no anim flag.
+                        if (intent.getBooleanExtra(
+                                TempSilence.EXTRA_ANIM, false)
+                                && TempSilence.SRC_DND.equals(
+                                        tsSource)) {
+                            bw.maybePlayDndSilenceAnim();
+                        }
+                    }
+                    return;
+                }
+                // v525: the system DND state changed (any
+                // source — quick settings, a schedule, our own
+                // silence starting/ending). Log the new filter
+                // and let BubbleWindow flush whatever a DND-off
+                // un-queues.
+                if (android.app.NotificationManager
+                        .ACTION_INTERRUPTION_FILTER_CHANGED.equals(
+                                intent.getAction())) {
+                    try {
+                        android.app.NotificationManager nm =
+                                (android.app.NotificationManager)
+                                        context.getSystemService(
+                                                Context
+                                                        .NOTIFICATION_SERVICE);
+                        if (nm != null) {
+                            FileLog.i("TempSilence dnd filter="
+                                    + nm.getCurrentInterruptionFilter()
+                                    + " timed="
+                                    + TempSilence.isActive());
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onDndChanged();
                     }
                     return;
                 }
@@ -387,6 +494,27 @@ public class XposedEntry extends XposedModule {
                     String fkey = intent.getStringExtra("key");
                     boolean fenabled = intent.getBooleanExtra("enabled", true);
                     FeatureFlags.set(fkey, fenabled);
+                    // v535: 提示音的音效选择不是布尔开关——设置页
+                    // 换音效时借这条广播带字符串 extra 过来，
+                    // SystemUI 立刻换上新音效（不必等重载）。
+                    if ("bubbleSoundId".equals(fkey)) {
+                        String sid = intent.getStringExtra("soundId");
+                        if (sid != null
+                                && BubbleSound.isSoundId(sid)) {
+                            FeatureFlags.bubbleSoundId = sid;
+                            FileLog.i("BubbleSound id -> " + sid);
+                        }
+                    }
+                    if ("bubbleSoundCustom".equals(fkey)) {
+                        String cpath = intent.getStringExtra("path");
+                        String cname = intent.getStringExtra("name");
+                        if (cpath != null) {
+                            FeatureFlags.bubbleCustomPath = cpath;
+                        }
+                        if (cname != null) {
+                            FeatureFlags.bubbleCustomName = cname;
+                        }
+                    }
                     // v262: scroll switch flips apply at once.
                     if ("scroll".equals(fkey)) {
                         BubbleWindow.getInstance().refreshLyricsScroll();
@@ -631,6 +759,31 @@ public class XposedEntry extends XposedModule {
                     }
                     return;
                 }
+                // v535: a per-app sound rule changed — same live
+                // channel as scene exceptions (flattened extra
+                // wins, prefs load is only the fallback).
+                if (NotificationService.ACTION_SOUND_RULES.equals(
+                        intent.getAction())) {
+                    String flatSound = intent.getStringExtra(
+                            SoundRules.EXTRA_RULES);
+                    if (flatSound != null) {
+                        SoundRules.applyFlat(flatSound);
+                    } else {
+                        try {
+                            Class<?> at = Class.forName(
+                                    "android.app.ActivityThread");
+                            java.lang.reflect.Method m =
+                                    at.getMethod("currentApplication");
+                            android.app.Application app =
+                                    (android.app.Application) m.invoke(null);
+                            if (app != null) {
+                                SoundRules.load(app);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    return;
+                }
                 // v511: the online game list was refreshed —
                 // same live channel as scene exceptions.
                 if (NotificationService.ACTION_GAME_LIST.equals(
@@ -669,11 +822,16 @@ public class XposedEntry extends XposedModule {
                             Appearance.load(app);
                             AppRules.load(app);
                             SceneExceptions.load(app);
+                            SoundRules.load(app);
                             GamePackages.load(app);
+                            // v525: temporary-silence state too,
+                            // and re-arm its expiry flush.
+                            TempSilence.load(app);
                             BubbleWindow bw = BubbleWindow.getInstance();
                             if (bw != null) {
                                 bw.onAppearanceChanged();
                                 bw.refreshCapsuleTint();
+                                bw.onTempSilenceStateChanged();
                             }
                         }
                     } catch (Throwable ignored) {
@@ -1087,8 +1245,14 @@ public class XposedEntry extends XposedModule {
         AppRules.load(app);
         // v508: read the APP's scene exception list.
         SceneExceptions.load(app);
+        // v535: read the APP's per-app sound rules.
+        SoundRules.load(app);
         // v511: read the APP's cached online game list.
         GamePackages.load(app);
+        // v525: read the APP's temporary-silence state (a timed
+        // silence may still be running across the restart; its
+        // end timestamp is all SystemUI needs).
+        TempSilence.load(app);
         log(4, TAG, "flymebobo bubble window ready");
     }
 

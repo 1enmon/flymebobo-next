@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设置页重构 — 预览（未实现，仅看样子）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: #e9edf1; font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; color: #1c1c1e; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 16px 12px 30px; }
+  .banner { background: #fff7e0; border: 1px dashed #c9a227; border-radius: 10px; color: #7a6414; font-size: 12.5px; line-height: 1.6; padding: 8px 12px; margin-bottom: 14px; text-align: center; width: 100%; max-width: 380px; }
+  .wrap { width: 100%; max-width: 380px; }
+
+  /* 状态行 */
+  .statusrow { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .pill { background: #e3f5e9; color: #1d7a3a; font-size: 12px; padding: 5px 10px; border-radius: 999px; display: flex; gap: 5px; align-items: center; white-space: nowrap; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: #34c759; flex-shrink: 0; }
+  .restart { margin-left: auto; background: #fff; border: 1px solid #d8dde3; color: #555; font-size: 12px; padding: 5px 10px; border-radius: 999px; white-space: nowrap; cursor: pointer; }
+
+  /* 头部胶囊 */
+  .header { background: linear-gradient(135deg, #3ecf62, #25a244); border-radius: 26px; padding: 16px; display: flex; align-items: center; color: #fff; box-shadow: 0 6px 18px rgba(37,162,68,.28); }
+  .header .disc { color: #25a244; width: 46px; height: 46px; font-size: 21px; }
+  .htitle { font-size: 20px; font-weight: 700; }
+  .hsub { font-size: 12px; color: rgba(255,255,255,.92); margin-top: 2px; }
+
+  /* 搜索 */
+  .search { position: relative; margin: 12px 0 2px; }
+  .search svg { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; stroke: #9aa0a8; pointer-events: none; }
+  .search input { width: 100%; padding: 12px 14px 12px 40px; border-radius: 999px; border: 1px solid #d8dde3; background: #fff; font-size: 14px; outline: none; color: #1c1c1e; }
+  .search input:focus { border-color: #25a244; }
+  .results { position: absolute; top: calc(100% + 6px); left: 0; right: 0; background: #fff; border-radius: 16px; box-shadow: 0 12px 32px rgba(0,0,0,.20); overflow: hidden; z-index: 60; display: none; max-height: 320px; overflow-y: auto; }
+  .results.open { display: block; }
+  .result { padding: 10px 14px; cursor: pointer; border-bottom: 1px solid #f0f1f3; }
+  .result:last-child { border-bottom: none; }
+  .result:active { background: #f5f7fa; }
+  .result .rt { font-size: 14px; font-weight: 600; color: #1c1c1e; }
+  .result .rp { font-size: 11px; color: #8a8f98; margin-top: 1px; }
+  .nores { padding: 12px 14px; font-size: 13px; color: #666; }
+  .nores .chip { display: inline-block; background: #eef2ff; color: #4a5fd9; border-radius: 999px; padding: 3px 10px; font-size: 12px; margin-left: 6px; cursor: pointer; }
+
+  /* 组标题 */
+  .group { font-size: 13px; color: #8a8f98; font-weight: 600; margin: 18px 4px 8px; }
+  .groupnote { font-size: 12px; color: #9aa0a8; margin: -3px 4px 9px; line-height: 1.6; }
+
+  /* 卡片 */
+  .card { border-radius: 22px; background: var(--c); color: #fff; margin-bottom: 10px; overflow: hidden; box-shadow: 0 4px 14px rgba(30,40,60,.12); }
+  .card-head { display: flex; align-items: center; padding: 14px; cursor: pointer; }
+  .disc { width: 38px; height: 38px; border-radius: 50%; background: #fff; color: var(--c, #25a244); font-size: 17px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .ctext { flex: 1; margin-left: 10px; min-width: 0; }
+  .ctitle { font-size: 15px; font-weight: 700; }
+  .csub { font-size: 12px; color: rgba(255,255,255,.88); margin-top: 2px; }
+  .chev { font-size: 22px; color: rgba(255,255,255,.9); margin-left: 6px; flex-shrink: 0; }
+  .card-body { display: none; padding: 2px 14px 14px; }
+  .card.open .card-body { display: block; }
+  .desc { font-size: 12.5px; line-height: 1.7; color: rgba(255,255,255,.94); background: rgba(0,0,0,.10); border-radius: 12px; padding: 10px 12px; }
+
+  /* 开关 */
+  .switch { width: 48px; height: 28px; border-radius: 999px; background: rgba(255,255,255,.35); position: relative; cursor: pointer; flex-shrink: 0; transition: background .15s; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .switch.on { background: #34c759; }
+  .switch.on::after { left: 23px; }
+
+  /* 卡内行 */
+  .srow { display: flex; align-items: center; padding: 10px 2px; border-bottom: 1px solid rgba(255,255,255,.18); }
+  .srow.last { border-bottom: none; }
+  .rtext { flex: 1; min-width: 0; }
+  .rtitle { font-size: 14px; font-weight: 600; }
+  .rsub { font-size: 11.5px; color: rgba(255,255,255,.78); margin-top: 1px; line-height: 1.5; }
+  .sdesc { font-size: 12px; color: rgba(255,255,255,.82); line-height: 1.6; padding: 7px 2px 3px; }
+  .zone { font-size: 12px; color: rgba(255,255,255,.78); margin: 13px 2px 1px; font-weight: 600; }
+  .tag { font-size: 11px; background: rgba(255,255,255,.25); padding: 3px 9px; border-radius: 999px; flex-shrink: 0; }
+  .counter { font-size: 11px; color: rgba(255,255,255,.7); flex-shrink: 0; }
+
+  /* 单选分段 */
+  .seg { display: flex; background: rgba(255,255,255,.22); border-radius: 999px; padding: 3px; margin: 8px 0 4px; }
+  .seg button { flex: 1; border: none; background: transparent; color: #fff; font-size: 13px; padding: 7px 0; border-radius: 999px; cursor: pointer; font-family: inherit; }
+  .seg button.sel { background: #fff; color: #333; font-weight: 700; }
+
+  /* 滑条（示意） */
+  .slider-row { display: flex; align-items: center; gap: 8px; padding: 7px 2px; }
+  .slider-row .rtitle { font-size: 13px; font-weight: 500; width: 102px; flex-shrink: 0; }
+  .track { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,.30); position: relative; cursor: pointer; }
+  .track .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: #fff; }
+  .track .knob { position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%; background: #fff; transform: translate(-50%,-50%); box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+  .sval { font-size: 11px; color: rgba(255,255,255,.85); width: 42px; text-align: right; flex-shrink: 0; }
+  .disabled { opacity: .45; }
+  .disabled .track { cursor: default; }
+  .presets { display: flex; gap: 6px; padding: 2px 2px 4px 110px; }
+  .presets span { font-size: 11px; background: rgba(255,255,255,.20); border-radius: 999px; padding: 3px 9px; }
+
+  /* 页脚 */
+  .footer { margin-top: 16px; text-align: center; font-size: 12px; color: #8a8f98; line-height: 1.9; padding: 0 6px; }
+  .footer .links { color: #4a5fd9; }
+  .footer .links span { cursor: pointer; }
+
+  /* 搜索命中高亮 */
+  .flash { animation: flashRing 1.5s ease; }
+  @keyframes flashRing { 0%,100% { box-shadow: 0 4px 14px rgba(30,40,60,.12); } 20%,60% { box-shadow: 0 0 0 4px rgba(255,176,0,.95); } 40%,80% { box-shadow: 0 0 0 4px rgba(255,176,0,.30); } }
+  .rowflash { animation: rowFlash 1.5s ease; border-radius: 10px; }
+  @keyframes rowFlash { 0%,100% { background: transparent; } 20%,60% { background: rgba(255,176,0,.50); } 40%,80% { background: rgba(255,176,0,.18); } }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 预览而已，没写代码 · 点一点能试手感 · 你点头我再动手实现<br>来电卡、模拟来电 / 模拟音乐按你的要求保持原样，没动。</div>
+
+  <div class="wrap">
+    <!-- 状态行 -->
+    <div class="statusrow" id="statusrow">
+      <span class="pill"><span class="dot"></span>LSPosed 已开启</span>
+      <span class="pill"><span class="dot"></span>通知权限 已开启</span>
+      <span class="restart">↻ 重启系统界面</span>
+    </div>
+
+    <!-- 头部 -->
+    <div class="header">
+      <div class="disc">泡</div>
+      <div class="ctext">
+        <div class="htitle">煤气泡 2.4.4</div>
+        <div class="hsub">通知气泡 · 音乐 · 下载 · 取件码 · 来电</div>
+      </div>
+    </div>
+
+    <!-- 搜索 -->
+    <div class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"></circle><line x1="15.5" y1="15.5" x2="21" y2="21"></line></svg>
+      <input id="searchInput" type="text" placeholder="搜索设置，如：打码、游戏、安静" autocomplete="off">
+      <div class="results" id="results"></div>
+    </div>
+
+    <!-- ===== 胶囊类型 ===== -->
+    <div class="group">胶囊类型</div>
+
+    <div class="card" id="card-notif" style="--c:#4a90d9">
+      <div class="card-head">
+        <div class="disc">泡</div>
+        <div class="ctext"><div class="ctitle">通知气泡</div><div class="csub">普通通知的胶囊总开关</div></div>
+        <div class="switch on" data-switch></div>
+      </div>
+      <div class="card-body">
+        <p class="desc">通知变成左贴边胶囊，点一下展开成卡片看全文。钉住的胶囊一直留着；没钉住的可以右滑消散、左滑收进扇子。永不自动展开。</p>
+      </div>
+    </div>
+
+    <div class="card" id="card-music" style="--c:#e75480">
+      <div class="card-head">
+        <div class="disc">乐</div>
+        <div class="ctext"><div class="ctitle">音乐胶囊</div><div class="csub">音乐通知变播放器样式</div></div>
+        <div class="switch on" data-switch></div>
+      </div>
+      <div class="card-body">
+        <p class="desc">歌名、歌手、实时歌词、专辑圆盘和进度条都在胶囊和播放器卡片上。同个 App 只保留一个音乐胶囊。钉住后胶囊上显示一行加大滚动歌词。</p>
+        <div class="srow" id="row-musiccard">
+          <div class="rtext"><div class="rtitle">音乐卡片</div><div class="rsub">点音乐胶囊展开播放器卡片</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">关掉后点音乐胶囊直接打开音乐 App。</p>
+        <div class="srow" id="row-simmusic">
+          <div class="rtext"><div class="rtitle">模拟音乐</div><div class="rsub">弹一颗假音乐胶囊 · 调大小用</div></div>
+          <div class="switch" data-switch></div>
+        </div>
+        <div class="srow" id="row-clock">
+          <div class="rtext"><div class="rtitle">反方向的钟</div></div>
+          <span class="counter">0/100</span>
+        </div>
+        <div class="srow" id="row-qqfree">
+          <div class="rtext"><div class="rtitle">QQ音乐flyme版免费听</div><div class="rsub">常开，无需设置</div></div>
+          <span class="tag">常开</span>
+        </div>
+        <div class="zone">音乐胶囊大小</div>
+        <div class="slider-row"><div class="rtitle">胶囊圆角</div><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:45%"></div></div><div class="sval">22dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊高度</div><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div><div class="sval">52dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊宽度</div><div class="track"><div class="fill" style="width:55%"></div><div class="knob" style="left:55%"></div></div><div class="sval">200dp</div></div>
+        <div class="zone">播放器卡片大小</div>
+        <div class="slider-row"><div class="rtitle">卡片宽度</div><div class="track"><div class="fill" style="width:60%"></div><div class="knob" style="left:60%"></div></div><div class="sval">300dp</div></div>
+        <div class="slider-row"><div class="rtitle">卡片圆角</div><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:45%"></div></div><div class="sval">22dp</div></div>
+        <div class="slider-row"><div class="rtitle">卡片比例</div><div class="track"><div class="fill" style="width:80%"></div><div class="knob" style="left:80%"></div></div><div class="sval">90%</div></div>
+        <div class="srow last">
+          <div class="rtext"><div class="rtitle">恢复默认</div><div class="rsub">音乐的大小滑条全部回默认</div></div>
+          <div class="chev">›</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="card-dl" style="--c:#f59e0b">
+      <div class="card-head">
+        <div class="disc">下</div>
+        <div class="ctext"><div class="ctitle">下载与安装</div><div class="csub">下载进度实时胶囊</div></div>
+        <div class="switch on" data-switch></div>
+      </div>
+      <div class="card-body">
+        <p class="desc">胶囊底部有细进度条，第二行显示已下/总量、速度和剩余时间。下载完成显示"下载完成"，3 秒后自动消散。</p>
+      </div>
+    </div>
+
+    <div class="card" id="card-code" style="--c:#2ea86b">
+      <div class="card-head">
+        <div class="disc">码</div>
+        <div class="ctext"><div class="ctitle">验证码与隐私</div><div class="csub">验证码、取件码和隐私打码</div></div>
+        <div class="switch on" data-switch></div>
+      </div>
+      <div class="card-body">
+        <p class="desc">识别出验证码自动复制到剪贴板，取件码自动钉住不消散。胶囊只显示大字码、不带标题；智能柜的柜号一起显示，中英文都认。</p>
+        <div class="zone">敏感打码</div>
+        <div class="srow" id="row-maskmaster">
+          <div class="rtext"><div class="rtitle">敏感打码</div><div class="rsub">敏感场景下藏起内容</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">打码时验证码、取件码只显示应用名和「验证码 ••••••」，状态解除自动恢复全文。自动复制不受影响，剪贴板里还是真码。</p>
+        <div class="srow" id="row-masklock">
+          <div class="rtext"><div class="rtitle">锁屏时</div><div class="rsub">手机锁屏时打码</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <div class="srow" id="row-maskrecord">
+          <div class="rtext"><div class="rtitle">录屏、投屏时</div><div class="rsub">录屏或投屏时打码</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <div class="srow last" id="row-maskapps">
+          <div class="rtext"><div class="rtitle">普通应用也打码</div><div class="rsub">普通通知也只显示应用名和「内容已隐藏」</div></div>
+          <div class="switch" data-switch></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 来电卡：按 wei 要求完全保持现状 -->
+    <div class="card" id="card-call" style="--c:#8e6cc8">
+      <div class="card-head">
+        <div class="disc">电</div>
+        <div class="ctext"><div class="ctitle">来电</div><div class="csub">接听 · 挂断 · 扬声器</div></div>
+        <div class="switch on" data-switch></div>
+      </div>
+      <div class="card-body">
+        <p class="desc">来电有专属胶囊：接听、挂断、扬声器切换都在上面。来电永不自动消散。</p>
+        <div class="srow" id="row-callright">
+          <div class="rtext"><div class="rtitle">来电放右边</div><div class="rsub">来电胶囊放右手边 · 屏幕中间偏下</div></div>
+          <div class="switch" data-switch></div>
+        </div>
+        <div class="srow" id="row-simcall">
+          <div class="rtext"><div class="rtitle">模拟来电</div><div class="rsub">弹一颗假来电胶囊 · 调位置用</div></div>
+          <div class="switch" data-switch></div>
+        </div>
+        <div class="zone">来电大小</div>
+        <div class="slider-row disabled"><div class="rtitle">来电高度</div><div class="track"><div class="fill" style="width:40%"></div><div class="knob" style="left:40%"></div></div><div class="sval">中间</div></div>
+        <p class="sdesc">来电高度在「来电放右边」开着时可调（保持现状）。</p>
+        <div class="slider-row"><div class="rtitle">胶囊圆角</div><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:45%"></div></div><div class="sval">22dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊高度</div><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div><div class="sval">52dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊宽度</div><div class="track"><div class="fill" style="width:55%"></div><div class="knob" style="left:55%"></div></div><div class="sval">200dp</div></div>
+        <div class="srow last">
+          <div class="rtext"><div class="rtitle">恢复默认</div><div class="rsub">来电的大小滑条全部回默认</div></div>
+          <div class="chev">›</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 呈现与打开 ===== -->
+    <div class="group">呈现与打开</div>
+
+    <div class="card" id="card-open" style="--c:#14b8a6">
+      <div class="card-head">
+        <div class="disc">开</div>
+        <div class="ctext"><div class="ctitle">打开方式</div><div class="csub">通知怎么出现、点开之后怎么打开</div></div>
+        <div class="chev">›</div>
+      </div>
+      <div class="card-body">
+        <div class="srow last" id="row-present" style="display:block">
+          <div class="rtext"><div class="rtitle">呈现形式</div><div class="rsub">通知出现的样子，三选一</div></div>
+          <div class="seg" data-seg>
+            <button>胶囊模式</button><button class="sel">展开卡片</button><button>大卡片模式</button>
+          </div>
+          <p class="sdesc">胶囊模式：只出胶囊，点胶囊不展开。展开卡片：先出胶囊，点一下展开看全文。大卡片模式：通知一来就是大卡片依次排列。音乐、来电不走这个设置。</p>
+        </div>
+        <div class="srow" id="row-openapp" style="display:block">
+          <div class="rtext"><div class="rtitle">点卡片打开 App</div><div class="rsub">点展开的卡片时，用哪种方式打开</div></div>
+          <div class="seg" data-seg>
+            <button class="sel">小窗</button><button>全屏</button>
+          </div>
+          <p class="sdesc">小窗不离开当前界面，全屏直接跳过去。</p>
+        <div class="srow" id="row-dissipate">
+          <div class="rtext"><div class="rtitle">自动消散</div><div class="rsub">点空白处，清掉所有胶囊</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">点一下屏幕空白处，所有没钉住的胶囊逐条消散。关掉后只能右滑逐个消散、或左滑收进扇子。</p>
+        <div class="srow last" id="row-destroy">
+          <div class="rtext"><div class="rtitle">自动销毁</div><div class="rsub">消散时连系统通知一起撤销</div></div>
+          <div class="switch" data-switch></div>
+        </div>
+        <p class="sdesc">开着时消散的通知同时从通知栏消失；关着（默认）通知还留在通知栏。音乐通知不撤销，撤销会停掉音乐。</p>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- ===== 安静规则 ===== -->
+    <div class="group">安静规则</div>
+
+    <div class="card" id="card-quiet" style="--c:#6366f1">
+      <div class="card-head">
+        <div class="disc">静</div>
+        <div class="ctext"><div class="ctitle">安静规则</div><div class="csub">临时静默和应用名单，都在这一页</div></div>
+        <div class="chev">›</div>
+      </div>
+      <div class="card-body">
+        <p class="desc">点进去是一页：上面是临时静默，下面是应用名单——每个应用一行，平时怎么弹、游戏视频里让不让它突破，并排设完。这一页的样子在本页最下面。</p>
+      </div>
+    </div>
+
+    <!-- ===== 外观 ===== -->
+    <div class="group">外观</div>
+
+    <div class="card" id="card-look" style="--c:#d64550">
+      <div class="card-head">
+        <div class="disc">扇</div>
+        <div class="ctext"><div class="ctitle">外观设置</div><div class="csub">扇子位置 · 胶囊 · 卡片 · 取色与滚动</div></div>
+        <div class="chev">›</div>
+      </div>
+      <div class="card-body">
+        <div class="zone" style="margin-top:2px">胶囊长相（从主页搬进来的三个开关）</div>
+        <div class="srow" id="row-tint">
+          <div class="rtext"><div class="rtitle">胶囊自动取色</div><div class="rsub">底色跟 App 图标主色走</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">关掉后全部用默认白色底+黑描边。来电胶囊不受影响。</p>
+        <div class="srow" id="row-scroll">
+          <div class="rtext"><div class="rtitle">胶囊滚动</div><div class="rsub">内容太长时滚动显示</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">关掉后超长内容以 … 截断。</p>
+        <div class="srow" id="row-fandim">
+          <div class="rtext"><div class="rtitle">扇子自动变淡</div><div class="rsub">扇子闲置 5 秒变半透明</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <p class="sdesc">点一下扇子恢复并展开。关掉后一直不透明。</p>
+
+        <div class="zone">扇子位置</div>
+        <div class="slider-row" id="row-fanpos"><div class="rtitle">扇子位置</div><div class="track"><div class="fill" style="width:0%"></div><div class="knob" style="left:0%"></div></div><div class="sval">0%</div></div>
+        <div class="presets"><span>顶部 0</span><span>中部 40</span><span>下部 70</span></div>
+        <p class="sdesc">整组（胶囊+扇子）在这个高度，胶囊从扇子那里弹出来。拖任一滑条自动展开实时预览。</p>
+
+        <div class="zone">胶囊</div>
+        <div class="slider-row"><div class="rtitle">胶囊圆角</div><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:45%"></div></div><div class="sval">22dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊高度</div><div class="track"><div class="fill" style="width:44%"></div><div class="knob" style="left:44%"></div></div><div class="sval">44dp</div></div>
+        <div class="slider-row"><div class="rtitle">胶囊宽度</div><div class="track"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div><div class="sval">180dp</div></div>
+
+        <div class="zone">卡片</div>
+        <div class="slider-row"><div class="rtitle">卡片宽度</div><div class="track"><div class="fill" style="width:60%"></div><div class="knob" style="left:60%"></div></div><div class="sval">300dp</div></div>
+        <div class="slider-row"><div class="rtitle">卡片圆角</div><div class="track"><div class="fill" style="width:45%"></div><div class="knob" style="left:45%"></div></div><div class="sval">22dp</div></div>
+        <div class="slider-row"><div class="rtitle">卡片最多行数</div><div class="track"><div class="fill" style="width:53%"></div><div class="knob" style="left:53%"></div></div><div class="sval">8 行</div></div>
+        <div class="slider-row"><div class="rtitle">卡片比例</div><div class="track"><div class="fill" style="width:100%"></div><div class="knob" style="left:100%"></div></div><div class="sval">100%</div></div>
+
+        <div class="zone">扇子图标</div>
+        <div class="slider-row"><div class="rtitle">重叠度</div><div class="track"><div class="fill" style="width:25%"></div><div class="knob" style="left:25%"></div></div><div class="sval">4dp</div></div>
+        <div class="srow last" style="display:block">
+          <div class="rtext"><div class="rtitle">排列方向</div><div class="rsub">横向往中心扇开，纵向往下叠</div></div>
+          <div class="seg" data-seg>
+            <button class="sel">横向</button><button>纵向</button>
+          </div>
+        </div>
+        <div class="srow last">
+          <div class="rtext"><div class="rtitle">恢复默认</div><div class="rsub">外观全部回默认（含扇子位置）</div></div>
+          <div class="chev">›</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 其他 ===== -->
+    <!-- 页脚 -->
+    <div class="footer">
+      <div>胶囊跟着扇子一起走，从扇子那里弹出来；改完立即生效，不用重启。点一下卡片可以展开说明。</div>
+      <div>日志文件：BubbleNotify.log</div>
+      <div class="links"><span>开源仓库</span> · <span>酷安主页</span> · <span>请我喝咖啡</span> · <span id="foot-update">检查更新</span></div>
+      <div>GPL-3.0-only · 部分实现参考了 Flyme灵动岛</div>
+      <div class="links"><span id="foot-guide">功能引导</span></div>
+    </div>
+
+    <div class="banner" style="margin-top:30px">↓ 点主页「安静规则」进去，就是下面这一页（跟主页同一套卡片风格）</div>
+
+    <div class="header">
+      <div class="disc">静</div>
+      <div class="ctext">
+        <div class="htitle">安静规则</div>
+        <div class="hsub">临时静默 · 应用名单</div>
+      </div>
+    </div>
+
+    <div class="card open" id="page-silence" style="--c:#6366f1">
+      <div class="card-head">
+        <div class="disc">静</div>
+        <div class="ctext"><div class="ctitle">临时静默</div><div class="csub">开会、午睡时用 · 到点自动恢复</div></div>
+      </div>
+      <div class="card-body" style="display:block">
+        <p class="desc">开启后普通通知先排队、不弹胶囊，结束时按顺序补弹；音乐、下载、实况不停。跟系统勿扰双向联动。</p>
+        <div class="srow">
+          <div class="rtext"><div class="rtitle">临时静默未开启</div><div class="rsub">现在是正常模式</div></div>
+          <span style="background:#6366f1;color:#fff;border-radius:999px;padding:7px 14px;font-size:13px;font-weight:600">开启临时静默</span>
+        </div>
+        <div class="srow" style="display:block">
+          <div class="rtext"><div class="rtitle">静默时长</div></div>
+          <div class="seg" data-seg><button>30 分钟</button><button class="sel">1 小时</button><button>2 小时</button></div>
+        </div>
+        <div class="srow">
+          <div class="rtext"><div class="rtitle">与系统勿扰联动</div><div class="rsub">开静默同步开勿扰，手动关勿扰＝提前取消</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+        <div class="srow last">
+          <div class="rtext"><div class="rtitle">静默时来电突破</div><div class="rsub">关掉则来电也排队</div></div>
+          <div class="switch on" data-switch></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card open" id="page-apps" style="--c:#0ea5e9">
+      <div class="card-head">
+        <div class="disc">名</div>
+        <div class="ctext"><div class="ctitle">应用名单</div><div class="csub">每个应用一行：平时待遇 + 场景里让不让</div></div>
+      </div>
+      <div class="card-body" style="display:block">
+        <p class="desc">「场景里」指游戏、视频全屏时：突破＝照常弹，排队＝先收着、退出场景再补弹。永不弹最大：设了永不弹，场景里突破了也不弹。</p>
+        <div class="srow" style="display:block">
+          <div class="rtitle">微信</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">平时</span><div class="seg" data-seg style="flex:1"><button class="sel">跟随</button><button>只贴边</button><button>永不弹</button></div></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">场景里</span><div class="seg" data-seg style="flex:1"><button>排队</button><button class="sel">突破</button></div></div>
+        </div>
+        <div class="srow" style="display:block">
+          <div class="rtitle">QQ</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">平时</span><div class="seg" data-seg style="flex:1"><button class="sel">跟随</button><button>只贴边</button><button>永不弹</button></div></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">场景里</span><div class="seg" data-seg style="flex:1"><button>排队</button><button class="sel">突破</button></div></div>
+        </div>
+        <div class="srow" style="display:block">
+          <div class="rtitle">淘宝</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">平时</span><div class="seg" data-seg style="flex:1"><button>跟随</button><button>只贴边</button><button class="sel">永不弹</button></div></div>
+          <div style="display:flex;gap:8px;align-items:center;margin-top:7px"><span class="rsub" style="width:44px">场景里</span><div class="seg" data-seg style="flex:1"><button class="sel">排队</button><button>突破</button></div></div>
+        </div>
+        <div class="srow last">
+          <div class="rtext"><div class="rtitle">添加应用</div><div class="rsub">没设过的应用默认跟随、场景里排队</div></div>
+          <div class="chev">›</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="groupnote">判定顺序：先看应用名单（永不弹一票否决）→ 再看场景（不在突破名单就排队）→ 最后临时静默（静默中一律排队、到点补弹）。</p>
+  </div>
+
+<script>
+  // ---------- 卡片展开 ----------
+  document.querySelectorAll('.card-head').forEach(function (h) {
+    h.addEventListener('click', function (e) {
+      if (e.target.closest('[data-switch]')) return;
+      h.parentElement.classList.toggle('open');
+    });
+  });
+
+  // ---------- 开关 ----------
+  document.querySelectorAll('[data-switch]').forEach(function (sw) {
+    sw.addEventListener('click', function (e) {
+      e.stopPropagation();
+      sw.classList.toggle('on');
+    });
+  });
+
+  // ---------- 单选分段 ----------
+  document.querySelectorAll('[data-seg]').forEach(function (seg) {
+    seg.addEventListener('click', function (e) {
+      var b = e.target.closest('button'); if (!b) return;
+      seg.querySelectorAll('button').forEach(function (x) { x.classList.remove('sel'); });
+      b.classList.add('sel');
+    });
+  });
+
+  // ---------- 滑条（示意，可点） ----------
+  document.querySelectorAll('.track').forEach(function (tr) {
+    tr.addEventListener('click', function (e) {
+      if (tr.closest('.disabled')) return;
+      var r = tr.getBoundingClientRect();
+      var pct = Math.max(0, Math.min(100, Math.round((e.clientX - r.left) / r.width * 100)));
+      tr.querySelector('.fill').style.width = pct + '%';
+      tr.querySelector('.knob').style.left = pct + '%';
+      var val = tr.parentElement.querySelector('.sval');
+      if (val && /%$/.test(val.textContent)) val.textContent = pct + '%';
+    });
+  });
+
+  // ---------- 搜索 ----------
+  var INDEX = [
+    { t: '通知气泡', p: '胶囊类型', k: '通知 气泡 胶囊 贴边 总开关', id: 'card-notif' },
+    { t: '音乐胶囊', p: '胶囊类型', k: '音乐 播放器 歌词 歌手 专辑', id: 'card-music' },
+    { t: '模拟音乐', p: '音乐胶囊 › 模拟音乐', k: '模拟 假 调试 调大小', id: 'row-simmusic' },
+    { t: '反方向的钟', p: '音乐胶囊 › 反方向的钟', k: '彩蛋 钟 跑马灯', id: 'row-clock' },
+    { t: 'QQ音乐flyme版免费听', p: '音乐胶囊 › QQ音乐免费听', k: 'qq 音乐 免费 时长 补时长', id: 'row-qqfree' },
+    { t: '下载与安装', p: '胶囊类型', k: '下载 安装 进度 速度', id: 'card-dl' },
+    { t: '验证码与隐私', p: '胶囊类型', k: '验证码 取件码 复制 钉住 柜号 快递 短信码 隐私', id: 'card-code' },
+    { t: '来电', p: '胶囊类型', k: '电话 来电 接听 挂断 扬声器', id: 'card-call' },
+    { t: '来电放右边', p: '来电 › 来电放右边', k: '右边 位置 右手', id: 'row-callright' },
+    { t: '模拟来电', p: '来电 › 模拟来电', k: '模拟 假 调试 调位置', id: 'row-simcall' },
+    { t: '打开方式', p: '呈现与打开', k: '打开 呈现 大卡片 展开 小窗 全屏', id: 'card-open' },
+    { t: '呈现形式', p: '打开方式 › 呈现形式', k: '大卡片 大卡片模式 胶囊模式 展开卡片 呈现 形式 模式 三选一', id: 'row-present' },
+    { t: '音乐卡片', p: '音乐胶囊 › 音乐卡片', k: '音乐 展开 播放器卡片 点音乐', id: 'row-musiccard' },
+    { t: '点卡片打开 App', p: '打开方式 › 点卡片打开 App', k: '小窗 全屏 打开 应用 app', id: 'row-openapp' },
+    { t: '自动消散', p: '打开方式 › 自动消散', k: '消散 空白 清除 点空白', id: 'row-dissipate' },
+    { t: '自动销毁', p: '打开方式 › 自动销毁', k: '销毁 撤销 通知栏 一起没', id: 'row-destroy' },
+    { t: '应用规则', p: '安静规则 › 应用名单', k: '应用 规则 不弹 只贴边 单个 每个应用 名单', id: 'page-apps' },
+    { t: '场景例外', p: '安静规则 › 应用名单', k: '游戏 视频 全屏 突破 横屏 场景 例外 排队', id: 'page-apps' },
+    { t: '临时静默', p: '安静规则 › 临时静默', k: '安静 静默 勿扰 开会 午睡 午休 一段时间', id: 'page-silence' },
+    { t: '外观设置', p: '外观', k: '外观 扇子 位置 大小 圆角 长相', id: 'card-look' },
+    { t: '胶囊自动取色', p: '外观设置 › 胶囊自动取色', k: '颜色 取色 图标 底色 主色', id: 'row-tint' },
+    { t: '胶囊滚动', p: '外观设置 › 胶囊滚动', k: '滚动 太长 省略 截断 跑马灯', id: 'row-scroll' },
+    { t: '扇子自动变淡', p: '外观设置 › 扇子自动变淡', k: '扇子 变淡 半透明 挡屏幕 黑屏 挡住', id: 'row-fandim' },
+    { t: '扇子位置', p: '外观设置 › 扇子位置', k: '扇子 位置 高度 上下', id: 'row-fanpos' },
+    { t: '敏感打码', p: '验证码与隐私 › 敏感打码', k: '打码 验证码 锁屏 录屏 投屏 隐私 隐藏 码 敏感', id: 'row-maskmaster' },
+    { t: '锁屏时', p: '验证码与隐私 › 锁屏时', k: '锁屏 打码 验证码', id: 'row-masklock' },
+    { t: '录屏、投屏时', p: '验证码与隐私 › 录屏、投屏时', k: '录屏 投屏 打码 验证码 录像', id: 'row-maskrecord' },
+    { t: '普通应用也打码', p: '验证码与隐私 › 普通应用也打码', k: '普通应用 隐藏 内容 打码 微信 消息', id: 'row-maskapps' },
+    { t: '重启系统界面', p: '顶部状态行', k: '重启 系统界面 systemui 卡死', id: 'statusrow' },
+    { t: '检查更新', p: '页脚', k: '更新 版本 新版', id: 'foot-update' },
+    { t: '功能引导', p: '页脚', k: '引导 教程 新手 重看', id: 'foot-guide' }
+  ];
+
+  var input = document.getElementById('searchInput');
+  var results = document.getElementById('results');
+
+  function hideResults() { results.classList.remove('open'); results.innerHTML = ''; }
+
+  function jump(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    hideResults();
+    input.blur();
+    var card = el.closest('.card');
+    if (card) card.classList.add('open');
+    setTimeout(function () {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      var isCard = el.classList.contains('card');
+      var cls = isCard ? 'flash' : 'rowflash';
+      el.classList.remove('flash', 'rowflash');
+      void el.offsetWidth;
+      el.classList.add(cls);
+      setTimeout(function () { el.classList.remove(cls); }, 1600);
+    }, 90);
+  }
+
+  function doSearch() {
+    var q = input.value.trim().toLowerCase();
+    if (!q) { hideResults(); return; }
+    var hits = INDEX.filter(function (it) {
+      return (it.t + ' ' + it.p + ' ' + it.k).toLowerCase().indexOf(q) >= 0;
+    }).slice(0, 8);
+    results.innerHTML = '';
+    if (!hits.length) {
+      var d = document.createElement('div');
+      d.className = 'nores';
+      d.innerHTML = '没有找到，试试：<span class="chip">打码</span><span class="chip">静默</span><span class="chip">游戏</span>';
+      d.querySelectorAll('.chip').forEach(function (c) {
+        c.addEventListener('click', function () { input.value = c.textContent; doSearch(); input.focus(); });
+      });
+      results.appendChild(d);
+    } else {
+      hits.forEach(function (it) {
+        var d = document.createElement('div');
+        d.className = 'result';
+        var rt = document.createElement('div'); rt.className = 'rt'; rt.textContent = it.t;
+        var rp = document.createElement('div'); rp.className = 'rp'; rp.textContent = it.p;
+        d.appendChild(rt); d.appendChild(rp);
+        d.addEventListener('click', function () { jump(it.id); });
+        results.appendChild(d);
+      });
+    }
+    results.classList.add('open');
+  }
+
+  input.addEventListener('input', doSearch);
+  input.addEventListener('focus', function () { if (input.value.trim()) doSearch(); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      var first = results.querySelector('.result');
+      if (first) first.click();
+    }
+  });
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('.search')) hideResults();
+  });
+</script>
+</body>
+</html>

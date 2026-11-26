@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>临时静默 × 勿扰联动 — 预览 v2（未实现，仅看样子）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: #101014; font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; color: #fff; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 18px 14px 28px; }
+  .banner { background: #2a2a33; border: 1px dashed #55555f; border-radius: 10px; color: #b9b9c4; font-size: 13px; padding: 8px 12px; margin-bottom: 16px; text-align: center; max-width: 380px; }
+  .phone { width: 100%; max-width: 380px; background: #17171c; border-radius: 28px; padding: 16px 14px 20px; box-shadow: 0 0 0 1px #2e2e38, 0 12px 40px rgba(0,0,0,.5); }
+  .page-title { font-size: 20px; font-weight: 700; margin: 2px 4px 4px; }
+  .page-sub { font-size: 12px; color: #9a9aa5; margin: 0 4px 14px; }
+  .card { border-radius: 22px; padding: 14px 14px; display: flex; align-items: center; background: #6366f1; cursor: pointer; }
+  .card.off { opacity: .55; }
+  .icon { width: 36px; height: 36px; border-radius: 10px; background: #fff; color: #6366f1; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .texts { flex: 1; margin-left: 10px; min-width: 0; }
+  .texts .t { font-size: 15px; font-weight: 700; }
+  .texts .s { font-size: 12px; color: rgba(255,255,255,.9); margin-top: 2px; }
+  .chev { font-size: 24px; color: #fff; margin-left: 6px; }
+  .status { margin-top: 10px; border-radius: 18px; background: #232329; border: 1px solid #33333d; padding: 14px; display: none; }
+  .status.on { display: block; }
+  .status .row { display: flex; align-items: baseline; justify-content: space-between; }
+  .status .label { font-size: 13px; color: #c9c9d2; }
+  .countdown { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+  .status .hint { font-size: 12px; color: #9a9aa5; margin-top: 6px; line-height: 1.6; }
+  .cancel { margin-top: 12px; width: 100%; border: none; border-radius: 12px; padding: 11px; font-size: 14px; font-weight: 700; background: #6366f1; color: #fff; cursor: pointer; }
+  .cancel:active { opacity: .8; }
+  .section { margin-top: 18px; }
+  .section h3 { font-size: 13px; color: #9a9aa5; margin: 0 4px 8px; font-weight: 600; }
+  .chips { display: flex; gap: 8px; }
+  .chip { flex: 1; text-align: center; padding: 10px 0; border-radius: 12px; background: #232329; border: 1px solid #33333d; font-size: 14px; cursor: pointer; }
+  .chip.sel { background: #6366f1; border-color: #6366f1; font-weight: 700; }
+  .linkrow { display: flex; align-items: center; background: #232329; border: 1px solid #33333d; border-radius: 14px; padding: 12px 14px; }
+  .linkrow .lt { flex: 1; }
+  .linkrow .lt .a { font-size: 14px; font-weight: 600; }
+  .linkrow .lt .b { font-size: 12px; color: #9a9aa5; margin-top: 2px; }
+  .sw { width: 46px; height: 27px; border-radius: 999px; background: #3a3a44; position: relative; cursor: pointer; flex-shrink: 0; transition: background .15s; }
+  .sw::after { content: ""; position: absolute; top: 3px; left: 3px; width: 21px; height: 21px; border-radius: 50%; background: #fff; transition: left .15s; }
+  .sw.on { background: #6366f1; }
+  .sw.on::after { left: 22px; }
+  .dndstate { margin-top: 8px; font-size: 12px; color: #a5b4fc; min-height: 16px; padding: 0 4px; }
+  .note { background: #232329; border-radius: 14px; padding: 12px 14px; font-size: 13px; line-height: 1.8; color: #d6d6de; }
+  .note b { color: #fff; }
+  .note .q { color: #a5b4fc; }
+  .foot { max-width: 380px; margin-top: 16px; font-size: 12px; color: #8a8a95; line-height: 1.7; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 预览 v2（双向联动版），没写代码 · 点一点试手感 · 你点头我再动手</div>
+
+  <div class="phone">
+    <div class="page-title">设置</div>
+    <div class="page-sub">flymebobo · 临时静默 × 勿扰联动</div>
+
+    <div class="card off" id="card">
+      <div class="icon">静</div>
+      <div class="texts">
+        <div class="t">临时静默</div>
+        <div class="s" id="cardSub">开会 / 午睡按一下，1 小时后自动恢复</div>
+      </div>
+      <div class="chev">›</div>
+    </div>
+
+    <div class="status" id="status">
+      <div class="row"><span class="label">正在静默 · 到点自动恢复</span><span class="countdown" id="cd">59:59</span></div>
+      <div class="hint" id="statusHint">系统勿扰已同步开启，手机和气泡一起安静。到点后勿扰自动关、气泡按顺序补弹。来电照常突破。</div>
+      <button class="cancel" id="cancelBtn">提前取消，马上恢复</button>
+    </div>
+
+    <div class="section">
+      <h3>静默时长（点一下切换默认）</h3>
+      <div class="chips" id="chips">
+        <div class="chip" data-min="30">30 分钟</div>
+        <div class="chip sel" data-min="60">1 小时</div>
+        <div class="chip" data-min="120">2 小时</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>勿扰联动（双向）</h3>
+      <div class="linkrow">
+        <div class="lt">
+          <div class="a">与系统勿扰联动</div>
+          <div class="b">开静默 → 勿扰同步开；勿扰被打开 → 气泡自动降级</div>
+        </div>
+        <div class="sw on" id="linkSw"></div>
+      </div>
+      <div class="linkrow" style="margin-top:8px;">
+        <div class="lt">
+          <div class="a">系统勿扰（模拟开关，试联动用）</div>
+          <div class="b">在真实手机上这是系统状态，这里点它模拟「你从别处开了勿扰」</div>
+        </div>
+        <div class="sw" id="dndSw"></div>
+      </div>
+      <div class="dndstate" id="dndState"></div>
+    </div>
+
+    <div class="section">
+      <h3>联动规矩（预览里的定法）</h3>
+      <div class="note">
+        · 开<b>临时静默</b> → 系统勿扰<b>同步打开</b>，到点/取消时<b>一起关</b><br>
+        · 系统勿扰被<b>任何方式</b>打开（手动/定时）→ 气泡<b>自动降级排队</b>，勿扰关了就恢复<br>
+        · 静默期间你<b>手动关掉勿扰</b> → 视为提前取消，气泡立即恢复<br>
+        · 气泡<b>不弹</b>先<b>排队</b>，恢复后补弹；<b>来电照常突破</b><br>
+        <span class="q">？还剩两个小口要你定：消息排队补弹，还是干脆不弹只进历史？来电突破保留吗？</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">第一次用需要给模块一次「勿扰访问」授权（系统设置里点一下，一次性）。<br>实现后打算放进 v525，跟打码 v524 分开测。</div>
+
+<script>
+  var card = document.getElementById('card');
+  var cardSub = document.getElementById('cardSub');
+  var status = document.getElementById('status');
+  var cd = document.getElementById('cd');
+  var linkSw = document.getElementById('linkSw');
+  var dndSw = document.getElementById('dndSw');
+  var dndState = document.getElementById('dndState');
+  var minutes = 60, remain = 0, timer = null;
+  var silencing = false, dndBySilence = false;
+
+  function fmt(s) {
+    var m = Math.floor(s / 60), ss = s % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
+  }
+  function durText() {
+    return minutes >= 60 ? (minutes / 60) + ' 小时' : minutes + ' 分钟';
+  }
+  function setDnd(on, bySilence) {
+    dndSw.classList.toggle('on', on);
+    if (on) {
+      dndState.textContent = bySilence
+        ? '系统勿扰：已开（被临时静默同步打开）→ 气泡降级中'
+        : '系统勿扰：已开 → 气泡已自动降级，消息排队中';
+    } else {
+      dndState.textContent = '系统勿扰：已关 → 气泡恢复正常';
+    }
+  }
+  function start() {
+    silencing = true;
+    remain = minutes * 60 - 1;
+    card.classList.remove('off');
+    status.classList.add('on');
+    cd.textContent = fmt(remain);
+    cardSub.textContent = '静默中 · ' + fmt(remain + 1) + ' 后自动恢复';
+    if (linkSw.classList.contains('on')) { dndBySilence = true; setDnd(true, true); }
+    clearInterval(timer);
+    timer = setInterval(function () {
+      remain--;
+      if (remain < 0) { stop(true); return; }
+      cd.textContent = fmt(remain);
+      cardSub.textContent = '静默中 · ' + fmt(remain) + ' 后自动恢复';
+    }, 1000);
+  }
+  function stop(expired) {
+    silencing = false;
+    clearInterval(timer); timer = null;
+    status.classList.remove('on');
+    card.classList.add('off');
+    cardSub.textContent = expired ? '已自动恢复 · 下次按一下再静默'
+      : '开会 / 午睡按一下，' + durText() + '后自动恢复';
+    if (dndBySilence) { dndBySilence = false; setDnd(false, false); }
+  }
+  card.addEventListener('click', function () {
+    if (silencing) { stop(false); } else { start(); }
+  });
+  document.getElementById('cancelBtn').addEventListener('click', function () { stop(false); });
+  document.getElementById('chips').addEventListener('click', function (e) {
+    var chip = e.target.closest('.chip'); if (!chip) return;
+    document.querySelectorAll('.chip').forEach(function (c) { c.classList.remove('sel'); });
+    chip.classList.add('sel');
+    minutes = parseInt(chip.dataset.min, 10);
+    if (!silencing) {
+      cardSub.textContent = '开会 / 午睡按一下，' + durText() + '后自动恢复';
+    }
+  });
+  linkSw.addEventListener('click', function () {
+    linkSw.classList.toggle('on');
+  });
+  dndSw.addEventListener('click', function () {
+    var on = !dndSw.classList.contains('on');
+    if (!on && dndBySilence && silencing) {
+      dndBySilence = false;
+      stop(false);
+      setDnd(false, false);
+      dndState.textContent = '你手动关了勿扰 → 临时静默视为提前取消，气泡已恢复';
+      return;
+    }
+    if (!on) { dndBySilence = false; }
+    setDnd(on, false);
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提示音设置 · 预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  .phone { width:100%; max-width:392px; background:#f4f5f9; border-radius:26px; box-shadow:0 10px 30px rgba(30,40,60,.18); padding:18px 14px 20px; }
+  .ptitle { font-size:20px; font-weight:700; padding:2px 6px 2px; }
+  .psub { font-size:12.5px; color:#7a8699; padding:0 6px 14px; }
+  .card { background:#fff; border-radius:18px; padding:6px 14px; margin-bottom:12px; box-shadow:0 2px 8px rgba(30,40,60,.05); }
+  .chead { display:flex; align-items:center; gap:10px; padding:10px 0 8px; }
+  .disc { width:34px; height:34px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; color:#fff; flex:none; }
+  .ctitle { font-size:15.5px; font-weight:600; flex:1; }
+  .csub { font-size:12px; color:#98a2b3; font-weight:400; display:block; margin-top:1px; }
+  .switch { width:46px; height:27px; border-radius:999px; background:#5b6cff; position:relative; flex:none; cursor:pointer; transition:background .2s; }
+  .switch::after { content:""; position:absolute; top:3px; right:3px; width:21px; height:21px; border-radius:50%; background:#fff; transition:all .2s; }
+  .switch.off { background:#d4d9e2; }
+  .switch.off::after { right:22px; }
+  .snd { display:flex; align-items:center; gap:10px; padding:10px 2px; border-top:1px solid #f0f1f5; cursor:pointer; }
+  .snd .nm { flex:1; font-size:14.5px; }
+  .snd .nm small { display:block; color:#98a2b3; font-size:11.5px; margin-top:1px; }
+  .play { width:30px; height:30px; border-radius:50%; background:#eef0ff; color:#5b6cff; display:flex; align-items:center; justify-content:center; font-size:12px; flex:none; }
+  .radio { width:20px; height:20px; border-radius:50%; border:2px solid #d4d9e2; flex:none; position:relative; }
+  .snd.sel .radio { border-color:#5b6cff; }
+  .snd.sel .radio::after { content:""; position:absolute; inset:3px; border-radius:50%; background:#5b6cff; }
+  .snd.sel .nm { font-weight:600; }
+  .cust { display:flex; align-items:center; gap:10px; padding:11px 2px; border-top:1px solid #f0f1f5; cursor:pointer; }
+  .cust .nm { flex:1; font-size:14.5px; }
+  .cust .nm small { display:block; color:#98a2b3; font-size:11.5px; margin-top:1px; }
+  .pick { font-size:12.5px; color:#5b6cff; background:#eef0ff; padding:6px 12px; border-radius:999px; flex:none; }
+  .search { display:flex; align-items:center; gap:8px; background:#f0f1f6; border-radius:999px; padding:8px 14px; margin:4px 0 6px; color:#98a2b3; font-size:13.5px; }
+  .app { display:flex; align-items:center; gap:10px; padding:9px 2px; border-top:1px solid #f0f1f5; }
+  .app .ic { width:32px; height:32px; border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:14px; color:#fff; flex:none; }
+  .app .nm { flex:1; font-size:14.5px; }
+  .rule { font-size:12.5px; padding:6px 12px; border-radius:999px; cursor:pointer; flex:none; user-select:none; }
+  .rule.global { background:#eef0f4; color:#66707f; }
+  .rule.mute { background:#ffe9e9; color:#d64545; }
+  .rule.custom { background:#e7f6ec; color:#1d9e57; }
+  .grey { opacity:.38; pointer-events:none; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 提示音完整版 · 界面预览（v535）<br>选音效、自定义、按应用都在这一页；点一点试试</div>
+
+  <div class="phone">
+    <div class="ptitle">气泡提示音</div>
+    <div class="psub">通知气泡 › 气泡提示音</div>
+
+    <div class="card">
+      <div class="chead">
+        <div class="disc" style="background:#5b6cff">♪</div>
+        <div class="ctitle">提示音<span class="csub">气泡弹出时轻响一声</span></div>
+        <div class="switch" id="master"></div>
+      </div>
+      <div id="panel">
+        <div class="snd" data-snd="气泡啵"><span class="play">▶</span><div class="nm">气泡啵<small>短促 · 气泡破裂声</small></div><span class="radio"></span></div>
+        <div class="snd" data-snd="清脆叮"><span class="play">▶</span><div class="nm">清脆叮<small>单音铃 · 清亮</small></div><span class="radio"></span></div>
+        <div class="snd" data-snd="叮咚"><span class="play">▶</span><div class="nm">叮咚<small>双音 · 存在感强</small></div><span class="radio"></span></div>
+        <div class="snd" data-snd="水滴"><span class="play">▶</span><div class="nm">水滴<small>柔和下滑音</small></div><span class="radio"></span></div>
+        <div class="snd sel" data-snd="轻木"><span class="play">▶</span><div class="nm">轻木<small>木质轻敲 · 默认</small></div><span class="radio"></span></div>
+        <div class="snd" data-snd="布谷鸟"><span class="play">▶</span><div class="nm">布谷鸟<small>真鸟叫录音 · 两声</small></div><span class="radio"></span></div>
+        <div class="cust" id="custRow"><div class="nm">自定义音效<small id="custName">未选择 · 从手机里挑一个音频文件</small></div><span class="pick">选择文件</span></div>
+      </div>
+    </div>
+
+    <div class="card" id="appCard">
+      <div class="chead">
+        <div class="disc" style="background:#ff8a3d">▦</div>
+        <div class="ctitle">按应用设置<span class="csub">不设就是跟随全局</span></div>
+      </div>
+      <div class="search">⌕ 搜索应用</div>
+      <div class="app"><div class="ic" style="background:#22c55e">微</div><div class="nm">微信</div><span class="rule global">跟随全局</span></div>
+      <div class="app"><div class="ic" style="background:#3b82f6">Q</div><div class="nm">QQ</div><span class="rule custom">布谷鸟</span></div>
+      <div class="app"><div class="ic" style="background:#f59e0b">信</div><div class="nm">短信</div><span class="rule global">跟随全局</span></div>
+      <div class="app"><div class="ic" style="background:#ef4444">淘</div><div class="nm">淘宝</div><span class="rule mute">静音</span></div>
+      <div class="app"><div class="ic" style="background:#8b5cf6">支</div><div class="nm">支付宝</div><span class="rule global">跟随全局</span></div>
+    </div>
+  </div>
+
+  <div class="note"><b>规则：</b>① 总开关关掉，下面整页置灰（老规矩）；② 每个音效带 ▶ 试听，点了才切换；③ 自定义文件选中后自动成为当前音效；④ 按应用点右侧标签循环切换：跟随全局 → 静音 → 布谷鸟 → 轻木 → 气泡啵…；⑤ 按应用的设置跟备份走，换机不丢。</div>
+
+<script>
+  var master = document.getElementById('master');
+  var panel = document.getElementById('panel');
+  var appCard = document.getElementById('appCard');
+  master.addEventListener('click', function () {
+    master.classList.toggle('off');
+    var off = master.classList.contains('off');
+    panel.classList.toggle('grey', off);
+    appCard.classList.toggle('grey', off);
+  });
+  document.querySelectorAll('.snd').forEach(function (row) {
+    row.addEventListener('click', function (e) {
+      if (e.target.classList.contains('play')) { row.querySelector('.play').textContent = '❚❚'; setTimeout(function(){ row.querySelector('.play').textContent='▶'; }, 900); return; }
+      document.querySelectorAll('.snd').forEach(function (r) { r.classList.remove('sel'); });
+      row.classList.add('sel');
+      document.getElementById('custName').textContent = '未选择 · 从手机里挑一个音频文件';
+    });
+  });
+  document.getElementById('custRow').addEventListener('click', function () {
+    document.querySelectorAll('.snd').forEach(function (r) { r.classList.remove('sel'); });
+    document.getElementById('custName').textContent = '已选：我的铃声.mp3（示意）';
+  });
+  var cycle = [['global','跟随全局'], ['mute','静音'], ['custom','布谷鸟'], ['custom','轻木'], ['custom','气泡啵']];
+  document.querySelectorAll('.rule').forEach(function (el) {
+    el.addEventListener('click', function () {
+      var cur = el.textContent.trim();
+      var idx = 0;
+      for (var i = 0; i < cycle.length; i++) if (cycle[i][1] === cur) idx = i;
+      var nxt = cycle[(idx + 1) % cycle.length];
+      el.className = 'rule ' + nxt[0];
+      el.textContent = nxt[1];
+    });
+  });
+</script>
+</body>
+</html>

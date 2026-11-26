@@ -1,24 +1,44 @@
 package com.chenan.flymebobo;
 
+import android.animation.Animator;
+import android.animation.AnimatorSet;
+import android.animation.Keyframe;
+import android.animation.ObjectAnimator;
+import android.animation.PropertyValuesHolder;
 import android.app.Activity;
+import android.app.NotificationManager;
 import android.app.AlertDialog;
+import android.database.Cursor;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.IntentFilter;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -27,7 +47,23 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.text.Collator;
+import java.text.SimpleDateFormat;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Set;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * flymebobo 2.0 — MainActivity (redesigned 2026-11-21, by Muse's own design).
@@ -85,18 +121,67 @@ public class MainActivity extends Activity {
     }
 
     private static final Feature[] FEATURES = new Feature[]{
-            new Feature("notif", "通知气泡", "左贴边胶囊 · 点开变卡片",
-                    "通知变成左贴边的胶囊，点一下展开成卡片。\n钉住、消散、扇子收纳都在，永不自动展开。\n点屏幕空白，所有胶囊逐条向右消散。",
+            new Feature("notif", "通知气泡", "普通通知的胶囊总开关",
+                    "通知变成左贴边胶囊，点一下展开成卡片看全文。\n钉住的胶囊一直留着；没钉住的可以右滑消散、左滑收进扇子。\n永不自动展开。",
                     Color.rgb(59, 130, 246), "泡"),
-            new Feature("music", "音乐胶囊", "歌名 · 歌手 · 歌词 · 专辑图",
-                    "音乐通知变成一张播放器卡片：\n歌名、歌手、实时歌词、专辑圆盘、进度条。\n钉住后胶囊上显示一行加大滚动歌词。\n同个 App 只保留一个音乐胶囊。",
+            // v536: 提示音升为「通知气泡」卡下面的一张独立展开
+            // 卡（buildSoundCard 手工挂，parent 记 "soundcard"
+            // 只为不占顶层行、也不被任何顶层卡按 parent 自动
+            // 收编），取代 v535 的 SoundSettingsActivity 子页
+            // （wei 定：跟安静规则一样收回主页展开卡）。
+            // v534: 气泡提示音——最初嵌进「通知气泡」卡片里。普通气泡
+            // 弹出时轻响一声（默认音效是 wei 2026-11-26 试听选定
+            // 的 5 号「轻木」）；音乐/下载/实况/导航/来电不响。
+            // 默认开（wei 明确要的）。跟随系统通知音量，系统静音
+            // 或勿扰时不响；同一波连弹只响第一声。通知气泡总开关
+            // 关着时这行置灰禁用（refreshSoundLinkage 联动，同
+            // 打码/销毁的套路）；行为层本来也双保险——总开关关了
+            // 气泡根本不弹，自然不响。
+            new Feature("bubbleSound", "气泡提示音", "气泡弹出时轻响一声",
+                    "开着（默认）：普通气泡弹出来时轻响一声。\n音乐、下载、实况、导航、来电不响。\n跟着系统通知音量走：系统静音或勿扰时不响。\n同一波连弹多条只响第一声，不连珠炮。\n展开这张卡就能设置：换音效（5 个内置 + 自定义文件）、按应用单独设。",
+                    Color.rgb(59, 130, 246), "音", true, "soundcard"),
+            new Feature("music", "音乐胶囊", "音乐通知变播放器样式",
+                    "歌名、歌手、实时歌词、专辑圆盘和进度条都在胶囊和播放器卡片上。\n同个 App 只保留一个音乐胶囊。\n钉住后胶囊上显示一行加大滚动歌词。",
                     Color.rgb(236, 72, 153), "乐"),
-            new Feature("dl", "下载与安装", "进度条 · 速度 · 剩余时间",
-                    "下载和安装都有实时胶囊：\n胶囊底部有一条细进度条，第二行显示\n已下 / 总量、速度和剩余时间。\n下完显示“下载完成”，3 秒后自动收起。",
+            new Feature("dl", "下载与安装", "下载进度实时胶囊",
+                    "胶囊底部有细进度条，第二行显示已下/总量、速度和剩余时间。\n下载完成显示“下载完成”，3 秒后自动消散。",
                     Color.rgb(245, 158, 11), "下"),
-            new Feature("code", "验证取件码", "验证码自动复制 · 取件码自动钉住",
-                    "验证码和取件码会被自动识别出来：\n验证码自动复制到剪贴板，取件码自动钉住。\n胶囊只显示大字码，不带标题；\n智能柜的柜号也会一起显示，中英文都认。",
+            // v527: 验证取件码卡改名「验证码与隐私」（wei 定）：
+            // 码本身（自动复制/取件钉住）+ 敏感打码同卡分区。
+            new Feature("code", "验证码与隐私", "验证码、取件码和隐私打码",
+                    "识别出验证码自动复制到剪贴板，取件码自动钉住不消散。\n胶囊只显示大字码、不带标题；智能柜的柜号一起显示，中英文都认。",
                     Color.rgb(34, 197, 94), "码"),
+            // v524: 敏感打码——嵌进“验证取件码”卡片里。总开关 +
+            // 锁屏、录屏/投屏两个分开关（用户 2026-11-26 “1得加
+            // 开关”）。开着时锁屏/录屏/投屏状态下验证码、取件码
+            // 只显示应用名 +「验证码 ••••••」，不露码；状态解除
+            // 自动恢复全文。自动复制不受影响（剪贴板还是真码）。
+            new Feature("mask", "敏感打码", "敏感场景下藏起内容",
+                    "打码时验证码、取件码只显示应用名和「验证码 ••••••」，\n状态解除自动恢复全文。\n自动复制不受影响，剪贴板里还是真码。",
+                    Color.rgb(244, 63, 94), "隐", true, "code"),
+            new Feature("maskLock", "锁屏时", "手机锁屏时打码",
+                    "锁屏时验证码/取件码打码，\n解锁后自动恢复全文。\n关掉后锁屏也显示真码。",
+                    Color.rgb(244, 63, 94), "锁", true, "code"),
+            new Feature("maskRecord", "录屏、投屏时", "录屏或投屏时打码",
+                    "录屏或投屏时验证码/取件码打码，\n停录/停投后自动恢复全文。\n关掉后录屏投屏也显示真码。",
+                    Color.rgb(244, 63, 94), "录", true, "code"),
+            // v526: 普通应用也打码——同样嵌进“验证取件码”卡片，
+            // 排在三个打码开关之后。默认关（用户 2026-11-26
+            // 定）：开着时敏感场景下普通应用通知也隐藏内容，
+            // 只显示应用名 +「内容已隐藏」；验证码/取件码不受
+            // 它管，音乐/下载/实况/导航/来电也不受影响。
+            new Feature("maskApps", "普通应用也打码", "普通通知也只显示应用名和「内容已隐藏」",
+                    "开着时，锁屏/录屏/投屏状态下普通应用的通知也隐藏内容，只显示应用名 +「内容已隐藏」。\n默认关；关着只打码验证码/取件码。\n音乐、下载、实况、导航、来电不受影响。",
+                    Color.rgb(244, 63, 94), "普", false, "code"),
+            // v530: 场景模式总开关（wei 定）——场景识别一直常开，
+            // 这次给它一个总开关，默认开不改变现有行为。排在
+            // 安静规则卡里、应用名单上方（buildQuietRulesCard
+            // 手工挂），parent 记 "quiet" 只为不占顶层行、也不被
+            // 任何顶层卡按 parent 自动收编。备份走功能开关的
+            // f. 前缀（f.sceneMode），SettingsStore 通用落盘。
+            new Feature("sceneMode", "场景模式", "游戏、视频全屏时，通知先排队",
+                    "开着（默认）：进游戏、看视频全屏时，普通通知先排队，\n退出场景再补弹；名单里设了「突破」的应用照常弹。\n关掉：全屏里通知也照常弹，场景例外同时失效。",
+                    Color.rgb(99, 102, 241), "景", true, "quiet"),
             new Feature("live", "来电", "接听 · 挂断 · 扬声器",
                     "来电有专属胶囊：接听、挂断、\n扬声器切换都在上面。\n来电永不自动消散。",
                     Color.rgb(139, 92, 246), "电"),
@@ -115,48 +200,68 @@ public class MainActivity extends Activity {
             new Feature("simCall", "模拟来电", "弹一颗假来电胶囊 · 调位置用",
                     "测试用的假来电：打开后弹一颗假来电胶囊，\n不用真打电话，就能看它落在哪个高度、\n调来电高度滑条时它跟着动。\n关掉就收起来。真来电优先，不会顶掉真来电。",
                     Color.rgb(139, 92, 246), "仿", false, "live"),
-            new Feature("card", "展开卡片", "点胶囊展开卡片（不含音乐）",
-                    "点一下胶囊，展开成卡片看全文。\n关掉后点胶囊不再展开卡片。\n音乐胶囊不受这个开关管，\n由“音乐卡片”开关单独控制。",
-                    Color.rgb(20, 184, 166), "卡"),
-            new Feature("bigCard", "大卡片模式", "通知直接弹大卡片，不经过小胶囊",
-                    "通知一来直接以大卡片依次排列，\n不用先点小胶囊再展开。\n点空白处大卡片自动右滑消散成图标。\n音乐弹的是播放器卡片；\n来电还是胶囊（没有大卡片）。",
-                    Color.rgb(99, 102, 241), "大", false, null),
+            // v527: card/bigCard 不再是顶层卡——「打开方式」卡里的
+            // 呈现形式三模式（胶囊模式/展开卡片/大卡片模式）就是
+            // 这两个标志位的组合，parent 记 "openway" 只为不占顶层行，
+            // 标志位和默认值都不变。
+            new Feature("card", "展开卡片", "先出胶囊，点一下展开看全文",
+                    "呈现形式三模式之一：先出胶囊，点一下展开成卡片看全文。",
+                    Color.rgb(20, 184, 166), "卡", true, "openway"),
+            new Feature("bigCard", "大卡片模式", "通知一来就是大卡片",
+                    "呈现形式三模式之一：通知一来就是大卡片依次排列。\n音乐出播放器卡片，来电仍是胶囊。",
+                    Color.rgb(99, 102, 241), "大", false, "openway"),
             // v459: 扇子自动变淡——扇子出现后 5 秒没点，自动变半透明
             // （省得挡着屏幕）；点一下扇子恢复不透明并照常展开。
             // 默认开。关掉后扇子一直不透明。
-            new Feature("fanAutoDim", "扇子自动变淡", "扇子 5 秒没点自动变半透明",
-                    "扇子出现后 5 秒没人点，\n自动变半透明，不挡屏幕。\n点一下扇子恢复不透明，\n并照常展开。关掉后扇子一直不透明。",
-                    Color.rgb(99, 102, 241), "淡", true, null),
+            // v527: 扇子自动变淡迁进外观卡（parent "appearance"），
+            // 在 buildAppearanceCard 里手工挂到卡内顶部。
+            new Feature("fanAutoDim", "扇子自动变淡", "扇子闲置 5 秒变半透明",
+                    "扇子出现后 5 秒没人点，自动变半透明，不挡屏幕。\n点一下扇子恢复并展开。关掉后一直不透明。",
+                    Color.rgb(99, 102, 241), "淡", true, "appearance"),
             // v465: 胶囊自动取色——开着（默认）：胶囊底色取 App 图标
             // 的主色（半透明 80%），每个 App 的胶囊颜色都不一样；
             // 关着：全部用默认白色 + 黑色描边，不跟图标走。
             // 来电胶囊不受管（本来就是绿/红）。拨动立即生效，不用重启。
             // v467: 用户 2026-11-23 “反了”“默认开启”——默认开。
-            new Feature("autoTint", "胶囊自动取色", "按 App 图标主色给胶囊上色",
-                    "开着（默认）：胶囊底色取 App 图标的主色，\n每个 App 的胶囊颜色都不一样。\n关着：全部用默认白色 + 黑色描边，\n不跟图标走。来电胶囊不受管。\n拨动立即生效，不用重启。",
-                    Color.rgb(16, 185, 129), "色", true, null),
-            new Feature("scroll", "胶囊滚动", "内容太长滚动显示",
-                    "胶囊里的标题和正文太长时，\n会左右滚动显示完整内容。\n关掉后超长内容用 … 截断。",
-                    Color.rgb(217, 70, 239), "滚"),
-            new Feature("miniwindow", "小窗打开", "点卡片小窗打开 App",
-                    "点一下展开的卡片，打开这个通知的 App。\n开着：小窗打开；关着：全屏打开。",
-                    Color.rgb(14, 165, 233), "窗"),
-            new Feature("blankDissipate", "自动消散", "点空白处胶囊自动消散",
-                    "点一下屏幕空白处，所有胶囊逐条向右消散。\n关掉后点空白处胶囊留在屏幕上，\n只能手动右滑消散或左滑收进扇子。",
-                    Color.rgb(249, 115, 22), "散"),
+            // v527: 胶囊自动取色迁进外观卡（parent "appearance"）。
+            new Feature("autoTint", "胶囊自动取色", "底色跟 App 图标主色走",
+                    "开着（默认）：胶囊底色取 App 图标的主色，\n每个 App 的胶囊颜色都不一样。\n关掉后全部用默认白色底+黑描边。\n来电胶囊不受影响。拨动立即生效，不用重启。",
+                    Color.rgb(16, 185, 129), "色", true, "appearance"),
+            // v527: 胶囊滚动迁进外观卡（parent "appearance"）。
+            new Feature("scroll", "胶囊滚动", "内容太长时滚动显示",
+                    "胶囊里的标题和正文太长时会左右滚动显示完整内容。\n关掉后超长内容以 … 截断。",
+                    Color.rgb(217, 70, 239), "滚", true, "appearance"),
+            // v527: miniwindow 迁进「打开方式」卡，变成「点卡片打开
+            // App」的单选（小窗/全屏），parent "openway"，标志位不变。
+            new Feature("miniwindow", "点卡片打开 App", "点展开的卡片时，用哪种方式打开",
+                    "点展开的卡片打开对应 App：小窗不离开当前界面，全屏直接跳过去。",
+                    Color.rgb(14, 165, 233), "窗", true, "openway"),
+            // v527: 自动消散迁进「打开方式」卡（wei 定），parent
+            // "openway"，标志位不变。
+            new Feature("blankDissipate", "自动消散", "点空白处，清掉所有胶囊",
+                    "点一下屏幕空白处，所有没钉住的胶囊逐条消散。\n关掉后只能右滑逐个消散、或左滑收进扇子。",
+                    Color.rgb(249, 115, 22), "散", true, "openway"),
             // v457: 自动销毁——嵌进“自动消散”卡片里。默认关。开着：
             // 点空白处胶囊消散时，系统通知也一起撤销（从通知栏
             // 消失）；关着：只消散胶囊，通知还留在通知栏里。
             // 音乐通知不撤销——撤销会停掉音乐（v276 同款）。
-            new Feature("autoDestroy", "自动销毁", "消散时同时撤销系统通知",
-                    "开着：点空白处胶囊消散时，\n系统通知也一起撤销（从通知栏消失）。\n关着（默认）：只消散胶囊，\n通知还留在通知栏里，扇子图标还在。\n音乐通知不撤销——撤销会停掉音乐。",
-                    Color.rgb(249, 115, 22), "销", false, "blankDissipate"),
+            new Feature("autoDestroy", "自动销毁", "消散时连系统通知一起撤销",
+                    "开着时消散的通知同时从通知栏消失；\n关着（默认）通知还留在通知栏。\n音乐通知不撤销，撤销会停掉音乐。",
+                    Color.rgb(249, 115, 22), "销", false, "openway"),
             // v336: 音乐卡片开关嵌进“音乐胶囊”卡片里，不再单独占一行。
             // v345: QQ 免费听开关已去掉，永远打开。
             // v346: 介绍留着、胶囊留着、不设开关——QQ 免费听只展示、不设开关。
             new Feature("musicCard", "音乐卡片", "点音乐胶囊展开播放器卡片",
                     "点一下音乐胶囊，展开成播放器卡片：\n专辑圆盘、歌词、进度条和播放控制。\n关掉后点音乐胶囊直接打开音乐 App，\n不再展开播放器卡片。",
                     Color.rgb(219, 39, 119), "音", true, "music"),
+            // v532: 视频App开关——嵌进“音乐胶囊”卡片里。视频
+            // App 的播放器通知带着和音乐一样的信号（媒体会话），
+            // 一直也会被收成音乐胶囊；这个开关管收不收。默认开
+            // （与现状一致）。关掉后视频 App 播放按普通通知走，
+            // 正经音乐 App 不受影响。
+            new Feature("musicVideo", "视频App", "B站等视频App播放时，也收成音乐胶囊",
+                    "开着（默认）：B站、抖音、腾讯视频这些\n视频 App 播放时，播放器通知也收成音乐胶囊。\n关掉后：视频 App 的播放不再进音乐胶囊，\n按普通通知走；正经音乐 App 不受影响。",
+                    Color.rgb(219, 39, 119), "视", true, "music"),
             // v459: 模拟音乐——嵌进“音乐胶囊”卡片里，和“模拟来电”
             // 一个路子。测试用的假音乐：打开后弹一颗假音乐胶囊
             // （晴天 - 周杰伦），不用真放音乐，就能看着调音乐胶囊/
@@ -174,7 +279,7 @@ public class MainActivity extends Activity {
             new Feature("musicLed", "反方向的钟", null,
                     "开着时放音乐，屏幕边缘一圈 LED 灯珠亮起来，\n像 00 年代老按键机机身上的跑马灯：\n灯珠密密嵌满一圈，追逐、齐闪、交替、\n随机闪几个花样轮着来。\n音乐停了灯就灭。默认关。",
                     Color.rgb(219, 39, 119), "钟", false, "music"),
-            new Feature("qqFree", "QQ音乐flyme版免费听", "低于2小时自动补时长到4小时",
+            new Feature("qqFree", "QQ音乐flyme版免费听", "常开，无需设置",
                     "打开 QQ 音乐 Flyme 版，自动查剩余免费时长，\n低于 2 小时自动领奖励补到 4 小时。\n两次领取间隔不少于 4 小时。\n领满会弹提示；本来就 ≥2 小时也会提示。\n不支持主动领取，免费听一直开着。",
                     Color.rgb(190, 18, 60), "免", true, "music", true),
     };
@@ -206,6 +311,180 @@ public class MainActivity extends Activity {
     private LinearLayout list;
     private ScrollView scrollView;
 
+    // v527 设置页重构：搜索定位用的登记表。
+    // cardBodies/cardExpanded：功能卡的展开区（搜索跳转要能程序展开）。
+    private final Map<String, View[]> cardBodies = new HashMap<>();
+    private final Map<String, boolean[]> cardExpanded = new HashMap<>();
+    // subRowViews：卡内子开关行（按 feature key）。
+    private final Map<String, View> subRowViews = new HashMap<>();
+    // searchTargets：非子开关的可定位视图（滑条行、页脚链接等，按 id）。
+    private final Map<String, View> searchTargets = new HashMap<>();
+    // topCardViews：顶层功能卡视图（与 TOP_FEATURES 同序，功能引导用）。
+    private final List<View> topCardViews = new ArrayList<>();
+    private View appearanceBody;
+    private TextView appearanceChev;
+    private View openWayBody;
+    private TextView openWayChev;
+    private EditText searchBox;
+    private LinearLayout searchResults;
+
+    // v528: 安静规则展开卡（整块收回主页，替代 QuietRulesActivity）。
+    private View quietBody;
+    private TextView quietChev;
+    private View quietSilenceAnchor;
+    private View quietAppsAnchor;
+    private TextView quietStatusTitle;
+    private TextView quietStatusSub;
+    private TextView quietCountdown;
+    private TextView quietActionBtn;
+    private LinearLayout quietChipsBox;
+    private LinearLayout quietDndHint;
+    private QuietSwitchRow quietLinkRow;
+    private QuietSwitchRow quietCallRow;
+    private int quietSelectedMinutes = TempSilence.DEFAULT_MINUTES;
+    private String quietChipsKey = "";
+    private final Handler quietTicker = new Handler(Looper.getMainLooper());
+
+    /** v533: set by the quiet card's cancel tap just before
+     * TempSilence.end() runs. The end flush happens in
+     * SystemUI, which broadcasts the real flushed count back
+     * (ACTION_TEMP_SILENCE_FLUSHED); the receiver below
+     * consumes the flag and plays the in-app exit animation
+     * with that count. A 1.5 s fallback plays with 0 if the
+     * receipt never arrives (SystemUI not running — in which
+     * case nothing could have been queued anyway). */
+    private boolean silenceExitAnimPending;
+    private long silenceExitAnimPendingAt;
+    private final Runnable silenceExitAnimFallback =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (!silenceExitAnimPending) {
+                        return;
+                    }
+                    silenceExitAnimPending = false;
+                    showSilenceExitAnim(0);
+                }
+            };
+    private final BroadcastReceiver silenceFlushedReceiver =
+            new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context c, Intent intent) {
+                    if (!silenceExitAnimPending) {
+                        return;
+                    }
+                    if (System.currentTimeMillis()
+                            - silenceExitAnimPendingAt > 3000) {
+                        silenceExitAnimPending = false;
+                        return;
+                    }
+                    silenceExitAnimPending = false;
+                    quietTicker.removeCallbacks(
+                            silenceExitAnimFallback);
+                    int n = intent.getIntExtra(
+                            TempSilence.EXTRA_FLUSHED, 0);
+                    showSilenceExitAnim(n);
+                }
+            };
+    private boolean quietTicking;
+    private final Runnable quietTick = new Runnable() {
+        @Override
+        public void run() {
+            refreshQuietSilence();
+            if (quietTicking) {
+                quietTicker.postDelayed(this, 1000);
+            }
+        }
+    };
+    private final Map<String, Integer> quietRules = new HashMap<>();
+    private final Map<String, Integer> quietScene = new HashMap<>();
+    private final List<QuietAppEntry> quietAllApps = new ArrayList<>();
+    private final Map<String, View> quietRowViews = new HashMap<>();
+    private final Set<String> quietPinned = new HashSet<>();
+    private final Set<String> quietShownExtra = new HashSet<>();
+    // v530: 场景模式行（搜索定位锚点）+ 名单「场景里」一列的
+    // 分段引用（总开关关时整列置灰联动用）。
+    private View quietSceneModeAnchor;
+    private final Map<String, View> quietSceneSegRows = new HashMap<>();
+    private final Map<String, SegControl> quietSceneSegs = new HashMap<>();
+    private SegControl lastQuietSeg;
+    private EditText quietAppSearch;
+    private LinearLayout quietListBox;
+    private TextView quietCountText;
+    private boolean quietAppsLoaded;
+    private boolean quietAppsLoading;
+    // v528: 自动销毁联动（依附自动消散）用的行/开关引用。
+    private View destroyRowView;
+    private View destroySwitchView;
+    // v528: 敏感打码联动（总开关 mask 依附关系）用的子行/子开关引用。
+    private final Map<String, View> maskChildRows = new HashMap<>();
+    private final Map<String, View> maskChildSwitches = new HashMap<>();
+    // v534: 气泡提示音开关（通知气泡总开关联动置灰用）。
+    // v537: 开关在展开区第一行（buildSoundMasterRow），
+    // 还是这个引用。
+    private View bubbleSoundSwitch;
+    // v535: 气泡提示音副标题（显示当前音效）。v536: 搬到展开
+    // 卡卡头，还是这个引用，refreshSoundSubtitle 照旧刷它。
+    private TextView bubbleSoundSub;
+    // v536: 提示音主页展开卡（代 SoundSettingsActivity 子页）。
+    private View soundCardView;
+    private LinearLayout soundBody;
+    private TextView soundChev;
+    private LinearLayout soundGlobalSection;
+    private LinearLayout soundAppSection;
+    private TextView soundCustomSub;
+    private final Map<String, View> soundRadioDots = new HashMap<>();
+    private final Map<String, TextView> soundNames = new HashMap<>();
+    private final Map<String, String> soundRuleMap = new HashMap<>();
+    private final List<QuietAppEntry> soundAllApps = new ArrayList<>();
+    private final Map<String, View> soundRowViews = new HashMap<>();
+    private final Set<String> soundShownExtra = new HashSet<>();
+    private EditText soundAppSearch;
+    private LinearLayout soundAppListBox;
+    private TextView soundAppCount;
+    private boolean soundAppsLoaded;
+    private boolean soundAppsLoading;
+    private MediaPlayer soundPreviewPlayer;
+    private static final int REQ_PICK_SOUND = 5351;
+    private static final String SOUND_CUSTOM_INTERNAL =
+            "bubble_custom_sound";
+    private static final long SOUND_MAX_CUSTOM_BYTES =
+            20L * 1024 * 1024;
+
+    private static final class SearchEntry {
+        final String title;
+        final String path;
+        final String keywords;
+        final View target;        // 主页内目标（与 activity 二选一）
+        final String expandKey;   // 跳转前要展开的卡（feature key / "appearance" / "openway" / null）
+        final Class<?> activity;  // 子页面目标
+        final String highlight;   // 子页面 highlight 参数
+
+        SearchEntry(String title, String path, String keywords,
+                View target, String expandKey) {
+            this.title = title;
+            this.path = path;
+            this.keywords = keywords;
+            this.target = target;
+            this.expandKey = expandKey;
+            this.activity = null;
+            this.highlight = null;
+        }
+
+        SearchEntry(String title, String path, String keywords,
+                Class<?> activity, String highlight) {
+            this.title = title;
+            this.path = path;
+            this.keywords = keywords;
+            this.target = null;
+            this.expandKey = null;
+            this.activity = activity;
+            this.highlight = highlight;
+        }
+    }
+
+    private final List<SearchEntry> searchIndex = new ArrayList<>();
+
     // v442: 来电高度滑条（在「来电」卡片展开区、「来电放右边」下面）。
     // 跟开关联动：只有 callRight 开着才能滑，关着就置灰禁用。
     private SeekBar callHeightSeek;
@@ -217,9 +496,42 @@ public class MainActivity extends Activity {
             new java.util.HashMap<>();
 
     @Override
+    protected void onDestroy() {
+        try {
+            unregisterReceiver(silenceFlushedReceiver);
+        } catch (Throwable ignored) {
+        }
+        releaseSoundPreview();
+        super.onDestroy();
+    }
+
+    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // v533: the flushed-count receipt comes from SystemUI
+        // (another process), so the receiver must be exported
+        // — same reflective 3-arg registerReceiver (flag 2)
+        // as the listener service's call-control receiver.
+        try {
+            java.lang.reflect.Method m = Context.class.getMethod(
+                    "registerReceiver", BroadcastReceiver.class,
+                    IntentFilter.class, int.class);
+            m.invoke(this, silenceFlushedReceiver,
+                    new IntentFilter(NotificationService
+                            .ACTION_TEMP_SILENCE_FLUSHED), 2);
+        } catch (Throwable t) {
+            try {
+                registerReceiver(silenceFlushedReceiver,
+                        new IntentFilter(NotificationService
+                                .ACTION_TEMP_SILENCE_FLUSHED));
+            } catch (Throwable ignored) {
+            }
+        }
         requestWindowFeature(Window.FEATURE_NO_TITLE);
+        // v527: 状态栏沉浸（wei 追加）——状态栏透明、内容延伸到
+        // 状态栏下方、图标深色（页面浅底）；顶部内边距在 root 上
+        // 补状态栏高度，不遮内容。只改 App 自己的页面。
+        applyEdgeToEdge();
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         // v464: 先从本地备份文件把设置恢复进 prefs（卸载重装后
         // prefs 被清了，文件还在）——必须在下面“缺省开关写默认
@@ -272,7 +584,9 @@ public class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
-        root.setPadding(dp(16), dp(16), dp(16), dp(24));
+        // v527: 顶部多留状态栏高度（沉浸后内容从状态栏下方开始）。
+        root.setPadding(dp(16), dp(16) + statusBarHeight(),
+                dp(16), dp(24));
         scroll.addView(root);
 
         // ---- Status row ----
@@ -308,6 +622,7 @@ public class MainActivity extends Activity {
             }
         });
         statusRow.addView(restartBtn);
+        searchTargets.put("restart", restartBtn);
 
         // ---- Header capsule ----
         LinearLayout header = new LinearLayout(this);
@@ -345,65 +660,95 @@ public class MainActivity extends Activity {
         hTexts.addView(hName);
 
         TextView hSub = new TextView(this);
-        hSub.setText("通知胶囊 · 音乐 · 下载 · 取件码 · 来电");
+        // v527: 与卡名对齐（卡叫「通知气泡」，不再写「通知胶囊」）。
+        hSub.setText("通知气泡 · 音乐 · 下载 · 取件码 · 来电");
         hSub.setTextSize(11);
         hSub.setTextColor(Color.argb(230, 255, 255, 255));
         hTexts.addView(hSub);
         header.addView(hTexts);
         root.addView(header);
 
-        // ---- Section label ----
-        TextView section = new TextView(this);
-        section.setText("功能开关（点一下展开说明）");
-        section.setTextSize(12);
-        section.setTextColor(Color.rgb(153, 153, 153));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.topMargin = dp(20);
-        section.setLayoutParams(slp);
-        root.addView(section);
+        // ---- v527: 设置搜索（常驻头部下方） ----
+        searchBox = new EditText(this);
+        searchBox.setHint("搜索设置，如：打码、游戏、安静");
+        searchBox.setSingleLine(true);
+        searchBox.setTextSize(14);
+        searchBox.setTextColor(Color.rgb(17, 24, 39));
+        searchBox.setHintTextColor(Color.rgb(156, 163, 175));
+        GradientDrawable searchBg = new GradientDrawable();
+        searchBg.setColor(Color.WHITE);
+        searchBg.setCornerRadius(dp(999));
+        searchBg.setStroke(dp(1), Color.rgb(216, 221, 227));
+        searchBox.setBackground(searchBg);
+        searchBox.setPadding(dp(16), dp(11), dp(16), dp(11));
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        sbLp.topMargin = dp(14);
+        searchBox.setLayoutParams(sbLp);
+        root.addView(searchBox);
+        searchResults = new LinearLayout(this);
+        searchResults.setOrientation(LinearLayout.VERTICAL);
+        searchResults.setVisibility(View.GONE);
+        LinearLayout.LayoutParams srLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        srLp.topMargin = dp(6);
+        searchResults.setLayoutParams(srLp);
+        root.addView(searchResults);
+        searchBox.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a,
+                    int b, int c) {
+            }
 
-        // ---- Feature bubbles ----
+            @Override
+            public void onTextChanged(CharSequence s, int a,
+                    int b, int c) {
+                runSearch(s == null ? "" : s.toString());
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+
+        // ---- v527: 分组后的功能区 ----
+        // 胶囊类型（5 张顶层功能卡）/ 呈现与打开（打开方式卡）/
+        // 安静规则（合并页入口）/ 外观（外观设置卡）。
         list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        llp.topMargin = dp(8);
         list.setLayoutParams(llp);
         root.addView(list);
+        list.addView(buildGroupLabel("胶囊类型", true));
         for (int i = 0; i < TOP_FEATURES.length; i++) {
-            list.addView(buildFeatureCard(TOP_FEATURES[i]));
+            View c = buildFeatureCard(TOP_FEATURES[i]);
+            topCardViews.add(c);
+            list.addView(c);
+            // v536: 提示音独立展开卡，贴着「通知气泡」卡、
+            // 归「胶囊类型」同一组（wei 定：跟安静规则一样
+            // 收回主页，不开子页）。
+            if ("notif".equals(TOP_FEATURES[i].key)) {
+                list.addView(buildSoundCard());
+            }
         }
-        // v504 (2.4.2): 应用规则入口（功能储备 #5，用户点名先做；
-        // 界面先预览后落地）。和功能卡同款式，点一下进
-        // AppRulesActivity 给每个应用单独设规则。
-        list.addView(buildAppRulesCard());
-        list.addView(buildSceneExceptionsCard());
-
-        // ---- Appearance (v439): 一个滑块，扇子位置 ----
-        // 胶囊和扇子是一个整体（用户 “他们是一个整体” / “胶囊始终
-        // 是从扇子的地方弹出来的”），所以只设扇子（整组）的锚点，
-        // 胶囊跟着扇子走。滑块松手才生效，不用重启。
-        // v443: 改成「外观胶囊」（用户 “改成外观胶囊”）——小标题
-        // “外观”不要了，卡片自己就是标题，点开里面是扇子滑块，
-        // 以后更多外观往卡里加。
-        LinearLayout apList = new LinearLayout(this);
-        apList.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams apLlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        apLlp.topMargin = dp(20);
-        apList.setLayoutParams(apLlp);
-        root.addView(apList);
-        apList.addView(buildAppearanceCard());
+        list.addView(buildGroupLabel("呈现与打开", false));
+        list.addView(buildOpenWayCard());
+        list.addView(buildGroupLabel("安静规则", false));
+        list.addView(buildQuietRulesCard());
+        list.addView(buildGroupLabel("外观", false));
+        list.addView(buildAppearanceCard());
         TextView apHint = new TextView(this);
-        apHint.setText("胶囊跟着扇子一起走，从扇子那里弹出来；改完立即生效，不用重启。");
+        apHint.setText("胶囊跟着扇子一起走，从扇子那里弹出来；改完立即生效，不用重启。点一下卡片可以展开说明。");
         apHint.setTextSize(11);
         apHint.setTextColor(Color.rgb(153, 153, 153));
         LinearLayout.LayoutParams apHlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         apHlp.topMargin = dp(6);
         apHint.setLayoutParams(apHlp);
-        root.addView(apHint);
+        list.addView(apHint);
 
         // ---- Footer links ----
         TextView log = new TextView(this);
@@ -526,6 +871,7 @@ public class MainActivity extends Activity {
             }
         });
         linkRow.addView(checkLink);
+        searchTargets.put("update", checkLink);
 
         TextView gh = new TextView(this);
         gh.setText("GPL-3.0-only · 部分实现参考了 Flyme灵动岛");
@@ -576,8 +922,11 @@ public class MainActivity extends Activity {
             }
         });
         root.addView(guideBtn);
+        searchTargets.put("guide", guideBtn);
 
         setContentView(scroll);
+        // v527: 全部视图建完后建搜索索引（索引引用真实视图）。
+        buildSearchIndex();
         // v273: first-run feature guide (once). Post it so the
         // feature cards are laid out before we measure them.
         if (!prefs.getBoolean("guide_shown_v273", false)) {
@@ -753,7 +1102,9 @@ public class MainActivity extends Activity {
         }
         guideIdx = idx;
         final Feature f = TOP_FEATURES[idx];
-        final View card = list.getChildAt(idx);
+        // v527: list 里混了组标题和合并卡，卡片视图单独登记。
+        final View card = idx < topCardViews.size()
+                ? topCardViews.get(idx) : null;
         if (card == null) {
             dismissGuide();
             return;
@@ -835,36 +1186,328 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
+        stopQuietTicker();
         SettingsStore.saveAll(this);
     }
 
+    // v528: 回到主页时把卡内临时静默状态对一遍（可能在外面
+    // 到期、或被手动关勿扰提前取消）。
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // v535/v536: 提示音当前音效和总开关涂色对一遍
+        // （备份恢复或别处改动后，回主页同步过来）。
+        refreshSoundSubtitle();
+        repaintBubbleSoundSwitch();
+        refreshSoundLinkage();
+        refreshQuietSilence();
+        if (quietBody != null
+                && quietBody.getVisibility() == View.VISIBLE) {
+            startQuietTicker();
+        }
+    }
+
     // One feature card: coloured bubble header + expandable body.
-    /** v504 (2.4.2): 应用规则入口卡。和功能卡同款式（彩色圆角
-     * 卡 + 白图标砖 + 白字标题/副标题），右侧箭头，点一下进
-     * AppRulesActivity。 */
-    private View buildAppRulesCard() {
-        final int color = Color.rgb(6, 182, 212);
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
+    // ================= v527 设置页重构 =================
+
+    /** v527: 状态栏沉浸——透明状态栏 + 内容延伸到状态栏下方 +
+     * 深色状态栏图标（页面浅底）。各子页面同款。 */
+    void applyEdgeToEdge() {
+        try {
+            Window w = getWindow();
+            w.setStatusBarColor(Color.TRANSPARENT);
+            // v531: 底部同病同治——导航栏也透明、内容延伸到
+            // 手势条下方，不然全屏动画（v2 渐变幕布）在 App
+            // 内播时底部会露一条没盖住的边（SystemUI 侧同理
+            // 已在 BubbleWindow.fullscreenAnimParams 修）。
+            w.setNavigationBarColor(Color.TRANSPARENT);
+            w.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    int statusBarHeight() {
+        int id = getResources().getIdentifier(
+                "status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id)
+                : dp(24);
+    }
+
+    /** v527: 分组标题（灰色小字）。 */
+    private View buildGroupLabel(String text, boolean first) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(13);
+        t.setTextColor(Color.rgb(138, 143, 152));
+        t.setTypeface(t.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(first ? 16 : 20);
+        lp.leftMargin = dp(4);
+        lp.bottomMargin = dp(2);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    private Feature featureFor(String key) {
+        for (Feature f : FEATURES) {
+            if (f.key.equals(key)) {
+                return f;
+            }
+        }
+        return null;
+    }
+
+    /** v527: 程序化拨一个功能开关（呈现形式/打开 App 单选用）：
+     * 落盘 + 备份 + 广播，与 buildSwitch 的拨动同路。 */
+    private void setFeatureFlag(String key, boolean on) {
+        prefs.edit().putBoolean(key, on).commit();
+        SettingsStore.saveAll(MainActivity.this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", key);
+        i.putExtra("enabled", on);
+        sendBroadcast(i);
+    }
+
+    /** v527: 分段单选控件（预览同款：半透明白底胶囊，选中项白底
+     * 深字加粗）。accent = 选中项文字色。 */
+    private final class SegControl {
+        final LinearLayout box;
+        final TextView[] items;
+        final int accent;
+        int sel;
+        SegListener listener;
+
+        SegControl(String[] labels, int selected, int accentColor) {
+            this.accent = accentColor;
+            this.sel = selected;
+            box = new LinearLayout(MainActivity.this);
+            box.setOrientation(LinearLayout.HORIZONTAL);
+            box.setBackground(rounded(
+                    Color.argb(60, 255, 255, 255), dp(999)));
+            box.setPadding(dp(3), dp(3), dp(3), dp(3));
+            items = new TextView[labels.length];
+            for (int i = 0; i < labels.length; i++) {
+                final int idx = i;
+                TextView tv = new TextView(MainActivity.this);
+                tv.setText(labels[i]);
+                tv.setTextSize(13);
+                tv.setGravity(Gravity.CENTER);
+                tv.setPadding(0, dp(7), 0, dp(7));
+                tv.setLayoutParams(new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                tv.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        if (sel != idx) {
+                            sel = idx;
+                            paint();
+                            if (listener != null) {
+                                listener.onSelect(idx);
+                            }
+                        }
+                    }
+                });
+                items[i] = tv;
+                box.addView(tv);
+            }
+            paint();
+        }
+
+        void paint() {
+            for (int i = 0; i < items.length; i++) {
+                if (i == sel) {
+                    items[i].setBackground(rounded(Color.WHITE,
+                            dp(999)));
+                    items[i].setTextColor(accent);
+                    items[i].setTypeface(items[i].getTypeface(),
+                            android.graphics.Typeface.BOLD);
+                } else {
+                    items[i].setBackground(null);
+                    items[i].setTextColor(Color.WHITE);
+                    items[i].setTypeface(items[i].getTypeface(),
+                            android.graphics.Typeface.NORMAL);
+                }
+            }
+        }
+    }
+
+    private interface SegListener {
+        void onSelect(int idx);
+    }
+
+    /** v528: 展开箭头统一（wei 拍板用安静规则那个「›」字形）：
+     * 同字形、同大小、同位置；未展开朝下、展开后朝上，同一个
+     * 箭头转方向，不再用像字母 V 的 ∨。
+     * v529: wei 实测截图里箭头挤在卡片右上角——右边距加大，
+     * 让它离开圆角、往左挪一格（卡头本身有 12dp 内边距，
+     * 再加 10dp 右边距，与左侧图标盘的呼吸感对齐）。三张可
+     * 展开卡（打开方式/外观设置/安静规则）共用这个构建器，
+     * 一处改、三处齐。 */
+    private TextView buildExpandChevron() {
+        TextView chev = new TextView(this);
+        chev.setText("›");
+        chev.setTextSize(24);
+        chev.setTextColor(Color.WHITE);
+        chev.setRotation(90f);
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        chlp.leftMargin = dp(8);
+        chlp.rightMargin = dp(10);
+        chev.setLayoutParams(chlp);
+        return chev;
+    }
+
+    private void setChevronExpanded(TextView chev, boolean expanded) {
+        if (chev == null) {
+            return;
+        }
+        chev.animate().rotation(expanded ? -90f : 90f)
+                .setDuration(180).start();
+    }
+
+    /** v528: 卡内开关行（临时静默的联动/突破用；半透明白底 +
+     * 白字 + 绿开关，与主页子开关同款）。 */
+    private final class QuietSwitchRow {
+        final LinearLayout row;
+        final FrameLayout track;
+        final View dot;
+        boolean on;
+        final Runnable onFlip;
+
+        QuietSwitchRow(String title, String sub, boolean initial,
+                Runnable onFlip) {
+            this.on = initial;
+            this.onFlip = onFlip;
+            row = new LinearLayout(MainActivity.this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                    dp(16)));
+            row.setPadding(dp(12), dp(10), dp(12), dp(10));
+            LinearLayout texts = new LinearLayout(MainActivity.this);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            texts.setLayoutParams(new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            TextView t = new TextView(MainActivity.this);
+            t.setText(title);
+            t.setTextSize(14);
+            t.setTextColor(Color.WHITE);
+            t.setTypeface(t.getTypeface(),
+                    android.graphics.Typeface.BOLD);
+            texts.addView(t);
+            TextView s = new TextView(MainActivity.this);
+            s.setText(sub);
+            s.setTextSize(11.5f);
+            s.setTextColor(Color.argb(230, 255, 255, 255));
+            texts.addView(s);
+            row.addView(texts);
+
+            track = new FrameLayout(MainActivity.this);
+            track.setLayoutParams(new LinearLayout.LayoutParams(
+                    dp(48), dp(28)));
+            dot = new View(MainActivity.this);
+            dot.setBackground(rounded(Color.WHITE, dp(999)));
+            track.addView(dot, new FrameLayout.LayoutParams(
+                    dp(22), dp(22)));
+            row.addView(track);
+            paint();
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    on = !on;
+                    paint();
+                    if (onFlip != null) {
+                        onFlip.run();
+                    }
+                }
+            });
+        }
+
+        void setOn(boolean v) {
+            on = v;
+            paint();
+        }
+
+        private void paint() {
+            track.setBackground(rounded(on ? Color.rgb(22, 163, 74)
+                    : Color.argb(120, 255, 255, 255), dp(999)));
+            FrameLayout.LayoutParams p =
+                    (FrameLayout.LayoutParams) dot.getLayoutParams();
+            p.gravity = Gravity.CENTER_VERTICAL
+                    | (on ? Gravity.END : Gravity.START);
+            p.leftMargin = on ? 0 : dp(3);
+            p.rightMargin = on ? dp(3) : 0;
+            dot.setLayoutParams(p);
+        }
+    }
+
+    private static final class QuietAppEntry {
+        String pkg;
+        String label;
+        Drawable icon;
+        boolean system;
+    }
+
+    /** 平时待遇三段的显示顺序 → AppRules 模式值。 */
+    private static final int[] QUIET_RULE_MODES = {
+            AppRules.DEFAULT, AppRules.EDGE, AppRules.NEVER};
+    private static final String[] QUIET_RULE_LABELS = {
+            "跟随", "只贴边", "永不弹"};
+    /** 场景里两段的显示顺序 → SceneExceptions 模式值。 */
+    private static final int[] QUIET_SCENE_MODES = {
+            SceneExceptions.FOLLOW, SceneExceptions.BREAK};
+    private static final String[] QUIET_SCENE_LABELS = {
+            "排队", "突破"};
+    private static final int QUIET_INDIGO = Color.rgb(99, 102, 241);
+
+    /**
+     * v528: 安静规则展开卡（wei 实测 v527 后定：不开单独页，
+     * 整块收回主页）。上半 = 临时静默全套（状态/开启取消/时长
+     * 三档/勿扰联动/来电突破，全部走 TempSilence 的静态逻辑与
+     * prefs，语义一行不改）；下半 = 应用名单——默认只展示已设
+     * 过非默认规则的应用 + 微信/QQ 常驻，卡内搜索可搜全部已
+     * 安装应用，点中/设了就留在名单里。卡底有判定顺序说明。
+     * 原 QuietRulesActivity 已从 Manifest 和入口撤下。
+     */
+    private View buildQuietRulesCard() {
+        final int color = QUIET_INDIGO;
+        quietRules.putAll(AppRules.readAll(this));
+        quietScene.putAll(SceneExceptions.readAll(this));
+        TempSilence.State st = TempSilence.readState(this);
+        quietSelectedMinutes = st.minutes;
+
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(rounded(color, dp(22)));
-        card.setPadding(dp(12), dp(12), dp(12), dp(12));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.topMargin = dp(10);
         card.setLayoutParams(clp);
 
+        // ---- 卡头 ----
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(12), dp(12), dp(12), dp(12));
         TextView icon = new TextView(this);
-        icon.setText("规");
+        icon.setText("静");
         icon.setTextSize(15);
         icon.setTextColor(color);
         icon.setGravity(Gravity.CENTER);
         icon.setBackground(rounded(Color.WHITE, dp(10)));
         icon.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(36), dp(36)));
-        card.addView(icon);
-
+        head.addView(icon);
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
@@ -872,63 +1515,340 @@ public class MainActivity extends Activity {
         tlp.leftMargin = dp(10);
         texts.setLayoutParams(tlp);
         TextView title = new TextView(this);
-        title.setText("应用规则");
+        title.setText("安静规则");
         title.setTextSize(15);
         title.setTextColor(Color.WHITE);
         title.setTypeface(title.getTypeface(),
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
-        sub.setText("每个应用单独设：永不弹 / 只贴边");
+        sub.setText("临时静默和应用名单，都在这张卡里");
         sub.setTextSize(12);
         sub.setTextColor(Color.argb(230, 255, 255, 255));
         texts.addView(sub);
-        card.addView(texts);
+        head.addView(texts);
+        final TextView chev = buildExpandChevron();
+        head.addView(chev);
+        card.addView(head);
 
-        TextView chev = new TextView(this);
-        chev.setText("›");
-        chev.setTextSize(24);
-        chev.setTextColor(Color.WHITE);
-        card.addView(chev);
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setVisibility(View.GONE);
+        body.setPadding(0, 0, 0, dp(12));
+        card.addView(body);
+        quietBody = body;
+        quietChev = chev;
+        final boolean[] expanded = new boolean[]{false};
+        body.setTag(expanded);
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                body.setVisibility(expanded[0]
+                        ? View.VISIBLE : View.GONE);
+                setChevronExpanded(chev, expanded[0]);
+                if (expanded[0]) {
+                    refreshQuietSilence();
+                    ensureQuietAppsLoaded();
+                    startQuietTicker();
+                } else {
+                    stopQuietTicker();
+                }
+            }
+        });
 
-        card.setOnClickListener(new View.OnClickListener() {
+        // ================= 临时静默区 =================
+        View silenceLabel = buildZoneLabel("临时静默");
+        quietSilenceAnchor = silenceLabel;
+        body.addView(silenceLabel);
+        body.addView(cardDesc("开启后普通通知先排队、不弹胶囊，"
+                + "结束时按顺序补弹；音乐、下载、实况不停。"
+                + "跟系统勿扰双向联动：开静默时同步打开勿扰，"
+                + "勿扰被打开时气泡也自动排队；静默期间手动关掉"
+                + "勿扰，算提前取消。"));
+
+        quietStatusTitle = new TextView(this);
+        quietStatusTitle.setTextColor(Color.WHITE);
+        quietStatusTitle.setTextSize(15);
+        quietStatusTitle.setTypeface(quietStatusTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams stLp = quietRowLp();
+        stLp.topMargin = dp(12);
+        quietStatusTitle.setLayoutParams(stLp);
+        body.addView(quietStatusTitle);
+        quietCountdown = new TextView(this);
+        quietCountdown.setTextColor(Color.WHITE);
+        quietCountdown.setTextSize(30);
+        quietCountdown.setTypeface(quietCountdown.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        quietCountdown.setLayoutParams(quietRowLp());
+        body.addView(quietCountdown);
+        quietStatusSub = new TextView(this);
+        quietStatusSub.setTextColor(Color.argb(230, 255, 255, 255));
+        quietStatusSub.setTextSize(12);
+        quietStatusSub.setLineSpacing(0, 1.5f);
+        quietStatusSub.setLayoutParams(quietRowLp());
+        body.addView(quietStatusSub);
+        quietActionBtn = new TextView(this);
+        quietActionBtn.setGravity(Gravity.CENTER);
+        quietActionBtn.setTextSize(14);
+        quietActionBtn.setTextColor(color);
+        quietActionBtn.setTypeface(quietActionBtn.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        quietActionBtn.setBackground(rounded(Color.WHITE, dp(12)));
+        quietActionBtn.setPadding(0, dp(11), 0, dp(11));
+        LinearLayout.LayoutParams abLp = quietRowLp();
+        abLp.topMargin = dp(12);
+        quietActionBtn.setLayoutParams(abLp);
+        quietActionBtn.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                TempSilence.State s = TempSilence.readState(
+                        MainActivity.this);
+                if (s.active()) {
+                    // v533: arm the exit receipt BEFORE end()
+                    // — SystemUI flushes on the state broadcast
+                    // and sends the real flushed count back;
+                    // the receiver plays the exit animation
+                    // with it (fallback: 1.5 s, count 0).
+                    silenceExitAnimPending = true;
+                    silenceExitAnimPendingAt =
+                            System.currentTimeMillis();
+                    quietTicker.removeCallbacks(
+                            silenceExitAnimFallback);
+                    quietTicker.postDelayed(
+                            silenceExitAnimFallback, 1500);
+                    TempSilence.end(MainActivity.this, "cancel");
+                } else {
+                    silenceExitAnimPending = false;
+                    quietTicker.removeCallbacks(
+                            silenceExitAnimFallback);
+                    TempSilence.start(MainActivity.this,
+                            quietSelectedMinutes);
+                    TempSilence.State now = TempSilence.readState(
+                            MainActivity.this);
+                    if (now.active()) {
+                        // 开启成功才播全屏动画（定稿版）。
+                        showSilenceStartAnim(now.until);
+                    }
+                    if (s.linkDnd && !policyGranted()) {
+                        Toast.makeText(MainActivity.this,
+                                "已静默；勿扰没同步开（还没授权，"
+                                        + "见下方提示）",
+                                Toast.LENGTH_LONG).show();
+                    }
+                }
+                refreshQuietSilence();
+            }
+        });
+        body.addView(quietActionBtn);
+
+        body.addView(buildZoneLabel("静默时长"));
+        quietChipsBox = new LinearLayout(this);
+        quietChipsBox.setOrientation(LinearLayout.HORIZONTAL);
+        quietChipsBox.setLayoutParams(quietRowLp());
+        body.addView(quietChipsBox);
+        buildQuietChips();
+
+        body.addView(buildZoneLabel("联动与突破"));
+        quietLinkRow = new QuietSwitchRow("与系统勿扰联动",
+                "开静默 → 勿扰同步开；勿扰被打开 → 气泡自动排队",
+                st.linkDnd, new Runnable() {
+                    @Override
+                    public void run() {
+                        persistQuietSettings();
+                        refreshQuietSilence();
+                    }
+                });
+        quietLinkRow.row.setLayoutParams(quietRowLp());
+        body.addView(quietLinkRow.row);
+        quietCallRow = new QuietSwitchRow("静默时来电突破",
+                "开着：来电照常弹；关了：来电也排队，真全静默",
+                st.callBreak, new Runnable() {
+                    @Override
+                    public void run() {
+                        persistQuietSettings();
+                    }
+                });
+        LinearLayout.LayoutParams callLp = quietRowLp();
+        callLp.topMargin = dp(8);
+        quietCallRow.row.setLayoutParams(callLp);
+        body.addView(quietCallRow.row);
+
+        // 勿扰授权提示
+        quietDndHint = new LinearLayout(this);
+        quietDndHint.setOrientation(LinearLayout.VERTICAL);
+        quietDndHint.setBackground(rounded(
+                Color.rgb(254, 242, 242), dp(14)));
+        quietDndHint.setPadding(dp(12), dp(10), dp(12), dp(12));
+        LinearLayout.LayoutParams hintLp = quietRowLp();
+        hintLp.topMargin = dp(12);
+        quietDndHint.setLayoutParams(hintLp);
+        TextView hintText = new TextView(this);
+        hintText.setText("还没有「勿扰访问」权限：开静默时没法同步"
+                + "打开系统勿扰（气泡静默本身不受影响，勿扰那一半"
+                + "不生效）。授权一次即可。");
+        hintText.setTextSize(12);
+        hintText.setLineSpacing(0, 1.5f);
+        hintText.setTextColor(Color.rgb(153, 27, 27));
+        quietDndHint.addView(hintText);
+        TextView grantBtn = new TextView(this);
+        grantBtn.setText("去授权");
+        grantBtn.setGravity(Gravity.CENTER);
+        grantBtn.setTextSize(13);
+        grantBtn.setTextColor(Color.WHITE);
+        grantBtn.setTypeface(grantBtn.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        grantBtn.setBackground(rounded(
+                Color.rgb(220, 38, 38), dp(10)));
+        grantBtn.setPadding(0, dp(9), 0, dp(9));
+        LinearLayout.LayoutParams gbLp = new LinearLayout
+                .LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        gbLp.topMargin = dp(8);
+        grantBtn.setLayoutParams(gbLp);
+        grantBtn.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 try {
-                    startActivity(new Intent(MainActivity.this,
-                            AppRulesActivity.class));
+                    startActivity(new Intent(Settings
+                            .ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS));
                 } catch (Throwable ignored) {
                 }
             }
         });
+        quietDndHint.addView(grantBtn);
+        body.addView(quietDndHint);
+
+        // ================= 场景模式总开关 =================
+        // v530（wei 定）：排在应用名单上方。关掉后全屏游戏/
+        // 视频里通知照常弹；名单里「场景里」一列同时置灰
+        // 失效（refreshSceneLinkage 联动）。
+        Feature sceneFeature = featureFor("sceneMode");
+        if (sceneFeature != null) {
+            View smRow = buildSubSwitch(sceneFeature);
+            subRowViews.put(sceneFeature.key, smRow);
+            quietSceneModeAnchor = smRow;
+            body.addView(smRow);
+        }
+        body.addView(cardDesc("关掉后，游戏、视频全屏里通知也照常弹，"
+                + "下面名单里的「场景里」设置同时失效。"));
+
+        // ================= 应用名单区 =================
+        View appsLabel = buildZoneLabel("应用名单");
+        quietAppsAnchor = appsLabel;
+        body.addView(appsLabel);
+        body.addView(cardDesc("默认只列设过的应用和微信、QQ；"
+                + "要设别的，用下面搜索找出来点开就能设。"
+                + "「场景里」指游戏、视频全屏时：突破＝照常弹，"
+                + "排队＝先收着、退出场景再补弹。"));
+
+        quietAppSearch = new EditText(this);
+        quietAppSearch.setHint("搜索应用（没设过的默认跟随、场景里排队）");
+        quietAppSearch.setSingleLine(true);
+        quietAppSearch.setTextSize(13.5f);
+        quietAppSearch.setTextColor(Color.rgb(17, 24, 39));
+        quietAppSearch.setHintTextColor(Color.rgb(156, 163, 175));
+        GradientDrawable sb = new GradientDrawable();
+        sb.setColor(Color.WHITE);
+        sb.setCornerRadius(dp(999));
+        quietAppSearch.setBackground(sb);
+        quietAppSearch.setPadding(dp(14), dp(9), dp(14), dp(9));
+        LinearLayout.LayoutParams seLp = quietRowLp();
+        seLp.topMargin = dp(10);
+        quietAppSearch.setLayoutParams(seLp);
+        quietAppSearch.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a,
+                    int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a,
+                    int b, int c) {
+                ensureQuietAppsLoaded();
+                applyQuietFilter();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+        body.addView(quietAppSearch);
+
+        quietListBox = new LinearLayout(this);
+        quietListBox.setOrientation(LinearLayout.VERTICAL);
+        body.addView(quietListBox);
+
+        quietCountText = new TextView(this);
+        quietCountText.setTextSize(12);
+        quietCountText.setTextColor(Color.argb(230, 255, 255, 255));
+        LinearLayout.LayoutParams ctLp = quietRowLp();
+        ctLp.topMargin = dp(10);
+        quietCountText.setLayoutParams(ctLp);
+        body.addView(quietCountText);
+
+        body.addView(cardDesc("判定顺序：先看应用名单"
+                + "（永不弹一票否决）→ 再看场景（不在突破名单"
+                + "就排队）→ 最后临时静默（静默中一律排队、"
+                + "到点补弹）。"));
+
+        refreshQuietSilence();
         return card;
     }
 
-    /** v508: 场景例外入口卡。和应用规则卡同款式，橙色（预览
-     * 定版），点一下进 SceneExceptionsActivity。 */
-    private View buildSceneExceptionsCard() {
-        final int color = Color.rgb(249, 115, 22);
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
+    // ================= v536 提示音展开卡 =================
+
+    /**
+     * v536: 气泡提示音主页展开卡（wei 实测 v535 后定：子页
+     * 改成跟安静规则一样的主页展开卡）。位置贴着「通知气泡」
+     * 卡、归「胶囊类型」组。卡头 = 图标 + 标题 + 动态副标题
+     * （当前：X）+ 统一「›」展开箭头（v537: 卡头不再放开关，
+     * wei 定开关和展开只保留一个，跟安静规则卡头同款）。
+     * 总开关（bubbleSound 本人）挪进展开区第一行。展开区
+     * 上半 = 总开关行 + 全局音效
+     * （5 个内置单选 + 每行试听 + 自定义文件行），下半 =
+     * 按应用（照安静规则名单的做法：默认只列设过规则的，
+     * 没有就一行空态；卡内搜索找任意已装应用设规则；标签
+     * 点击循环）。行为层（BubbleSound / SoundRules / 自定
+     * 义文件双份存储与回退）全照 v535，只搬家不改语义。
+     * 原 SoundSettingsActivity 已删、Manifest 已注销。
+     * v538: 按应用默认语义反转（wei 拍板）——没设的应用
+     * 默认「无」（不响），循环改走有效值（无 → 跟随全局
+     * → 音效…）；默认名单（微信 / QQ / 默认短信应用 /
+     * 钉钉 / TIM / 企业微信）没设按跟随全局解析、直接
+     * 列进名单，点成「无」时存显式 none 压住默认。
+     */
+    private View buildSoundCard() {
+        final Feature f = featureFor("bubbleSound");
+        final int color = f != null ? f.color
+                : Color.rgb(59, 130, 246);
+        soundRuleMap.putAll(SoundRules.readAll(this));
+
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
         card.setBackground(rounded(color, dp(22)));
-        card.setPadding(dp(12), dp(12), dp(12), dp(12));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.topMargin = dp(10);
         card.setLayoutParams(clp);
+        soundCardView = card;
 
+        // ---- 卡头 ----
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(12), dp(12), dp(12), dp(12));
         TextView icon = new TextView(this);
-        icon.setText("景");
+        icon.setText(f != null ? f.icon : "音");
         icon.setTextSize(15);
         icon.setTextColor(color);
         icon.setGravity(Gravity.CENTER);
         icon.setBackground(rounded(Color.WHITE, dp(10)));
         icon.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(36), dp(36)));
-        card.addView(icon);
-
+        head.addView(icon);
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
@@ -936,36 +1856,2197 @@ public class MainActivity extends Activity {
         tlp.leftMargin = dp(10);
         texts.setLayoutParams(tlp);
         TextView title = new TextView(this);
-        title.setText("场景例外");
+        title.setText("气泡提示音");
+        title.setTextSize(15);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        bubbleSoundSub = new TextView(this);
+        bubbleSoundSub.setText("气泡弹出时轻响一声");
+        bubbleSoundSub.setTextSize(12);
+        bubbleSoundSub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(bubbleSoundSub);
+        head.addView(texts);
+        // v537: 卡头只留展开箭头（wei 定：开关和展开保留
+        // 一个）；总开关在展开区第一行（buildSoundMasterRow）。
+        final TextView chev = buildExpandChevron();
+        head.addView(chev);
+        card.addView(head);
+
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setVisibility(View.GONE);
+        body.setPadding(0, 0, 0, dp(12));
+        card.addView(body);
+        soundBody = body;
+        soundChev = chev;
+        final boolean[] expanded = new boolean[]{false};
+        body.setTag(expanded);
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                body.setVisibility(expanded[0]
+                        ? View.VISIBLE : View.GONE);
+                setChevronExpanded(chev, expanded[0]);
+                if (expanded[0]) {
+                    refreshSoundSelection();
+                    ensureSoundAppsLoaded();
+                }
+            }
+        });
+
+        // ---- 展开区第一行：总开关 ----
+        body.addView(buildSoundMasterRow(f));
+
+        // ---- 展开区上半：全局音效 ----
+        soundGlobalSection = new LinearLayout(this);
+        soundGlobalSection.setOrientation(LinearLayout.VERTICAL);
+        soundGlobalSection.addView(buildZoneLabel("全局音效"));
+        // v538: 按应用默认不响之后，全局音效只对设了
+        // 「跟随全局」的应用生效，加一行小字说清。
+        soundGlobalSection.addView(cardDesc(
+                "全局音效给设了『跟随全局』的应用用"));
+        for (String[] row : BubbleSound.CATALOG) {
+            soundGlobalSection.addView(buildSoundRow(row[0],
+                    row[1], row[3]));
+        }
+        soundGlobalSection.addView(buildSoundCustomRow());
+        body.addView(soundGlobalSection);
+
+        // ---- 展开区下半：按应用 ----
+        soundAppSection = new LinearLayout(this);
+        soundAppSection.setOrientation(LinearLayout.VERTICAL);
+        soundAppSection.addView(buildZoneLabel("按应用设置"));
+        // v538: 默认语义反转后的说明（没设 = 不响；默认
+        // 名单六个除外，它们默认跟随全局且直接列在名单里）。
+        soundAppSection.addView(cardDesc("没设的应用默认不响；"
+                + "微信、QQ、短信、钉钉、TIM、企业微信默认"
+                + "跟随全局。要给别的应用设，用下面搜索找"
+                + "出来，点它右边的标签切换。"));
+        soundAppSearch = new EditText(this);
+        soundAppSearch.setHint("搜索应用");
+        soundAppSearch.setSingleLine(true);
+        soundAppSearch.setTextSize(13.5f);
+        soundAppSearch.setTextColor(Color.rgb(17, 24, 39));
+        soundAppSearch.setHintTextColor(Color.rgb(156, 163, 175));
+        GradientDrawable sb = new GradientDrawable();
+        sb.setColor(Color.WHITE);
+        sb.setCornerRadius(dp(999));
+        soundAppSearch.setBackground(sb);
+        soundAppSearch.setPadding(dp(14), dp(9), dp(14), dp(9));
+        LinearLayout.LayoutParams seLp = quietRowLp();
+        seLp.topMargin = dp(10);
+        soundAppSearch.setLayoutParams(seLp);
+        soundAppSearch.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a,
+                    int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a,
+                    int b, int c) {
+                ensureSoundAppsLoaded();
+                applySoundFilter();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+        soundAppSection.addView(soundAppSearch);
+        soundAppListBox = new LinearLayout(this);
+        soundAppListBox.setOrientation(LinearLayout.VERTICAL);
+        soundAppSection.addView(soundAppListBox);
+        soundAppCount = new TextView(this);
+        soundAppCount.setTextSize(12);
+        soundAppCount.setTextColor(Color.argb(230, 255, 255, 255));
+        LinearLayout.LayoutParams ctLp = quietRowLp();
+        ctLp.topMargin = dp(10);
+        soundAppCount.setLayoutParams(ctLp);
+        soundAppSection.addView(soundAppCount);
+        body.addView(soundAppSection);
+
+        body.addView(cardDesc("提示音走系统通知音量；"
+                + "系统静音或勿扰时不响。"));
+
+        refreshSoundSelection();
+        refreshSoundSubtitle();
+        refreshSoundLinkage();
+        return card;
+    }
+
+    /** v537: 提示音总开关行——展开区第一行，在「全局音效」
+     * 列表之上。样式照 v535 子页顶部那行：♪ 图标盘 +「提示
+     * 音」+ 副标题「气泡弹出时轻响一声」+ 开关。开关本体走
+     * buildSwitch 通用拨动（落盘 + 备份 + 广播 + 涂色，拨动
+     * 钩子里会调 refreshSoundLinkage 刷展开区置灰）。第三个
+     * 参数 card 只被点击处理拿去 setAlpha——置灰统一归
+     * refreshSoundLinkage 管，所以传一个不挂载的空容器把那
+     * 一下 alpha 吃掉，别跟联动打架。这一行不进
+     * soundGlobalSection / soundAppSection，所以总开关关时
+     * 它自己不置灰，方便再打开（refreshSoundLinkage 只灰
+     * 它下面两个区段）。 */
+    private View buildSoundMasterRow(Feature f) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setLayoutParams(soundRowLp());
+        TextView disc = new TextView(this);
+        disc.setText("♪");
+        disc.setTextSize(14);
+        disc.setTextColor(Color.rgb(59, 130, 246));
+        disc.setGravity(Gravity.CENTER);
+        disc.setBackground(rounded(Color.WHITE, dp(999)));
+        disc.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(30), dp(30)));
+        row.addView(disc);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tLp.leftMargin = dp(10);
+        texts.setLayoutParams(tLp);
+        TextView nm = new TextView(this);
+        nm.setText("提示音");
+        nm.setTextSize(14.5f);
+        nm.setTextColor(Color.WHITE);
+        texts.addView(nm);
+        TextView ds = new TextView(this);
+        ds.setText("气泡弹出时轻响一声");
+        ds.setTextSize(11.5f);
+        ds.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(ds);
+        row.addView(texts);
+        if (f != null) {
+            View sw = buildSwitch(f, new LinearLayout(this));
+            sw.setLayoutParams(new LinearLayout.LayoutParams(
+                    dp(48), dp(28)));
+            bubbleSoundSwitch = sw;
+            row.addView(sw);
+        }
+        return row;
+    }
+
+    /** 卡内一行布局参数（左右各留 12dp，行距 8dp）。 */
+    private LinearLayout.LayoutParams soundRowLp() {
+        LinearLayout.LayoutParams lp = quietRowLp();
+        lp.topMargin = dp(8);
+        return lp;
+    }
+
+    private View buildSoundRow(final String id, String name,
+            String desc) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setLayoutParams(soundRowLp());
+        TextView play = new TextView(this);
+        play.setText("▶");
+        play.setTextSize(12);
+        play.setTextColor(Color.rgb(59, 130, 246));
+        play.setGravity(Gravity.CENTER);
+        play.setBackground(rounded(Color.WHITE, dp(999)));
+        play.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(30), dp(30)));
+        play.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (soundUsable()) {
+                    previewSound(id);
+                }
+            }
+        });
+        row.addView(play);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tLp.leftMargin = dp(10);
+        texts.setLayoutParams(tLp);
+        TextView nm = new TextView(this);
+        nm.setText(name);
+        nm.setTextSize(14.5f);
+        nm.setTextColor(Color.WHITE);
+        texts.addView(nm);
+        soundNames.put(id, nm);
+        TextView ds = new TextView(this);
+        ds.setText(desc);
+        ds.setTextSize(11.5f);
+        ds.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(ds);
+        row.addView(texts);
+        row.addView(buildSoundRadio(id));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (soundUsable()) {
+                    selectSound(id);
+                }
+            }
+        });
+        return row;
+    }
+
+    private View buildSoundCustomRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setLayoutParams(soundRowLp());
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        texts.setLayoutParams(tLp);
+        TextView nm = new TextView(this);
+        nm.setText("自定义音效");
+        nm.setTextSize(14.5f);
+        nm.setTextColor(Color.WHITE);
+        texts.addView(nm);
+        soundNames.put(BubbleSound.CUSTOM_ID, nm);
+        soundCustomSub = new TextView(this);
+        soundCustomSub.setTextSize(11.5f);
+        soundCustomSub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(soundCustomSub);
+        row.addView(texts);
+        TextView pick = new TextView(this);
+        pick.setText("选择文件");
+        pick.setTextSize(12.5f);
+        pick.setTextColor(Color.rgb(59, 130, 246));
+        pick.setBackground(rounded(Color.WHITE, dp(999)));
+        pick.setPadding(dp(12), dp(6), dp(12), dp(6));
+        pick.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (soundUsable()) {
+                    openSoundPicker();
+                }
+            }
+        });
+        row.addView(pick);
+        View radio = buildSoundRadio(BubbleSound.CUSTOM_ID);
+        LinearLayout.LayoutParams rLp =
+                (LinearLayout.LayoutParams) radio.getLayoutParams();
+        rLp.leftMargin = dp(10);
+        radio.setLayoutParams(rLp);
+        row.addView(radio);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!soundUsable()) {
+                    return;
+                }
+                // 已有自定义文件就直接选中；还没有就去挑文件。
+                if (soundCustomChosen()) {
+                    selectSound(BubbleSound.CUSTOM_ID);
+                } else {
+                    openSoundPicker();
+                }
+            }
+        });
+        refreshSoundCustomSub();
+        return row;
+    }
+
+    /** 单选圈（彩色卡版）：白圈描边 + 白点（选中才亮）。 */
+    private View buildSoundRadio(String id) {
+        FrameLayout ring = new FrameLayout(this);
+        ring.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(20), dp(20)));
+        View dot = new View(this);
+        dot.setBackground(rounded(Color.WHITE, dp(999)));
+        FrameLayout.LayoutParams dLp = new FrameLayout.LayoutParams(
+                dp(10), dp(10));
+        dLp.gravity = Gravity.CENTER;
+        dot.setLayoutParams(dLp);
+        ring.addView(dot);
+        soundRadioDots.put(id, dot);
+        return ring;
+    }
+
+    private GradientDrawable soundRingDrawable(boolean selected) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(Color.TRANSPARENT);
+        g.setStroke(dp(2), selected ? Color.WHITE
+                : Color.argb(120, 255, 255, 255));
+        return g;
+    }
+
+    private void refreshSoundSelection() {
+        String cur = currentSoundId();
+        for (Map.Entry<String, View> e : soundRadioDots
+                .entrySet()) {
+            boolean sel = e.getKey().equals(cur);
+            View dot = e.getValue();
+            dot.setVisibility(sel ? View.VISIBLE : View.INVISIBLE);
+            View ring = (View) dot.getParent();
+            if (ring != null) {
+                ring.setBackground(soundRingDrawable(sel));
+            }
+            TextView nm = soundNames.get(e.getKey());
+            if (nm != null) {
+                nm.setTypeface(nm.getTypeface(), sel
+                        ? android.graphics.Typeface.BOLD
+                        : android.graphics.Typeface.NORMAL);
+            }
+        }
+        refreshSoundCustomSub();
+    }
+
+    private void refreshSoundCustomSub() {
+        if (soundCustomSub == null) {
+            return;
+        }
+        String name = soundCustomName();
+        soundCustomSub.setText(name.isEmpty()
+                ? "未选择 · 从手机里挑一个音频文件"
+                : "已选：" + name);
+    }
+
+    private void selectSound(String id) {
+        if (!BubbleSound.isSoundId(id)) {
+            return;
+        }
+        prefs.edit().putString("bubbleSoundId", id).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "bubbleSoundId");
+        i.putExtra("soundId", id);
+        sendBroadcast(i);
+        refreshSoundSelection();
+        refreshSoundSubtitle();
+    }
+
+    // ================= 试听 =================
+
+    private void previewSound(String id) {
+        // 礼貌判断与实际播放同一套：静音/勿扰照实不响，不绕。
+        try {
+            AudioManager am = (AudioManager) getSystemService(
+                    Context.AUDIO_SERVICE);
+            if (am != null && am.getRingerMode()
+                    != AudioManager.RINGER_MODE_NORMAL) {
+                Toast.makeText(this, "系统静音或振动中，试听不出声",
+                        Toast.LENGTH_SHORT).show();
+                return;
+            }
+            NotificationManager nm = (NotificationManager)
+                    getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                int filter = nm.getCurrentInterruptionFilter();
+                if (filter
+                        != NotificationManager.INTERRUPTION_FILTER_ALL
+                        && filter
+                                != NotificationManager
+                                        .INTERRUPTION_FILTER_UNKNOWN) {
+                    Toast.makeText(this, "勿扰开着，试听不出声",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        releaseSoundPreview();
+        try {
+            MediaPlayer mp = new MediaPlayer();
+            mp.setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                    .setContentType(
+                            AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build());
+            if (BubbleSound.CUSTOM_ID.equals(id)) {
+                File f = new File(getFilesDir(),
+                        SOUND_CUSTOM_INTERNAL);
+                if (!f.isFile() || f.length() <= 0) {
+                    Toast.makeText(this, "自定义文件不在了，重新选一个",
+                            Toast.LENGTH_SHORT).show();
+                    mp.release();
+                    return;
+                }
+                mp.setDataSource(f.getAbsolutePath());
+            } else {
+                String asset = null;
+                for (String[] row : BubbleSound.CATALOG) {
+                    if (row[0].equals(id)) {
+                        asset = row[2];
+                        break;
+                    }
+                }
+                if (asset == null) {
+                    mp.release();
+                    return;
+                }
+                // v536 修试听失败：wav 在包里是压缩存储的，
+                // openFd + setDataSource(fd, offset, length)
+                // 播不了（wei 实测 v535 点试听弹「试听失败」）。
+                // 稳妥路子：素材先落 cache 文件，再按文件路径
+                // 播——BubbleSound（SystemUI 侧）同款修法。
+                File f = soundAssetCacheFile(asset);
+                if (f == null) {
+                    FileLog.i("SoundPreview no cache file ("
+                            + id + "/" + asset + ")");
+                    Toast.makeText(this, "试听失败",
+                            Toast.LENGTH_SHORT).show();
+                    mp.release();
+                    return;
+                }
+                mp.setDataSource(f.getAbsolutePath());
+            }
+            mp.setOnCompletionListener(
+                    new MediaPlayer.OnCompletionListener() {
+                        @Override
+                        public void onCompletion(MediaPlayer p) {
+                            if (soundPreviewPlayer == p) {
+                                soundPreviewPlayer = null;
+                            }
+                            try {
+                                p.release();
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+            mp.prepare();
+            mp.start();
+            soundPreviewPlayer = mp;
+        } catch (Throwable t) {
+            // 失败要留痕：id + 异常写进日志，下次直接查因。
+            FileLog.i("SoundPreview failed (" + id + "): " + t);
+            Toast.makeText(this, "试听失败", Toast.LENGTH_SHORT)
+                    .show();
+        }
+    }
+
+    /** assets 里的音效素材先复制到 cache 再播（压缩存储的
+     * 资源不能 openFd 直读）。已落盘且大小对得上就复用。 */
+    private File soundAssetCacheFile(String asset) {
+        try {
+            File dir = new File(getCacheDir(), "sound_preview");
+            if (!dir.isDirectory()) {
+                dir.mkdirs();
+            }
+            File out = new File(dir, asset);
+            InputStream in = getAssets().open(asset);
+            try {
+                int avail = 0;
+                try {
+                    avail = in.available();
+                } catch (Throwable ignored) {
+                }
+                if (out.isFile() && out.length() > 0
+                        && (avail <= 0
+                                || out.length() == avail)) {
+                    return out;
+                }
+                File tmp = new File(dir, asset + ".tmp");
+                OutputStream os = new FileOutputStream(tmp);
+                try {
+                    byte[] buf = new byte[32 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        os.write(buf, 0, n);
+                    }
+                } finally {
+                    os.close();
+                }
+                if (!tmp.renameTo(out)) {
+                    // rename 失败就直接拿 tmp 播，一样是文件路径。
+                    return tmp.isFile() && tmp.length() > 0
+                            ? tmp : null;
+                }
+                return out.isFile() && out.length() > 0
+                        ? out : null;
+            } finally {
+                in.close();
+            }
+        } catch (Throwable t) {
+            FileLog.i("SoundPreview asset copy failed ("
+                    + asset + "): " + t);
+            return null;
+        }
+    }
+
+    private void releaseSoundPreview() {
+        if (soundPreviewPlayer != null) {
+            try {
+                soundPreviewPlayer.release();
+            } catch (Throwable ignored) {
+            }
+            soundPreviewPlayer = null;
+        }
+    }
+
+    // ================= 自定义文件 =================
+
+    private void openSoundPicker() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("audio/*");
+            startActivityForResult(i, REQ_PICK_SOUND);
+        } catch (Throwable t) {
+            try {
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("audio/*");
+                startActivityForResult(i, REQ_PICK_SOUND);
+            } catch (Throwable t2) {
+                Toast.makeText(this, "打不开文件选择器",
+                        Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode,
+            Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_SOUND
+                || resultCode != RESULT_OK
+                || data == null || data.getData() == null) {
+            return;
+        }
+        final Uri uri = data.getData();
+        Toast.makeText(this, "正在保存自定义音效…",
+                Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String err = importSoundCustom(uri);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (err == null) {
+                            refreshSoundSelection();
+                            refreshSoundSubtitle();
+                            Toast.makeText(MainActivity.this,
+                                    "已设为自定义音效",
+                                    Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(MainActivity.this,
+                                    err, Toast.LENGTH_LONG).show();
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 把选中的音频拷成两份并切到 custom（照 v535 子页版）：
+     * App 私有目录给本卡试听，/sdcard/flymebobo/ 公开目录给
+     * SystemUI 播放。成功返回 null，失败返回给用户看的文案。 */
+    private String importSoundCustom(Uri uri) {
+        String displayName = soundQueryDisplayName(uri);
+        if (displayName == null || displayName.isEmpty()) {
+            displayName = "自定义音效";
+        }
+        File internal = new File(getFilesDir(),
+                SOUND_CUSTOM_INTERNAL);
+        try {
+            InputStream in = getContentResolver()
+                    .openInputStream(uri);
+            if (in == null) {
+                return "读不到这个文件";
+            }
+            try {
+                OutputStream out = new FileOutputStream(internal);
+                try {
+                    byte[] buf = new byte[64 * 1024];
+                    long total = 0;
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        total += n;
+                        if (total > SOUND_MAX_CUSTOM_BYTES) {
+                            return "文件太大了（上限 20MB）";
+                        }
+                        out.write(buf, 0, n);
+                    }
+                } finally {
+                    out.close();
+                }
+            } finally {
+                in.close();
+            }
+        } catch (Throwable t) {
+            FileLog.i("SoundCustom import failed: " + t);
+            return "保存失败：" + t.getMessage();
+        }
+        if (!internal.isFile() || internal.length() <= 0) {
+            return "保存失败：文件是空的";
+        }
+        // 公开副本：SystemUI 播放走这份（App 私有目录它读不到）。
+        String ext = "";
+        int dot = displayName.lastIndexOf('.');
+        if (dot > 0) {
+            String e = displayName.substring(dot).toLowerCase(
+                    Locale.US);
+            if (e.equals(".mp3") || e.equals(".wav")
+                    || e.equals(".ogg") || e.equals(".m4a")
+                    || e.equals(".aac") || e.equals(".flac")) {
+                ext = e;
+            }
+        }
+        File pub = new File(SettingsStore.DIR_PUBLIC,
+                SOUND_CUSTOM_INTERNAL + ext);
+        boolean ok = soundCopyFile(internal, pub)
+                && pub.isFile() && pub.length() > 0;
+        if (!ok) {
+            ok = soundCopyViaSu(internal, pub);
+        }
+        if (!ok) {
+            return "保存失败：公开目录写不进去";
+        }
+        String pubPath = pub.getAbsolutePath();
+        prefs.edit()
+                .putString("bubbleCustomName", displayName)
+                .putString("bubbleCustomPath", pubPath)
+                .putString("bubbleSoundId", BubbleSound.CUSTOM_ID)
+                .commit();
+        SettingsStore.saveAll(this);
+        Intent ci = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        ci.putExtra("key", "bubbleSoundCustom");
+        ci.putExtra("path", pubPath);
+        ci.putExtra("name", displayName);
+        sendBroadcast(ci);
+        Intent si = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        si.putExtra("key", "bubbleSoundId");
+        si.putExtra("soundId", BubbleSound.CUSTOM_ID);
+        sendBroadcast(si);
+        return null;
+    }
+
+    private String soundQueryDisplayName(Uri uri) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(uri,
+                    new String[]{OpenableColumns.DISPLAY_NAME},
+                    null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(
+                        OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    return c.getString(idx);
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            if (c != null) {
+                c.close();
+            }
+        }
+        return null;
+    }
+
+    private boolean soundCopyFile(File src, File dst) {
+        try {
+            File parent = dst.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+            InputStream in = new FileInputStream(src);
+            try {
+                OutputStream out = new FileOutputStream(dst);
+                try {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                    }
+                } finally {
+                    out.close();
+                }
+            } finally {
+                in.close();
+            }
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 普通写不进 /sdcard/flymebobo 时走 su（同 SettingsStore
+     * 的兜底：root 机上一定能写，chmod 644 让 SystemUI 能读）。 */
+    private boolean soundCopyViaSu(File src, File dst) {
+        try {
+            String cmd = "mkdir -p " + SettingsStore.DIR_PUBLIC
+                    + " && cp " + src.getAbsolutePath() + " "
+                    + dst.getAbsolutePath() + " && chmod 644 "
+                    + dst.getAbsolutePath();
+            Process p = Runtime.getRuntime().exec(
+                    new String[]{"su", "-c", cmd});
+            p.waitFor();
+            return dst.isFile() && dst.length() > 0;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    // ================= 按应用（卡内） =================
+
+    private void ensureSoundAppsLoaded() {
+        if (soundAppsLoaded || soundAppsLoading
+                || soundAppListBox == null) {
+            return;
+        }
+        soundAppsLoading = true;
+        final TextView loading = new TextView(this);
+        loading.setText("正在读取应用列表…");
+        loading.setTextSize(13);
+        loading.setTextColor(Color.argb(230, 255, 255, 255));
+        loading.setPadding(0, dp(14), 0, dp(8));
+        loading.setGravity(Gravity.CENTER);
+        soundAppListBox.addView(loading);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<QuietAppEntry> apps = loadSoundApps();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        soundAppListBox.removeView(loading);
+                        soundAllApps.addAll(apps);
+                        for (QuietAppEntry e : apps) {
+                            View row = buildSoundAppRow(e);
+                            soundRowViews.put(e.pkg, row);
+                            soundAppListBox.addView(row);
+                        }
+                        soundAppsLoaded = true;
+                        soundAppsLoading = false;
+                        applySoundFilter();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 全部已装应用：设过规则的在前，再用户应用、系统应用，
+     * 组内按名称（同安静规则名单的排法）。 */
+    private List<QuietAppEntry> loadSoundApps() {
+        PackageManager pm = getPackageManager();
+        List<QuietAppEntry> apps = new ArrayList<>();
+        try {
+            List<ApplicationInfo> ais =
+                    pm.getInstalledApplications(0);
+            for (ApplicationInfo ai : ais) {
+                if (ai == null || ai.packageName == null) {
+                    continue;
+                }
+                QuietAppEntry e = new QuietAppEntry();
+                e.pkg = ai.packageName;
+                CharSequence label = pm.getApplicationLabel(ai);
+                e.label = label == null ? ai.packageName
+                        : label.toString();
+                e.system = (ai.flags & (ApplicationInfo.FLAG_SYSTEM
+                        | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))
+                        != 0;
+                try {
+                    e.icon = pm.getApplicationIcon(ai);
+                } catch (Throwable ignored) {
+                }
+                apps.add(e);
+            }
+        } catch (Throwable ignored) {
+        }
+        final Collator collator = Collator.getInstance(Locale.CHINA);
+        Collections.sort(apps, new Comparator<QuietAppEntry>() {
+            @Override
+            public int compare(QuietAppEntry a, QuietAppEntry b) {
+                int ra = rank(a);
+                int rb = rank(b);
+                if (ra != rb) {
+                    return ra - rb;
+                }
+                return collator.compare(a.label, b.label);
+            }
+
+            private int rank(QuietAppEntry e) {
+                // v538: 设过规则的和默认名单（默认跟随全局）
+                // 的都排最前。
+                if (soundRuleMap.containsKey(e.pkg)
+                        || SoundRules.isDefaultFollow(
+                                MainActivity.this, e.pkg)) {
+                    return 0;
+                }
+                return e.system ? 2 : 1;
+            }
+        });
+        return apps;
+    }
+
+    private View buildSoundAppRow(final QuietAppEntry e) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        row.setPadding(dp(12), dp(9), dp(12), dp(9));
+        LinearLayout.LayoutParams rlp = quietRowLp();
+        rlp.topMargin = dp(10);
+        row.setLayoutParams(rlp);
+        if (e.icon != null) {
+            ImageView iv = new ImageView(this);
+            iv.setImageDrawable(e.icon);
+            iv.setLayoutParams(new LinearLayout.LayoutParams(
+                    dp(32), dp(32)));
+            row.addView(iv);
+        } else {
+            View ph = new View(this);
+            ph.setBackground(rounded(Color.WHITE, dp(9)));
+            ph.setLayoutParams(new LinearLayout.LayoutParams(
+                    dp(32), dp(32)));
+            row.addView(ph);
+        }
+        TextView nm = new TextView(this);
+        nm.setText(e.label);
+        nm.setTextSize(14.5f);
+        nm.setTextColor(Color.WHITE);
+        nm.setSingleLine(true);
+        nm.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        nLp.leftMargin = dp(10);
+        nm.setLayoutParams(nLp);
+        row.addView(nm);
+        final TextView chip = new TextView(this);
+        chip.setTextSize(12.5f);
+        chip.setPadding(dp(12), dp(6), dp(12), dp(6));
+        paintSoundChip(chip, soundEffectiveValue(e.pkg));
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!soundUsable()) {
+                    return;
+                }
+                // v538: 循环走有效值（无 → 跟随全局 → 音效…），
+                // 落盘时映射回存储值：点成「无」时，默认名单
+                // 应用要存显式 none 压住默认 follow，普通
+                // 应用删条目即可（没存本来就是无）。
+                String next = nextSoundRuleValue(
+                        soundEffectiveValue(e.pkg));
+                String stored;
+                if (next == null && SoundRules.isDefaultFollow(
+                        MainActivity.this, e.pkg)) {
+                    stored = SoundRules.VALUE_NONE;
+                } else {
+                    stored = next;
+                }
+                if (stored == null) {
+                    soundRuleMap.remove(e.pkg);
+                } else {
+                    soundRuleMap.put(e.pkg, stored);
+                }
+                SoundRules.setRule(MainActivity.this, e.pkg,
+                        stored);
+                paintSoundChip(chip, next);
+                if (soundSearching()) {
+                    soundShownExtra.add(e.pkg);
+                }
+                applySoundFilter();
+            }
+        });
+        row.addView(chip);
+        // 搜索时点中这一行 → 清空搜索后它也留在名单里
+        // （同安静规则的做法）。
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (soundSearching()) {
+                    soundShownExtra.add(e.pkg);
+                }
+            }
+        });
+        return row;
+    }
+
+    /** 某应用的有效值：存了按存储值归一（none / 旧 mute
+     * 都算「无」）；没存看默认名单（名单内 = follow，其余
+     * = 无）。返回 follow / 音效 id / null（无）。 */
+    private String soundEffectiveValue(String pkg) {
+        String stored = soundRuleMap.get(pkg);
+        if (stored != null) {
+            return SoundRules.normalize(stored);
+        }
+        return SoundRules.isDefaultFollow(this, pkg)
+                ? SoundRules.VALUE_FOLLOW : null;
+    }
+
+    /** chip 按有效值绘制：无（灰）/ 跟随全局（蓝）/ 指定
+     * 音效（绿）。入参先归一，旧 mute 也画成「无」。 */
+    private void paintSoundChip(TextView chip, String value) {
+        value = SoundRules.normalize(value);
+        if (value == null) {
+            chip.setText("无");
+            chip.setTextColor(Color.rgb(102, 112, 127));
+            chip.setBackground(rounded(Color.rgb(238, 240, 244),
+                    dp(999)));
+        } else if (SoundRules.VALUE_FOLLOW.equals(value)) {
+            chip.setText("跟随全局");
+            chip.setTextColor(Color.rgb(37, 99, 235));
+            chip.setBackground(rounded(Color.rgb(224, 235, 255),
+                    dp(999)));
+        } else {
+            chip.setText(BubbleSound.nameFor(value));
+            chip.setTextColor(Color.rgb(29, 158, 87));
+            chip.setBackground(rounded(Color.rgb(231, 246, 236),
+                    dp(999)));
+        }
+    }
+
+    /** v538 循环顺序（走有效值）：无 → 跟随全局 → 轻木 →
+     * 气泡啵 → 清脆叮 → 叮咚 → 水滴 →（设了自定义才有）
+     * 自定义 → 回「无」。入参先归一，旧 mute 当「无」。 */
+    private String nextSoundRuleValue(String cur) {
+        List<String> cycle = new ArrayList<>();
+        cycle.add(null);
+        cycle.add(SoundRules.VALUE_FOLLOW);
+        cycle.add("soft");
+        cycle.add("pop");
+        cycle.add("ding");
+        cycle.add("dingdong");
+        cycle.add("drop");
+        if (soundCustomChosen()) {
+            cycle.add(BubbleSound.CUSTOM_ID);
+        }
+        int idx = cycle.indexOf(SoundRules.normalize(cur));
+        return cycle.get((idx + 1) % cycle.size());
+    }
+
+    private boolean soundSearching() {
+        return soundAppSearch != null
+                && soundAppSearch.getText() != null
+                && !soundAppSearch.getText().toString().trim()
+                        .isEmpty();
+    }
+
+    private void applySoundFilter() {
+        if (soundAppListBox == null || !soundAppsLoaded) {
+            return;
+        }
+        String q = soundAppSearch == null
+                || soundAppSearch.getText() == null ? ""
+                : soundAppSearch.getText().toString().trim()
+                        .toLowerCase(Locale.ROOT);
+        boolean searching = !q.isEmpty();
+        int shown = 0;
+        int ruledShown = 0;
+        for (QuietAppEntry e : soundAllApps) {
+            View row = soundRowViews.get(e.pkg);
+            if (row == null) {
+                continue;
+            }
+            boolean show;
+            if (searching) {
+                show = (e.label + "\n" + e.pkg)
+                        .toLowerCase(Locale.ROOT).contains(q);
+            } else {
+                // 默认列设过规则的 + 默认名单应用（v538：
+                // 微信 / QQ / 短信 / 钉钉 / TIM / 企业微信
+                // 没设也是「跟随全局」，直接出现在名单里，
+                // 同安静规则预置微信/QQ 的做法）。
+                show = soundRuleMap.containsKey(e.pkg)
+                        || soundShownExtra.contains(e.pkg)
+                        || SoundRules.isDefaultFollow(this, e.pkg);
+            }
+            row.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) {
+                shown++;
+                if (soundRuleMap.containsKey(e.pkg)) {
+                    ruledShown++;
+                }
+            }
+        }
+        refreshSoundAppCount(searching, shown, ruledShown);
+    }
+
+    private void refreshSoundAppCount(boolean searching, int shown,
+            int ruledShown) {
+        if (soundAppCount == null) {
+            return;
+        }
+        if (!soundAppsLoaded) {
+            soundAppCount.setText("");
+            return;
+        }
+        if (searching) {
+            soundAppCount.setText("找到 " + shown
+                    + " 个应用，点它右边的标签就能设");
+        } else if (soundRuleMap.isEmpty()) {
+            soundAppCount.setText("还没给任何应用设过 · "
+                    + "没设的默认不响，用搜索找应用点标签设置");
+        } else {
+            soundAppCount.setText("已给 " + ruledShown
+                    + " 个应用单独设了提示音，其余默认不响");
+        }
+    }
+
+    // ================= 提示音状态读 =================
+
+    /** 展开区可点的总闸：通知气泡开着、提示音也开着。 */
+    private boolean soundUsable() {
+        return isOn("notif") && isOn("bubbleSound");
+    }
+
+    private String currentSoundId() {
+        try {
+            String id = prefs.getString("bubbleSoundId", "soft");
+            if (id != null && BubbleSound.isSoundId(id)) {
+                return id;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "soft";
+    }
+
+    private String soundCustomName() {
+        try {
+            String n = prefs.getString("bubbleCustomName", "");
+            return n == null ? "" : n;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private boolean soundCustomChosen() {
+        try {
+            String p = prefs.getString("bubbleCustomPath", "");
+            return p != null && !p.isEmpty();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+
+    /** 卡内整行布局参数（左右各留 12dp，与其他卡内行对齐）。 */
+    private LinearLayout.LayoutParams quietRowLp() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(12);
+        lp.rightMargin = dp(12);
+        return lp;
+    }
+
+    // ================= 临时静默（卡内） =================
+
+    private void startQuietTicker() {
+        if (!quietTicking) {
+            quietTicking = true;
+            quietTicker.removeCallbacks(quietTick);
+            quietTicker.postDelayed(quietTick, 1000);
+        }
+    }
+
+    private void stopQuietTicker() {
+        quietTicking = false;
+        quietTicker.removeCallbacks(quietTick);
+    }
+
+    private void buildQuietChips() {
+        if (quietChipsBox == null) {
+            return;
+        }
+        TempSilence.State s = TempSilence.readState(this);
+        boolean active = s.active();
+        String key = active + "|" + quietSelectedMinutes;
+        if (key.equals(quietChipsKey)
+                && quietChipsBox.getChildCount() > 0) {
+            return;
+        }
+        quietChipsKey = key;
+        quietChipsBox.removeAllViews();
+        for (int i = 0; i < TempSilence.DURATIONS.length; i++) {
+            final int min = TempSilence.DURATIONS[i];
+            TextView chip = new TextView(this);
+            chip.setText(min >= 60 ? (min / 60) + " 小时"
+                    : min + " 分钟");
+            chip.setGravity(Gravity.CENTER);
+            chip.setTextSize(14);
+            boolean sel = min == quietSelectedMinutes;
+            chip.setTextColor(sel ? QUIET_INDIGO : Color.WHITE);
+            if (sel) {
+                chip.setTypeface(chip.getTypeface(),
+                        android.graphics.Typeface.BOLD);
+            }
+            chip.setBackground(rounded(sel ? Color.WHITE
+                    : Color.argb(60, 255, 255, 255), dp(12)));
+            chip.setPadding(0, dp(10), 0, dp(10));
+            LinearLayout.LayoutParams p =
+                    new LinearLayout.LayoutParams(0,
+                            ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                p.leftMargin = dp(8);
+            }
+            chip.setLayoutParams(p);
+            chip.setAlpha(active ? 0.45f : 1f);
+            if (!active) {
+                chip.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        quietSelectedMinutes = min;
+                        persistQuietSettings();
+                        buildQuietChips();
+                        refreshQuietSilence();
+                    }
+                });
+            }
+            quietChipsBox.addView(chip);
+        }
+    }
+
+    private void persistQuietSettings() {
+        TempSilence.updateSettings(this, quietSelectedMinutes,
+                quietLinkRow.on, quietCallRow.on);
+    }
+
+    private boolean policyGranted() {
+        try {
+            NotificationManager nm = (NotificationManager)
+                    getSystemService(Context.NOTIFICATION_SERVICE);
+            return nm != null
+                    && nm.isNotificationPolicyAccessGranted();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void refreshQuietSilence() {
+        if (quietStatusTitle == null) {
+            return;
+        }
+        // 与 TempSilenceActivity.refresh 同语义：先对账（过期/
+        // 手动关勿扰都会在这里收尾，两条路径幂等）。
+        TempSilence.onInterruptionFilterChanged(this);
+        TempSilence.State s = TempSilence.readState(this);
+        if (s.until != 0 && !s.active()) {
+            TempSilence.end(this, "expired");
+            s = TempSilence.readState(this);
+        }
+        boolean active = s.active();
+        if (active) {
+            long remainMs = s.until - System.currentTimeMillis();
+            quietStatusTitle.setText("正在静默 · 到点自动恢复");
+            quietCountdown.setText(formatQuietRemain(remainMs));
+            quietCountdown.setVisibility(View.VISIBLE);
+            String endAt = new SimpleDateFormat("HH:mm",
+                    Locale.CHINA).format(new Date(s.until));
+            quietStatusSub.setText("恢复时间 " + endAt
+                    + " · 消息先排队，恢复后按顺序补弹"
+                    + (s.linkDnd ? " · 系统勿扰联动中" : ""));
+            quietActionBtn.setText("提前取消，马上恢复");
+        } else {
+            quietStatusTitle.setText("临时静默未开启");
+            quietCountdown.setVisibility(View.GONE);
+            quietStatusSub.setText("按一下开启，"
+                    + (quietSelectedMinutes >= 60
+                            ? (quietSelectedMinutes / 60) + " 小时"
+                            : quietSelectedMinutes + " 分钟")
+                    + "后自动恢复，随时能提前取消。");
+            quietActionBtn.setText("开启临时静默");
+        }
+        quietDndHint.setVisibility(s.linkDnd && !policyGranted()
+                ? View.VISIBLE : View.GONE);
+        quietLinkRow.setOn(s.linkDnd);
+        quietCallRow.setOn(s.callBreak);
+        if (quietSelectedMinutes != s.minutes) {
+            quietSelectedMinutes = s.minutes;
+        }
+        buildQuietChips();
+    }
+
+    private static String formatQuietRemain(long ms) {
+        long sec = Math.max(0, ms / 1000);
+        long h = sec / 3600;
+        long m = (sec % 3600) / 60;
+        long ss = sec % 60;
+        if (h > 0) {
+            return h + ":" + pad2(m) + ":" + pad2(ss);
+        }
+        return pad2(m) + ":" + pad2(ss);
+    }
+
+    private static String pad2(long v) {
+        return v < 10 ? "0" + v : String.valueOf(v);
+    }
+
+    /**
+     * v528 定稿、v529 抽成共享实现、v531 换 v2 设计：全屏
+     * 开启回执动画（渐变幕布 + 圆形插画，构建与时间线在
+     * SilenceAnim 里）。App 内走这里（decorView），SystemUI
+     * 侧走同一个构建器，两条路一个样。只在开启成功时播。
+     */
+    private void showSilenceStartAnim(long untilMs) {
+        showFullscreenAnim(SilenceAnim.SILENCE,
+                SilenceAnim.subtitleTimed(untilMs));
+    }
+
+    /** v533: the silence EXIT receipt (wei: 跟场景退出同款)
+     * — same builder, moon illustration, exit copy. Played
+     * in-app only for this page's own cancel tap, with the
+     * flushed count SystemUI broadcast back; expiry and the
+     * DND-off road are receipted by SystemUI itself. */
+    private void showSilenceExitAnim(int flushed) {
+        showFullscreenAnim(SilenceAnim.SILENCE_EXIT,
+                flushed > 0
+                        ? SilenceAnim.subtitleSilenceExitFlushed(
+                                flushed)
+                        : SilenceAnim.subtitleSilenceExitEmpty());
+    }
+
+    /** v531: 在设置里拨开「场景模式」开关时播的 B 版全屏
+     * 动画（wei 拍板：开关动画用全屏版；进游戏时 SystemUI
+     * 侧播同款，两个触发点视觉完全一致）。关开关不播。 */
+    private void showSceneStartAnim() {
+        showFullscreenAnim(SilenceAnim.SCENE,
+                SilenceAnim.subtitleScene());
+    }
+
+    private void showFullscreenAnim(SilenceAnim.Style style,
+            String subtitle) {
+        try {
+            final ViewGroup decor =
+                    (ViewGroup) getWindow().getDecorView();
+            View old = decor.findViewWithTag(SilenceAnim.TAG);
+            if (old != null) {
+                decor.removeView(old);
+            }
+            final SilenceAnim.Handle[] hh =
+                    new SilenceAnim.Handle[1];
+            SilenceAnim.Handle h = SilenceAnim.create(this,
+                    style, subtitle,
+                    new Runnable() {
+                        @Override
+                        public void run() {
+                            if (hh[0] != null
+                                    && hh[0].veil.getParent()
+                                            != null) {
+                                decor.removeView(hh[0].veil);
+                            }
+                        }
+                    });
+            hh[0] = h;
+            decor.addView(h.veil, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            h.play();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // ================= 应用名单（卡内） =================
+
+    private void ensureQuietAppsLoaded() {
+        if (quietAppsLoaded || quietAppsLoading
+                || quietListBox == null) {
+            return;
+        }
+        quietAppsLoading = true;
+        final TextView loading = new TextView(this);
+        loading.setText("正在读取应用列表…");
+        loading.setTextSize(13);
+        loading.setTextColor(Color.argb(230, 255, 255, 255));
+        loading.setPadding(0, dp(16), 0, dp(8));
+        loading.setGravity(Gravity.CENTER);
+        quietListBox.addView(loading);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final List<QuietAppEntry> apps = loadQuietApps();
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        quietListBox.removeView(loading);
+                        quietAllApps.addAll(apps);
+                        for (QuietAppEntry e : apps) {
+                            View row = buildQuietAppRow(e);
+                            quietRowViews.put(e.pkg, row);
+                            quietListBox.addView(row);
+                        }
+                        quietAppsLoaded = true;
+                        quietAppsLoading = false;
+                        recomputeQuietPinned();
+                        applyQuietFilter();
+                        refreshSceneLinkage();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** 全部已安装应用（用户 + 系统，同旧两页）：已设过名单的
+     * 排前面，再用户应用、系统应用，组内按名称。 */
+    private List<QuietAppEntry> loadQuietApps() {
+        PackageManager pm = getPackageManager();
+        List<QuietAppEntry> apps = new ArrayList<>();
+        try {
+            List<ApplicationInfo> ais =
+                    pm.getInstalledApplications(0);
+            for (ApplicationInfo ai : ais) {
+                if (ai == null || ai.packageName == null) {
+                    continue;
+                }
+                QuietAppEntry e = new QuietAppEntry();
+                e.pkg = ai.packageName;
+                CharSequence label = pm.getApplicationLabel(ai);
+                e.label = label == null ? ai.packageName
+                        : label.toString();
+                e.system = (ai.flags & (ApplicationInfo.FLAG_SYSTEM
+                        | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP))
+                        != 0;
+                try {
+                    e.icon = pm.getApplicationIcon(ai);
+                } catch (Throwable ignored) {
+                }
+                apps.add(e);
+            }
+        } catch (Throwable ignored) {
+        }
+        final Collator collator = Collator.getInstance(Locale.CHINA);
+        Collections.sort(apps, new Comparator<QuietAppEntry>() {
+            @Override
+            public int compare(QuietAppEntry a, QuietAppEntry b) {
+                int ra = rank(a);
+                int rb = rank(b);
+                if (ra != rb) {
+                    return ra - rb;
+                }
+                return collator.compare(a.label, b.label);
+            }
+
+            private int rank(QuietAppEntry e) {
+                if (quietRules.containsKey(e.pkg)
+                        || quietScene.containsKey(e.pkg)
+                        || SceneExceptions.effective(quietScene, e.pkg)
+                                == SceneExceptions.BREAK) {
+                    return 0;
+                }
+                return e.system ? 2 : 1;
+            }
+        });
+        return apps;
+    }
+
+    private View buildQuietAppRow(final QuietAppEntry e) {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams blp = quietRowLp();
+        blp.topMargin = dp(10);
+        box.setLayoutParams(blp);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout tile = new LinearLayout(this);
+        tile.setGravity(Gravity.CENTER);
+        tile.setBackground(rounded(Color.WHITE, dp(10)));
+        tile.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(40), dp(40)));
+        if (e.icon != null) {
+            ImageView iv = new ImageView(this);
+            iv.setImageDrawable(e.icon);
+            iv.setLayoutParams(new LinearLayout.LayoutParams(
+                    dp(30), dp(30)));
+            tile.addView(iv);
+        } else {
+            TextView tv = new TextView(this);
+            tv.setText(e.label.isEmpty() ? "?"
+                    : e.label.substring(0, 1));
+            tv.setTextSize(15);
+            tv.setTextColor(QUIET_INDIGO);
+            tile.addView(tv);
+        }
+        head.addView(tile);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView name = new TextView(this);
+        name.setText(e.label);
+        name.setTextSize(14.5f);
+        name.setTextColor(Color.WHITE);
+        name.setTypeface(name.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(name);
+        TextView pkg = new TextView(this);
+        pkg.setText(e.pkg + (e.system ? " · 系统" : ""));
+        pkg.setTextSize(10.5f);
+        pkg.setTextColor(Color.argb(230, 255, 255, 255));
+        pkg.setSingleLine(true);
+        pkg.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(pkg);
+        head.addView(texts);
+        box.addView(head);
+
+        int ruleSel = 0;
+        Integer curRule = quietRules.get(e.pkg);
+        int ruleMode = curRule == null ? AppRules.DEFAULT : curRule;
+        for (int i = 0; i < QUIET_RULE_MODES.length; i++) {
+            if (QUIET_RULE_MODES[i] == ruleMode) {
+                ruleSel = i;
+            }
+        }
+        box.addView(quietSegRow("平时", QUIET_RULE_LABELS, ruleSel,
+                new SegListener() {
+                    @Override
+                    public void onSelect(int idx) {
+                        setQuietRuleMode(e.pkg,
+                                QUIET_RULE_MODES[idx]);
+                    }
+                }));
+        int sceneMode = SceneExceptions.effective(quietScene, e.pkg);
+        int sceneSel = sceneMode == SceneExceptions.BREAK ? 1 : 0;
+        View sceneSegRow = quietSegRow("场景里", QUIET_SCENE_LABELS,
+                sceneSel, new SegListener() {
+                    @Override
+                    public void onSelect(int idx) {
+                        setQuietSceneMode(e.pkg,
+                                QUIET_SCENE_MODES[idx]);
+                    }
+                });
+        box.addView(sceneSegRow);
+        // v530: 记下这一列，场景模式总开关关时整列置灰联动。
+        quietSceneSegRows.put(e.pkg, sceneSegRow);
+        quietSceneSegs.put(e.pkg, lastQuietSeg);
+        // 搜索时点中这一行 → 清空搜索后它也留在名单里。
+        box.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (quietSearching()) {
+                    quietShownExtra.add(e.pkg);
+                }
+            }
+        });
+        return box;
+    }
+
+    /** 一行分段：左侧小标签 + 胶囊分段控件（复用 SegControl）。 */
+    private View quietSegRow(String label, String[] labels,
+            int sel, SegListener listener) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        row.setLayoutParams(rlp);
+        TextView lab = new TextView(this);
+        lab.setText(label);
+        lab.setTextSize(11.5f);
+        lab.setTextColor(Color.argb(230, 255, 255, 255));
+        lab.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(44), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(lab);
+        SegControl seg = new SegControl(labels, sel, QUIET_INDIGO);
+        seg.box.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        seg.listener = listener;
+        lastQuietSeg = seg;
+        row.addView(seg.box);
+        return row;
+    }
+
+    private boolean quietSearching() {
+        return quietAppSearch != null
+                && quietAppSearch.getText() != null
+                && !quietAppSearch.getText().toString().trim()
+                        .isEmpty();
+    }
+
+    private void setQuietRuleMode(String pkg, int mode) {
+        if (mode == AppRules.DEFAULT) {
+            quietRules.remove(pkg);
+        } else {
+            quietRules.put(pkg, mode);
+        }
+        AppRules.setRule(this, pkg, mode);
+        afterQuietRuleChange(pkg);
+    }
+
+    private void setQuietSceneMode(String pkg, int mode) {
+        quietScene.put(pkg, mode);
+        SceneExceptions.setMode(this, pkg, mode);
+        afterQuietRuleChange(pkg);
+    }
+
+    private void afterQuietRuleChange(String pkg) {
+        if (quietSearching()) {
+            quietShownExtra.add(pkg);
+        }
+        recomputeQuietPinned();
+        applyQuietFilter();
+    }
+
+    /** 默认展示名单：设过非默认规则的 + 场景里突破的 +
+     * 微信/QQ 常驻（wei 定）。 */
+    private void recomputeQuietPinned() {
+        quietPinned.clear();
+        quietPinned.addAll(quietRules.keySet());
+        quietPinned.addAll(quietScene.keySet());
+        for (QuietAppEntry e : quietAllApps) {
+            if (SceneExceptions.effective(quietScene, e.pkg)
+                    == SceneExceptions.BREAK) {
+                quietPinned.add(e.pkg);
+            }
+        }
+        quietPinned.add("com.tencent.mm");
+        quietPinned.add("com.tencent.mobileqq");
+    }
+
+    private void applyQuietFilter() {
+        if (quietListBox == null || !quietAppsLoaded) {
+            return;
+        }
+        String q = quietAppSearch == null
+                || quietAppSearch.getText() == null ? ""
+                : quietAppSearch.getText().toString().trim()
+                        .toLowerCase(Locale.ROOT);
+        boolean searching = !q.isEmpty();
+        int shown = 0;
+        for (QuietAppEntry e : quietAllApps) {
+            View row = quietRowViews.get(e.pkg);
+            if (row == null) {
+                continue;
+            }
+            boolean show;
+            if (searching) {
+                show = (e.label + "\n" + e.pkg)
+                        .toLowerCase(Locale.ROOT).contains(q);
+            } else {
+                show = quietPinned.contains(e.pkg)
+                        || quietShownExtra.contains(e.pkg);
+            }
+            row.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) {
+                shown++;
+            }
+        }
+        refreshQuietCount(searching, shown);
+    }
+
+    private void refreshQuietCount(boolean searching, int shown) {
+        if (quietCountText == null) {
+            return;
+        }
+        if (!quietAppsLoaded) {
+            quietCountText.setText("");
+            return;
+        }
+        if (searching) {
+            quietCountText.setText("找到 " + shown
+                    + " 个应用，点中任意一个就能设");
+            return;
+        }
+        int pinnedShown = 0;
+        int breaks = 0;
+        for (QuietAppEntry e : quietAllApps) {
+            if (quietPinned.contains(e.pkg)) {
+                pinnedShown++;
+            }
+            if (SceneExceptions.effective(quietScene, e.pkg)
+                    == SceneExceptions.BREAK) {
+                breaks++;
+            }
+        }
+        quietCountText.setText("名单里 " + pinnedShown
+                + " 个应用 · 场景里突破 " + breaks
+                + " 个，其余排队、退出场景补弹");
+    }
+
+    /** v527: 呈现形式三模式——落回 card/bigCard 两个现有标志位：
+     * 0 胶囊模式＝card 关+bigCard 关；1 展开卡片＝card 开+bigCard
+     * 关（默认）；2 大卡片模式＝bigCard 开。不新造存储。 */
+    private int presentMode() {
+        if (isOn("bigCard")) {
+            return 2;
+        }
+        return isOn("card") ? 1 : 0;
+    }
+
+    /** v527: 「打开方式」合并卡（青色）：呈现形式三段单选 +
+     * 点卡片打开 App 单选（小窗/全屏＝miniwindow）+ 自动消散 /
+     * 自动销毁两行开关（从原顶层卡迁入，标志位不变）。 */
+    private View buildOpenWayCard() {
+        final int color = Color.rgb(20, 184, 166);
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(rounded(color, dp(22)));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(10);
+        card.setLayoutParams(clp);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(12), dp(12), dp(12), dp(12));
+        TextView icon = new TextView(this);
+        icon.setText("开");
+        icon.setTextSize(15);
+        icon.setTextColor(color);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(36), dp(36)));
+        head.addView(icon);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("打开方式");
         title.setTextSize(15);
         title.setTextColor(Color.WHITE);
         title.setTypeface(title.getTypeface(),
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
-        sub.setText("游戏/视频时这些应用照常弹");
+        sub.setText("通知怎么出现、点开之后怎么打开");
         sub.setTextSize(12);
         sub.setTextColor(Color.argb(230, 255, 255, 255));
         texts.addView(sub);
-        card.addView(texts);
+        head.addView(texts);
+        final TextView chev = buildExpandChevron();
+        head.addView(chev);
+        card.addView(head);
 
-        TextView chev = new TextView(this);
-        chev.setText("›");
-        chev.setTextSize(24);
-        chev.setTextColor(Color.WHITE);
-        card.addView(chev);
-
-        card.setOnClickListener(new View.OnClickListener() {
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setVisibility(View.GONE);
+        body.setPadding(0, 0, 0, dp(12));
+        card.addView(body);
+        openWayBody = body;
+        openWayChev = chev;
+        final boolean[] expanded = new boolean[]{false};
+        head.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                try {
-                    startActivity(new Intent(MainActivity.this,
-                            SceneExceptionsActivity.class));
-                } catch (Throwable ignored) {
-                }
+                expanded[0] = !expanded[0];
+                body.setVisibility(expanded[0]
+                        ? View.VISIBLE : View.GONE);
+                setChevronExpanded(chev, expanded[0]);
             }
         });
+        // 搜索展开钩子：直接改 visibility + 状态。
+        body.setTag(expanded);
+
+        // ---- 呈现形式 ----
+        body.addView(cardRowLabel("呈现形式", "通知出现的样子，三选一"));
+        final SegControl presentSeg = new SegControl(
+                new String[]{"胶囊模式", "展开卡片", "大卡片模式"},
+                presentMode(), Color.rgb(51, 51, 51));
+        LinearLayout.LayoutParams psLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        psLp.leftMargin = dp(12);
+        psLp.rightMargin = dp(12);
+        psLp.topMargin = dp(8);
+        presentSeg.box.setLayoutParams(psLp);
+        presentSeg.listener = new SegListener() {
+            @Override
+            public void onSelect(int idx) {
+                setFeatureFlag("card", idx == 1);
+                setFeatureFlag("bigCard", idx == 2);
+            }
+        };
+        body.addView(presentSeg.box);
+        searchTargets.put("present", presentSeg.box);
+        body.addView(cardDesc("胶囊模式：只出胶囊，点胶囊不展开。"
+                + "展开卡片：先出胶囊，点一下展开看全文。"
+                + "大卡片模式：通知一来就是大卡片依次排列。"
+                + "音乐、来电不走这个设置。"));
+
+        // ---- 点卡片打开 App ----
+        body.addView(cardRowLabel("点卡片打开 App",
+                "点展开的卡片时，用哪种方式打开"));
+        final SegControl openSeg = new SegControl(
+                new String[]{"小窗", "全屏"},
+                isOn("miniwindow") ? 0 : 1, Color.rgb(51, 51, 51));
+        LinearLayout.LayoutParams osLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        osLp.leftMargin = dp(12);
+        osLp.rightMargin = dp(12);
+        osLp.topMargin = dp(8);
+        openSeg.box.setLayoutParams(osLp);
+        openSeg.listener = new SegListener() {
+            @Override
+            public void onSelect(int idx) {
+                setFeatureFlag("miniwindow", idx == 0);
+            }
+        };
+        body.addView(openSeg.box);
+        searchTargets.put("openapp", openSeg.box);
+        body.addView(cardDesc("小窗不离开当前界面，全屏直接跳过去。"));
+
+        // ---- 自动消散 / 自动销毁 ----
+        Feature dissipate = featureFor("blankDissipate");
+        if (dissipate != null) {
+            View row = buildSubSwitch(dissipate);
+            subRowViews.put(dissipate.key, row);
+            body.addView(row);
+        }
+        body.addView(cardDesc("点一下屏幕空白处，所有没钉住的胶囊"
+                + "逐条消散。关掉后只能右滑逐个消散、或左滑收进扇子。"));
+        Feature destroy = featureFor("autoDestroy");
+        if (destroy != null) {
+            View row = buildSubSwitch(destroy);
+            subRowViews.put(destroy.key, row);
+            body.addView(row);
+        }
+        body.addView(cardDesc("开着时消散的通知同时从通知栏消失；"
+                + "关着（默认）通知还留在通知栏。"
+                + "音乐通知不撤销，撤销会停掉音乐。"));
+        refreshDestroyLinkage();
         return card;
+    }
+
+    /** v527: 合并卡里的行标题（白字粗体 + 副标题）。 */
+    private View cardRowLabel(String title, String sub) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(12);
+        lp.rightMargin = dp(12);
+        lp.topMargin = dp(10);
+        box.setLayoutParams(lp);
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(14);
+        t.setTextColor(Color.WHITE);
+        t.setTypeface(t.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        box.addView(t);
+        if (sub != null) {
+            TextView s = new TextView(this);
+            s.setText(sub);
+            s.setTextSize(11.5f);
+            s.setTextColor(Color.argb(230, 255, 255, 255));
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            slp.topMargin = dp(1);
+            s.setLayoutParams(slp);
+            box.addView(s);
+        }
+        return box;
+    }
+
+    /** v527: 卡内说明小字（与子开关行同宽对齐）。 */
+    private View cardDesc(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(12);
+        t.setTextColor(Color.argb(210, 255, 255, 255));
+        t.setLineSpacing(0, 1.6f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(12);
+        lp.rightMargin = dp(12);
+        lp.topMargin = dp(6);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    /** v527: 展开某张卡（搜索跳转用）。key 是 feature key 或
+     * "appearance" / "openway"。 */
+    private void expandCard(String key) {
+        if (key == null) {
+            return;
+        }
+        if ("appearance".equals(key)) {
+            if (appearanceBody != null
+                    && appearanceBody.getVisibility() != View.VISIBLE) {
+                appearanceBody.setVisibility(View.VISIBLE);
+                if (appearanceChev != null) {
+                    setChevronExpanded(appearanceChev, true);
+                }
+            }
+            return;
+        }
+        if ("openway".equals(key)) {
+            if (openWayBody != null
+                    && openWayBody.getVisibility() != View.VISIBLE) {
+                openWayBody.setVisibility(View.VISIBLE);
+                Object tag = openWayBody.getTag();
+                if (tag instanceof boolean[]) {
+                    ((boolean[]) tag)[0] = true;
+                }
+                if (openWayChev != null) {
+                    setChevronExpanded(openWayChev, true);
+                }
+            }
+            return;
+        }
+        if ("quiet".equals(key)) {
+            if (quietBody != null
+                    && quietBody.getVisibility() != View.VISIBLE) {
+                quietBody.setVisibility(View.VISIBLE);
+                Object tag = quietBody.getTag();
+                if (tag instanceof boolean[]) {
+                    ((boolean[]) tag)[0] = true;
+                }
+                setChevronExpanded(quietChev, true);
+            }
+            refreshQuietSilence();
+            ensureQuietAppsLoaded();
+            startQuietTicker();
+            return;
+        }
+        if ("sound".equals(key)) {
+            if (soundBody != null
+                    && soundBody.getVisibility() != View.VISIBLE) {
+                soundBody.setVisibility(View.VISIBLE);
+                Object tag = soundBody.getTag();
+                if (tag instanceof boolean[]) {
+                    ((boolean[]) tag)[0] = true;
+                }
+                setChevronExpanded(soundChev, true);
+            }
+            ensureSoundAppsLoaded();
+            return;
+        }
+        View[] b = cardBodies.get(key);
+        boolean[] e = cardExpanded.get(key);
+        if (b != null && e != null && !e[0]) {
+            e[0] = true;
+            if (b[0] != null) {
+                b[0].setVisibility(View.VISIBLE);
+            }
+            if (b[1] != null) {
+                b[1].setVisibility(View.VISIBLE);
+            }
+        }
+    }
+
+    // ================= v527 设置搜索 =================
+
+    private void addSearch(String title, String path, String keywords,
+            String targetId, String expandKey) {
+        searchIndex.add(new SearchEntry(title, path, keywords,
+                searchTargets.get(targetId), expandKey));
+    }
+
+    private void addSearch(String title, String path, String keywords,
+            View target, String expandKey) {
+        searchIndex.add(new SearchEntry(title, path, keywords,
+                target, expandKey));
+    }
+
+    /** 索引 = 主页卡片 + 卡内子项 + 子页面项；keywords 含同义词
+     * （搜「安静」命中临时静默、搜「验证码」命中打码等）。 */
+    private void buildSearchIndex() {
+        searchIndex.clear();
+        // 胶囊类型
+        addSearch("通知气泡", "胶囊类型", "通知 气泡 胶囊 贴边 总开关",
+                topCardViews.size() > 0 ? topCardViews.get(0) : null,
+                null);
+        // v536: 提示音是主页展开卡（贴着通知气泡卡），搜索
+        // 展开这张卡定位（同安静规则条目的做法）。
+        addSearch("气泡提示音", "胶囊类型 › 气泡提示音",
+                "提示音 声音 音效 响 啵 弹出声 自定义 按应用",
+                soundCardView, "sound");
+        addSearch("音乐胶囊", "胶囊类型", "音乐 播放器 歌词 歌手 专辑",
+                topCardViews.size() > 1 ? topCardViews.get(1) : null,
+                null);
+        addSearch("音乐卡片", "音乐胶囊 › 音乐卡片",
+                "音乐 展开 播放器卡片 点音乐",
+                subRowViews.get("musicCard"), "music");
+        addSearch("视频App", "音乐胶囊 › 视频App",
+                "视频 B站 哔哩哔哩 播放",
+                subRowViews.get("musicVideo"), "music");
+        addSearch("模拟音乐", "音乐胶囊 › 模拟音乐",
+                "模拟 假 调试 调大小",
+                subRowViews.get("simMusic"), "music");
+        addSearch("反方向的钟", "音乐胶囊 › 反方向的钟",
+                "彩蛋 钟 跑马灯",
+                subRowViews.get("musicLed"), "music");
+        addSearch("QQ音乐flyme版免费听", "音乐胶囊 › QQ音乐免费听",
+                "qq 音乐 免费 时长 补时长",
+                subRowViews.get("qqFree"), "music");
+        addSearch("下载与安装", "胶囊类型", "下载 安装 进度 速度",
+                topCardViews.size() > 2 ? topCardViews.get(2) : null,
+                null);
+        addSearch("验证码与隐私", "胶囊类型",
+                "验证码 取件码 复制 钉住 柜号 快递 短信码 隐私",
+                topCardViews.size() > 3 ? topCardViews.get(3) : null,
+                null);
+        addSearch("敏感打码", "验证码与隐私 › 敏感打码",
+                "打码 验证码 锁屏 录屏 投屏 隐私 隐藏 码 敏感",
+                subRowViews.get("mask"), "code");
+        addSearch("锁屏时", "验证码与隐私 › 锁屏时", "锁屏 打码 验证码",
+                subRowViews.get("maskLock"), "code");
+        addSearch("录屏、投屏时", "验证码与隐私 › 录屏、投屏时",
+                "录屏 投屏 打码 验证码 录像",
+                subRowViews.get("maskRecord"), "code");
+        addSearch("普通应用也打码", "验证码与隐私 › 普通应用也打码",
+                "普通应用 隐藏 内容 打码 微信 消息",
+                subRowViews.get("maskApps"), "code");
+        addSearch("来电", "胶囊类型", "电话 来电 接听 挂断 扬声器",
+                topCardViews.size() > 4 ? topCardViews.get(4) : null,
+                null);
+        addSearch("来电放右边", "来电 › 来电放右边", "右边 位置 右手",
+                subRowViews.get("callRight"), "live");
+        addSearch("模拟来电", "来电 › 模拟来电", "模拟 假 调试 调位置",
+                subRowViews.get("simCall"), "live");
+        // 呈现与打开
+        searchIndex.add(new SearchEntry("打开方式", "呈现与打开",
+                "打开 呈现 大卡片 展开 小窗 全屏",
+                searchTargets.get("present"), "openway"));
+        addSearch("呈现形式", "打开方式 › 呈现形式",
+                "大卡片 大卡片模式 胶囊模式 展开卡片 呈现 形式 模式 三选一",
+                "present", "openway");
+        addSearch("点卡片打开 App", "打开方式 › 点卡片打开 App",
+                "小窗 全屏 打开 应用 app", "openapp", "openway");
+        addSearch("自动消散", "打开方式 › 自动消散",
+                "消散 空白 清除 点空白",
+                subRowViews.get("blankDissipate"), "openway");
+        addSearch("自动销毁", "打开方式 › 自动销毁",
+                "销毁 撤销 通知栏 一起没",
+                subRowViews.get("autoDestroy"), "openway");
+        // 安静规则（v528：收回主页展开卡，点结果展开卡定位）
+        addSearch("临时静默", "安静规则 › 临时静默",
+                "安静 静默 勿扰 开会 午睡 午休 一段时间",
+                quietSilenceAnchor, "quiet");
+        addSearch("应用规则", "安静规则 › 应用名单",
+                "应用 规则 不弹 只贴边 单个 每个应用 名单",
+                quietAppsAnchor, "quiet");
+        addSearch("场景例外", "安静规则 › 应用名单",
+                "游戏 视频 全屏 突破 横屏 场景 例外 排队",
+                quietAppsAnchor, "quiet");
+        addSearch("场景模式", "安静规则 › 场景模式",
+                "游戏 视频 全屏 场景 模式 排队 总开关",
+                quietSceneModeAnchor, "quiet");
+        // 外观
+        searchIndex.add(new SearchEntry("外观设置", "外观",
+                "外观 扇子 位置 大小 圆角 长相",
+                searchTargets.get("appearanceCard"), null));
+        addSearch("胶囊自动取色", "外观设置 › 胶囊自动取色",
+                "颜色 取色 图标 底色 主色",
+                subRowViews.get("autoTint"), "appearance");
+        addSearch("胶囊滚动", "外观设置 › 胶囊滚动",
+                "滚动 太长 省略 截断 跑马灯",
+                subRowViews.get("scroll"), "appearance");
+        addSearch("扇子自动变淡", "外观设置 › 扇子自动变淡",
+                "扇子 变淡 半透明 挡屏幕 挡住",
+                subRowViews.get("fanAutoDim"), "appearance");
+        addSearch("扇子位置", "外观设置 › 扇子位置",
+                "扇子 位置 高度 上下", "fanpos", "appearance");
+        // 页脚 / 状态行
+        addSearch("重启系统界面", "顶部状态行",
+                "重启 系统界面 systemui 卡死", "restart", null);
+        addSearch("检查更新", "页脚", "更新 版本 新版", "update", null);
+        addSearch("功能引导", "页脚", "引导 教程 新手 重看",
+                "guide", null);
+    }
+
+    private void runSearch(String q) {
+        if (searchResults == null) {
+            return;
+        }
+        searchResults.removeAllViews();
+        String needle = q == null ? "" : q.trim()
+                .toLowerCase(java.util.Locale.ROOT);
+        if (needle.isEmpty()) {
+            searchResults.setVisibility(View.GONE);
+            return;
+        }
+        int shown = 0;
+        for (final SearchEntry e : searchIndex) {
+            if (shown >= 8) {
+                break;
+            }
+            String hay = (e.title + " " + e.path + " " + e.keywords)
+                    .toLowerCase(java.util.Locale.ROOT);
+            if (!hay.contains(needle)) {
+                continue;
+            }
+            shown++;
+            searchResults.addView(buildSearchResultRow(e));
+        }
+        if (shown == 0) {
+            TextView none = new TextView(this);
+            none.setText("没有找到，试试：");
+            none.setTextSize(13);
+            none.setTextColor(Color.rgb(107, 114, 128));
+            none.setPadding(dp(14), dp(10), dp(14), dp(4));
+            searchResults.addView(none);
+            LinearLayout chips = new LinearLayout(this);
+            chips.setOrientation(LinearLayout.HORIZONTAL);
+            chips.setPadding(dp(14), dp(2), dp(14), dp(10));
+            for (final String word
+                    : new String[]{"打码", "静默", "游戏"}) {
+                TextView chip = new TextView(this);
+                chip.setText(word);
+                chip.setTextSize(12);
+                chip.setTextColor(Color.rgb(74, 95, 217));
+                chip.setBackground(rounded(
+                        Color.rgb(238, 242, 255), dp(999)));
+                chip.setPadding(dp(10), dp(4), dp(10), dp(4));
+                LinearLayout.LayoutParams clp =
+                        new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT);
+                clp.rightMargin = dp(6);
+                chip.setLayoutParams(clp);
+                chip.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        searchBox.setText(word);
+                        searchBox.setSelection(word.length());
+                    }
+                });
+                chips.addView(chip);
+            }
+            searchResults.addView(chips);
+        }
+        searchResults.setVisibility(View.VISIBLE);
+    }
+
+    private View buildSearchResultRow(final SearchEntry e) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setBackground(rounded(Color.rgb(245, 247, 250), dp(12)));
+        row.setPadding(dp(14), dp(9), dp(14), dp(9));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(6);
+        row.setLayoutParams(lp);
+        TextView t = new TextView(this);
+        t.setText(e.title);
+        t.setTextSize(14);
+        t.setTextColor(Color.rgb(17, 24, 39));
+        t.setTypeface(t.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        row.addView(t);
+        TextView p = new TextView(this);
+        p.setText(e.path);
+        p.setTextSize(11);
+        p.setTextColor(Color.rgb(138, 143, 152));
+        row.addView(p);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                jumpToSearchEntry(e);
+            }
+        });
+        return row;
+    }
+
+    private void jumpToSearchEntry(final SearchEntry e) {
+        if (e.activity != null) {
+            try {
+                Intent i = new Intent(MainActivity.this, e.activity);
+                if (e.highlight != null) {
+                    i.putExtra("highlight", e.highlight);
+                }
+                startActivity(i);
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
+        final View target = e.target;
+        if (target == null) {
+            return;
+        }
+        // 收起结果、收起键盘，先展开父卡，下一帧再滚（展开会改布局，
+        // 位置要等布局完成才准——分析里点明的时序坑）。
+        searchResults.setVisibility(View.GONE);
+        try {
+            android.view.inputmethod.InputMethodManager imm =
+                    (android.view.inputmethod.InputMethodManager)
+                            getSystemService(
+                                    Context.INPUT_METHOD_SERVICE);
+            if (imm != null && searchBox != null) {
+                imm.hideSoftInputFromWindow(
+                        searchBox.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) {
+        }
+        expandCard(e.expandKey);
+        target.post(new Runnable() {
+            @Override
+            public void run() {
+                scrollToView(target);
+                flashView(target);
+            }
+        });
+    }
+
+    /** 目标视图在 ScrollView 内容里的纵坐标（逐级累加 getTop）。 */
+    private void scrollToView(View target) {
+        if (scrollView == null || target == null) {
+            return;
+        }
+        int y = 0;
+        View v = target;
+        while (v != null && v != scrollView) {
+            y += v.getTop();
+            Object parent = v.getParent();
+            v = parent instanceof View ? (View) parent : null;
+        }
+        scrollView.smoothScrollTo(0, Math.max(0, y - dp(90)));
+    }
+
+    /** 高亮闪烁：透明度脉冲两下（不改背景色，彩色卡上也看得见）。 */
+    private void flashView(final View v) {
+        try {
+            v.animate().cancel();
+            final float orig = v.getAlpha();
+            v.animate().alpha(0.35f).setDuration(200)
+                    .withEndAction(new Runnable() {
+                        @Override
+                        public void run() {
+                            v.animate().alpha(orig).setDuration(200)
+                                    .withEndAction(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            v.animate().alpha(0.35f)
+                                                    .setDuration(200)
+                                                    .withEndAction(
+                                                            new Runnable() {
+                                                                @Override
+                                                                public void run() {
+                                                                    v.animate()
+                                                                            .alpha(orig)
+                                                                            .setDuration(200)
+                                                                            .start();
+                                                                }
+                                                            })
+                                                    .start();
+                                        }
+                                    }).start();
+                        }
+                    }).start();
+        } catch (Throwable ignored) {
+        }
     }
 
     private View buildFeatureCard(final Feature f) {
@@ -1044,7 +4125,14 @@ public class MainActivity extends Activity {
         // 开关，见 FEATURES）。滑条 onDrag 传 null，只发广播直播。
         for (Feature s : FEATURES) {
             if (f.key.equals(s.parent)) {
-                subBox.addView(buildSubSwitch(s));
+                // v527: 验证码与隐私卡里，打码四开关前加「敏感打码」
+                // 分区标题（码本身 / 打码两区，wei 定）。
+                if ("code".equals(f.key) && "mask".equals(s.key)) {
+                    subBox.addView(buildZoneLabel("敏感打码"));
+                }
+                View subRow = buildSubSwitch(s);
+                subRowViews.put(s.key, subRow);
+                subBox.addView(subRow);
                 // v442: 来电高度滑条，紧贴在「来电放右边」下面
                 // （用户 “就在那个来电放在右边下面”）。
                 if ("callRight".equals(s.key)) {
@@ -1152,12 +4240,24 @@ public class MainActivity extends Activity {
         if ("music".equals(f.key)) {
             subBox.addView(buildMusicResetButton());
         }
+        // v528: 验证码与隐私卡——子行都建完后，刷一次敏感打码
+        // 总开关与三个子开关的初始联动状态。
+        if ("code".equals(f.key)) {
+            refreshMaskLinkage();
+        }
+        // v534: 通知气泡卡——子行建完后刷一次提示音的初始联动。
+        if ("notif".equals(f.key)) {
+            refreshSoundLinkage();
+        }
         if (subBox.getChildCount() > 0) {
             subBox.setPadding(0, 0, 0, dp(12));
             card.addView(subBox);
         }
 
         final boolean[] expanded = new boolean[]{false};
+        // v527: 登记展开区，搜索跳转时能程序展开这张卡。
+        cardBodies.put(f.key, new View[]{body, subBox});
+        cardExpanded.put(f.key, expanded);
         head.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1167,6 +4267,24 @@ public class MainActivity extends Activity {
             }
         });
         return card;
+    }
+
+    /** v527: 卡内分区小标题（白字半透明）。 */
+    private View buildZoneLabel(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(12);
+        t.setTextColor(Color.argb(200, 255, 255, 255));
+        t.setTypeface(t.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(12);
+        lp.topMargin = dp(12);
+        lp.bottomMargin = dp(2);
+        t.setLayoutParams(lp);
+        return t;
     }
 
     /** 卡片里嵌套的一行子开关（小图标 + 标题/副标题 + 开关）。
@@ -1269,6 +4387,16 @@ public class MainActivity extends Activity {
             refreshMusicLedCounter();
             row.addView(musicLedCounter);
         }
+        if ("autoDestroy".equals(sub.key)) {
+            destroyRowView = row;
+        }
+        // v536: 气泡提示音已升为独立展开卡（buildSoundCard），
+        // 不再作为通知气泡卡的子行出现，这里没有它的特殊处理了。
+        if ("maskLock".equals(sub.key)
+                || "maskRecord".equals(sub.key)
+                || "maskApps".equals(sub.key)) {
+            maskChildRows.put(sub.key, row);
+        }
         wrap.addView(row);
         return wrap;
     }
@@ -1322,6 +4450,14 @@ public class MainActivity extends Activity {
         dlp.rightMargin = on ? dp(3) : 0;
         dot.setLayoutParams(dlp);
         sw.addView(dot);
+        if ("autoDestroy".equals(f.key)) {
+            destroySwitchView = sw;
+        }
+        if ("maskLock".equals(f.key)
+                || "maskRecord".equals(f.key)
+                || "maskApps".equals(f.key)) {
+            maskChildSwitches.put(f.key, sw);
+        }
         sw.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1398,6 +4534,37 @@ public class MainActivity extends Activity {
                 // 启用/置灰（联动）。
                 if ("callRight".equals(f.key)) {
                     refreshCallSliderEnabled();
+                }
+                // v528: 自动销毁依附自动消散——拨消散时同步
+                // 刷新销毁行的置灰/可点状态（联动，wei 定）。
+                if ("blankDissipate".equals(f.key)) {
+                    refreshDestroyLinkage();
+                }
+                // v528: 敏感打码是总开关——拨它时同步刷新三个
+                // 子开关行的置灰/可点状态（联动，wei 定；行为层
+                // PrivacyMask 本来就是总开关 AND 子开关）。
+                if ("mask".equals(f.key)) {
+                    refreshMaskLinkage();
+                }
+                // v534: 通知气泡是提示音的总开关——拨它时同步
+                // 刷新提示音行的置灰/可点状态（联动，wei 定）。
+                if ("notif".equals(f.key)) {
+                    refreshSoundLinkage();
+                }
+                // v536: 提示音自己的总开关——拨它时同步刷新
+                // 展开区的置灰状态（联动，wei 定）。
+                if ("bubbleSound".equals(f.key)) {
+                    refreshSoundLinkage();
+                }
+                // v530: 场景模式是总开关——拨它时同步刷新名单
+                // 里「场景里」一列的置灰/可点状态（联动）。
+                if ("sceneMode".equals(f.key)) {
+                    refreshSceneLinkage();
+                    // v531: 拨到开时播 B 版全屏动画当开启
+                    // 回执（wei 拍板）；拨到关不播。
+                    if (now) {
+                        showSceneStartAnim();
+                    }
                 }
             }
         });
@@ -1844,6 +5011,140 @@ public class MainActivity extends Activity {
 
     /** v442: 来电高度滑条跟「来电放右边」开关联动——开着才能滑，
      * 关着置灰禁用（用户 “和开关联动”“不打开就无法滑动”）。 */
+    /** v528: 敏感打码是总开关（wei 定，与消散→销毁同理）：
+     * 总开关关 → 锁屏时/录屏、投屏时/普通应用也打码三行置灰
+     * 且开关不可点；总开关开 → 按各自标志位恢复显示、可点。
+     * 行为层 PrivacyMask.shouldMask 本来就先查总开关
+     * （关了直接不打码），这里只补 UI 联动。 */
+    private void refreshMaskLinkage() {
+        boolean link = isOn("mask");
+        for (String k : new String[]{
+                "maskLock", "maskRecord", "maskApps"}) {
+            View sw = maskChildSwitches.get(k);
+            if (sw != null) {
+                sw.setEnabled(link);
+            }
+            View row = maskChildRows.get(k);
+            if (row != null) {
+                row.setAlpha(link
+                        ? (isOn(k) ? 1f : 0.45f) : 0.45f);
+            }
+        }
+    }
+
+    /** v530: 场景模式是名单「场景里」一列的总开关（wei 定，
+     * 与打码/销毁同理）：关 → 每行的场景分段置灰且不可点；
+     * 开 → 恢复可点。「平时」一列不受影响。行为层 BubbleWindow
+     * 的场景门直接查 FeatureFlags.sceneMode，关了整体跳过。 */
+    private void refreshSceneLinkage() {
+        boolean on = isOn("sceneMode");
+        for (Map.Entry<String, SegControl> en
+                : quietSceneSegs.entrySet()) {
+            SegControl seg = en.getValue();
+            if (seg != null) {
+                for (TextView item : seg.items) {
+                    if (item != null) {
+                        item.setEnabled(on);
+                    }
+                }
+            }
+            View row = quietSceneSegRows.get(en.getKey());
+            if (row != null) {
+                row.setAlpha(on ? 1f : 0.45f);
+            }
+        }
+    }
+
+    /** v534 建，v536 改：气泡提示音的联动置灰（wei 定，与
+     * 打码/销毁同理）。提示音现在是独立展开卡：
+     * - 通知气泡总开关关 → 整张提示音卡置灰、总开关不可点；
+     * - 提示音自己的总开关关 → 它下面的展开区（音效列表 +
+     *   按应用段）置灰，总开关行自己保持亮着方便再打开
+     *   （v537: 开关已从卡头挪进展开区第一行）。
+     * 展开区里的点击处理另外都过 soundUsable() 双保险。
+     * 行为层本来也双保险：总开关关了气泡根本不弹，
+     * BubbleSound 也不会被调用。 */
+    private void refreshSoundLinkage() {
+        if (soundCardView == null) {
+            return;
+        }
+        boolean link = isOn("notif");
+        if (bubbleSoundSwitch != null) {
+            bubbleSoundSwitch.setEnabled(link);
+        }
+        soundCardView.setAlpha(link ? 1f : 0.45f);
+        boolean bodyOn = isOn("bubbleSound");
+        if (soundGlobalSection != null) {
+            soundGlobalSection.setAlpha(bodyOn ? 1f : 0.38f);
+        }
+        if (soundAppSection != null) {
+            soundAppSection.setAlpha(bodyOn ? 1f : 0.38f);
+        }
+        if (soundAppSearch != null) {
+            soundAppSearch.setEnabled(bodyOn);
+        }
+    }
+
+    /** v535: 提示音副标题显示当前音效（卡头副标题，换了音效
+     * 一眼看得出来）。读字符串 prefs 包 try——旧备份万一
+     * 把键写坏成别的类型，只回默认名，不崩。 */
+    private void refreshSoundSubtitle() {
+        if (bubbleSoundSub == null || prefs == null) {
+            return;
+        }
+        String id = "soft";
+        try {
+            String v = prefs.getString("bubbleSoundId", "soft");
+            if (v != null && BubbleSound.isSoundId(v)) {
+                id = v;
+            }
+        } catch (Throwable ignored) {
+        }
+        bubbleSoundSub.setText("气泡弹出时轻响一声 · 当前："
+                + BubbleSound.nameFor(id));
+    }
+
+    /** v535: 提示音总开关涂色/圆点位置按 prefs 重涂一遍
+     * （buildSwitch 只在建卡时涂一次，备份恢复等外部改动后
+     * 不刷会显示旧状态）。v537: 开关在展开区第一行。 */
+    private void repaintBubbleSoundSwitch() {
+        if (!(bubbleSoundSwitch instanceof FrameLayout)) {
+            return;
+        }
+        FrameLayout sw = (FrameLayout) bubbleSoundSwitch;
+        boolean on = isOn("bubbleSound");
+        sw.setBackground(rounded(on ? Color.rgb(22, 163, 74)
+                : Color.argb(120, 255, 255, 255), dp(999)));
+        if (sw.getChildCount() > 0) {
+            View dot = sw.getChildAt(0);
+            if (dot.getLayoutParams()
+                    instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams p =
+                        (FrameLayout.LayoutParams)
+                                dot.getLayoutParams();
+                p.gravity = Gravity.CENTER_VERTICAL
+                        | (on ? Gravity.END : Gravity.START);
+                p.leftMargin = on ? 0 : dp(3);
+                p.rightMargin = on ? dp(3) : 0;
+                dot.setLayoutParams(p);
+            }
+        }
+    }
+
+    /** v528: 自动销毁依附自动消散（wei 定，原有联动）：
+     * 消散关 → 销毁行置灰且开关不可点；消散开 → 销毁行按
+     * 自身标志位正常显示、可点。与来电高度依附来电放右边
+     * 是同一套路（refreshCallSliderEnabled）。 */
+    private void refreshDestroyLinkage() {
+        if (destroyRowView == null || destroySwitchView == null) {
+            return;
+        }
+        boolean link = isOn("blankDissipate");
+        destroySwitchView.setEnabled(link);
+        destroyRowView.setAlpha(link
+                ? (isOn("autoDestroy") ? 1f : 0.45f) : 0.45f);
+    }
+
     private void refreshCallSliderEnabled() {
         boolean on = isOn("callRight");
         if (callHeightSeek != null) {
@@ -1922,7 +5223,8 @@ public class MainActivity extends Activity {
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
-        sub.setText("扇子位置 · 胶囊 · 卡片 · 扇子图标");
+        // v527: 卡内吸收了取色/滚动，副标题跟着改。
+        sub.setText("扇子位置 · 胶囊 · 卡片 · 取色与滚动");
         sub.setTextSize(12);
         sub.setTextColor(Color.argb(230, 255, 255, 255));
         // v464: 跟上面功能卡一样高——副标题只一行，不换行（原来
@@ -1931,14 +5233,7 @@ public class MainActivity extends Activity {
         texts.addView(sub);
         head.addView(texts);
 
-        final TextView chev = new TextView(this);
-        chev.setText("∨");
-        chev.setTextSize(14);
-        chev.setTextColor(Color.WHITE);
-        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        chlp.leftMargin = dp(8);
-        chev.setLayoutParams(chlp);
+        final TextView chev = buildExpandChevron();
         head.addView(chev);
         card.addView(head);
 
@@ -1953,14 +5248,43 @@ public class MainActivity extends Activity {
         bodyLp.bottomMargin = dp(12);
         body.setLayoutParams(bodyLp);
         card.addView(body);
+        // v527: 搜索展开钩子 + 索引目标登记。
+        appearanceBody = body;
+        appearanceChev = chev;
+        searchTargets.put("appearanceCard", card);
         head.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 boolean open = body.getVisibility() != View.VISIBLE;
                 body.setVisibility(open ? View.VISIBLE : View.GONE);
-                chev.setText(open ? "∧" : "∨");
+                setChevronExpanded(chev, open);
             }
         });
+
+        // ---- v527: 胶囊长相（从主页迁入的三个开关，标志位不变）----
+        body.addView(buildZoneLabel("胶囊长相"));
+        Feature tintF = featureFor("autoTint");
+        if (tintF != null) {
+            View r = buildSubSwitch(tintF);
+            subRowViews.put(tintF.key, r);
+            body.addView(r);
+        }
+        body.addView(cardDesc("关掉后全部用默认白色底+黑描边。"
+                + "来电胶囊不受影响。"));
+        Feature scrollF = featureFor("scroll");
+        if (scrollF != null) {
+            View r = buildSubSwitch(scrollF);
+            subRowViews.put(scrollF.key, r);
+            body.addView(r);
+        }
+        body.addView(cardDesc("关掉后超长内容以 … 截断。"));
+        Feature dimF = featureFor("fanAutoDim");
+        if (dimF != null) {
+            View r = buildSubSwitch(dimF);
+            subRowViews.put(dimF.key, r);
+            body.addView(r);
+        }
+        body.addView(cardDesc("点一下扇子恢复并展开。关掉后一直不透明。"));
 
         // ---- v456: 实时预览（拖滑条自动展开）----
         //  mock 胶囊 + mock 卡片 + mock 扇子，按当前滑条值画。
@@ -2154,6 +5478,7 @@ public class MainActivity extends Activity {
         fanBox.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         body.addView(fanBox);
+        searchTargets.put("fanpos", fanBox);
 
         // v464: 扇子位置的数值原来显示在标题栏右边（val），把副标题
         // 挤成两行、卡片比别的卡高；现在数值挪进 body，跟滑条放一块。
@@ -2316,7 +5641,7 @@ public class MainActivity extends Activity {
                 apInt(Appearance.KEY_CARD_CORNER_RADIUS, Appearance.DEF_CARD_CORNER_RADIUS),
                 Appearance.KEY_CARD_CORNER_RADIUS, "cardCornerRadius", "dp", showPreview));
         body.addView(buildAppearanceSliderRow(
-                "卡片高度（最大行数）", "卡片高度跟内容走，这个是行数上限，超了截断",
+                "卡片最多行数", "卡片高度跟内容走，这个是行数上限，超了截断",
                 Appearance.MIN_CARD_MAX_ROWS, Appearance.MAX_CARD_MAX_ROWS,
                 apInt(Appearance.KEY_CARD_MAX_ROWS, Appearance.DEF_CARD_MAX_ROWS),
                 Appearance.KEY_CARD_MAX_ROWS, "cardMaxRows", "行", showPreview));

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>临时静默 — 预览（未实现，仅看样子）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: #101014; font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; color: #fff; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 18px 14px 28px; }
+  .banner { background: #2a2a33; border: 1px dashed #55555f; border-radius: 10px; color: #b9b9c4; font-size: 13px; padding: 8px 12px; margin-bottom: 16px; text-align: center; max-width: 380px; }
+  .phone { width: 100%; max-width: 380px; background: #17171c; border-radius: 28px; padding: 16px 14px 20px; box-shadow: 0 0 0 1px #2e2e38, 0 12px 40px rgba(0,0,0,.5); }
+  .page-title { font-size: 20px; font-weight: 700; margin: 2px 4px 4px; }
+  .page-sub { font-size: 12px; color: #9a9aa5; margin: 0 4px 14px; }
+
+  /* 设置页入口卡：同场景例外卡样式（圆角 22、彩色底、白字、右箭头） */
+  .card { border-radius: 22px; padding: 14px 14px; display: flex; align-items: center; background: #6366f1; cursor: pointer; }
+  .card.off { opacity: .55; }
+  .icon { width: 36px; height: 36px; border-radius: 10px; background: #fff; color: #6366f1; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .texts { flex: 1; margin-left: 10px; min-width: 0; }
+  .texts .t { font-size: 15px; font-weight: 700; }
+  .texts .s { font-size: 12px; color: rgba(255,255,255,.9); margin-top: 2px; }
+  .chev { font-size: 24px; color: #fff; margin-left: 6px; }
+
+  /* 静默进行中的状态条 */
+  .status { margin-top: 10px; border-radius: 18px; background: #232329; border: 1px solid #33333d; padding: 14px; display: none; }
+  .status.on { display: block; }
+  .status .row { display: flex; align-items: baseline; justify-content: space-between; }
+  .status .label { font-size: 13px; color: #c9c9d2; }
+  .countdown { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 1px; }
+  .status .hint { font-size: 12px; color: #9a9aa5; margin-top: 6px; line-height: 1.6; }
+  .cancel { margin-top: 12px; width: 100%; border: none; border-radius: 12px; padding: 11px; font-size: 14px; font-weight: 700; background: #6366f1; color: #fff; cursor: pointer; }
+  .cancel:active { opacity: .8; }
+
+  .section { margin-top: 18px; }
+  .section h3 { font-size: 13px; color: #9a9aa5; margin: 0 4px 8px; font-weight: 600; }
+  .chips { display: flex; gap: 8px; }
+  .chip { flex: 1; text-align: center; padding: 10px 0; border-radius: 12px; background: #232329; border: 1px solid #33333d; font-size: 14px; cursor: pointer; }
+  .chip.sel { background: #6366f1; border-color: #6366f1; font-weight: 700; }
+  .note { background: #232329; border-radius: 14px; padding: 12px 14px; font-size: 13px; line-height: 1.8; color: #d6d6de; }
+  .note b { color: #fff; }
+  .note .q { color: #a5b4fc; }
+  .foot { max-width: 380px; margin-top: 16px; font-size: 12px; color: #8a8a95; line-height: 1.7; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 预览而已，没写代码 · 点一点能试手感 · 你点头我再动手实现</div>
+
+  <div class="phone">
+    <div class="page-title">设置</div>
+    <div class="page-sub">flymebobo · 临时静默预览</div>
+
+    <!-- 入口卡：点一下开 / 关 -->
+    <div class="card off" id="card">
+      <div class="icon">静</div>
+      <div class="texts">
+        <div class="t">临时静默</div>
+        <div class="s" id="cardSub">开会 / 午睡按一下，1 小时后自动恢复</div>
+      </div>
+      <div class="chev">›</div>
+    </div>
+
+    <!-- 静默进行中 -->
+    <div class="status" id="status">
+      <div class="row"><span class="label">正在静默 · 到点自动恢复</span><span class="countdown" id="cd">59:59</span></div>
+      <div class="hint">这期间气泡不弹，消息先排队；到点后按顺序补弹。来电照常突破。</div>
+      <button class="cancel" id="cancelBtn">提前取消，马上恢复</button>
+    </div>
+
+    <div class="section">
+      <h3>静默时长（点一下切换默认）</h3>
+      <div class="chips" id="chips">
+        <div class="chip" data-min="30">30 分钟</div>
+        <div class="chip sel" data-min="60">1 小时</div>
+        <div class="chip" data-min="120">2 小时</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>静默期间会怎样（预览里的定法）</h3>
+      <div class="note">
+        · 气泡<b>不弹</b>，消息先<b>排队</b>，到点后补弹<br>
+        · <b>来电照常突破</b>，跟游戏场景一个规矩<br>
+        · 到点<b>自动恢复</b>，不用手动关<br>
+        · 随时能<b>提前取消</b>，立刻恢复<br>
+        <span class="q">？这两个要你定：消息是排队补弹还是直接不弹？来电要不要突破？</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">跟系统勿扰是两回事：这个只管 flymebobo 的气泡，不动系统勿扰开关。<br>实现后打算放进 v525，跟打码 v524 分开测。</div>
+
+<script>
+  var card = document.getElementById('card');
+  var cardSub = document.getElementById('cardSub');
+  var status = document.getElementById('status');
+  var cd = document.getElementById('cd');
+  var minutes = 60, remain = 0, timer = null;
+
+  document.getElementById('chips').addEventListener('click', function (e) {
+    var chip = e.target.closest('.chip'); if (!chip) return;
+    document.querySelectorAll('.chip').forEach(function (c) { c.classList.remove('sel'); });
+    chip.classList.add('sel');
+    minutes = parseInt(chip.dataset.min, 10);
+    if (!status.classList.contains('on')) {
+      cardSub.textContent = '开会 / 午睡按一下，' + (minutes >= 60 ? (minutes / 60) + ' 小时' : minutes + ' 分钟') + '后自动恢复';
+    }
+  });
+
+  function fmt(s) {
+    var m = Math.floor(s / 60), ss = s % 60;
+    return (m < 10 ? '0' : '') + m + ':' + (ss < 10 ? '0' : '') + ss;
+  }
+  function start() {
+    remain = minutes * 60 - 1;
+    card.classList.remove('off');
+    status.classList.add('on');
+    cardSub.textContent = '静默中 · ' + fmt(remain + 1) + ' 后自动恢复';
+    cd.textContent = fmt(remain);
+    clearInterval(timer);
+    timer = setInterval(function () {
+      remain--;
+      if (remain < 0) { stop(true); return; }
+      cd.textContent = fmt(remain);
+      cardSub.textContent = '静默中 · ' + fmt(remain) + ' 后自动恢复';
+    }, 1000);
+  }
+  function stop(expired) {
+    clearInterval(timer); timer = null;
+    status.classList.remove('on');
+    card.classList.add('off');
+    cardSub.textContent = expired ? '已自动恢复 · 下次按一下再静默'
+      : '开会 / 午睡按一下，' + (minutes >= 60 ? (minutes / 60) + ' 小时' : minutes + ' 分钟') + '后自动恢复';
+  }
+  card.addEventListener('click', function () {
+    if (status.classList.contains('on')) { stop(false); } else { start(); }
+  });
+  document.getElementById('cancelBtn').addEventListener('click', function () { stop(false); });
+</script>
+</body>
+</html>

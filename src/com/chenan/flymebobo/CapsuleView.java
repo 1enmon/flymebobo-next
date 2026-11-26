@@ -2395,8 +2395,14 @@ public class CapsuleView extends FrameLayout {
             // 不直接显示裸码，显示成标签 + 冒号 + 码——
             // "验证码:123456" / "取件码:070797"，取件码有柜号
             // 的还带上（"取件码:070797 · 2-01柜"）。
-            String line2 = formatCodeLabel(notifData);
-            if (notifData.isPickupCode && notifData.cabinet != null) {
+            // v524: 敏感打码——锁屏/录屏/投屏时只显示
+            // 「验证码 ••••••」，不露码（柜号照常显示）。
+            boolean maskCode = PrivacyMask.shouldMask(getContext());
+            String line2 = maskCode
+                    ? PrivacyMask.maskedCodeLine(notifData)
+                    : formatCodeLabel(notifData);
+            if (!maskCode && notifData.isPickupCode
+                    && notifData.cabinet != null) {
                 line2 += " · " + notifData.cabinet;
             }
             this.textView.setText(line2);
@@ -2634,6 +2640,30 @@ public class CapsuleView extends FrameLayout {
         applyScrollFlag();
         // v379: right-dock call capsule mirrors its pill contents.
         applyDockMirror();
+        // v524: 打码的胶囊标题显示应用名——通知标题本身可能含码
+        // （"您的验证码是 123456"），不能原样放出来。应用名 +
+        // 「验证码 ••••••」，跟预览定案一致。
+        if (notifData.code != null
+                && PrivacyMask.shouldMask(getContext())) {
+            if (titleView != null) {
+                titleView.setText(loadAppName(notifData.pkg));
+                titleView.setVisibility(VISIBLE);
+            }
+        }
+        // v526: 普通应用也打码——开关开着且打码场景生效时，
+        // 普通通知胶囊也只显示应用名 +「内容已隐藏」，标题
+        // 正文不露（与验证码打码同一套场景判定）。跟上面码
+        // 胶囊那段互斥（普通通知按定义没有 code）。
+        if (PrivacyMask.shouldMaskOrdinary(getContext(), notifData)) {
+            if (titleView != null) {
+                titleView.setText(loadAppName(notifData.pkg));
+                titleView.setVisibility(VISIBLE);
+            }
+            if (textView != null) {
+                textView.setText(PrivacyMask.HIDDEN_TEXT);
+                textView.setVisibility(VISIBLE);
+            }
+        }
     }
 
     /** Call pill tint (v103): green while ringing, red while the user
@@ -3329,6 +3359,102 @@ public class CapsuleView extends FrameLayout {
         return cardExpanded;
     }
 
+    /** v524: fill the generic (non-music, non-navi) card from the
+     * notification. Extracted from setCardExpanded so a masking
+     * state change can refill an already-open card (see
+     * refreshMasking). When masked, the code is replaced by
+     * bullets in the title, body and big-code line alike — the
+     * card body holds the raw notification sentence, which
+     * usually contains the code in plain text. */
+    private void fillGenericCard() {
+        if (data == null) {
+            return;
+        }
+        // Fill the card from the notification.
+        if (cardIcon != null) {
+            if (data.icon != null) {
+                cardIcon.setImageBitmap(data.icon);
+            } else if (data.largeIcon != null) {
+                cardIcon.setImageBitmap(data.largeIcon);
+            } else {
+                android.graphics.drawable.Drawable d =
+                        loadAppIcon(data.pkg);
+                cardIcon.setImageDrawable(d);
+            }
+        }
+        if (cardAppName != null) {
+            cardAppName.setText(loadAppName(data.pkg));
+        }
+        if (cardTime != null) {
+            cardTime.setText(formatTime(data.postTime));
+        }
+        boolean masked = data.code != null
+                && PrivacyMask.shouldMask(getContext());
+        // v526: 普通应用也打码——普通通知的展开卡同样隐藏
+        // 内容：标题换成「内容已隐藏」、正文清空（应用名在
+        // 卡片头有单独一行 cardAppName，不重复）。
+        boolean maskOrdinary = PrivacyMask.shouldMaskOrdinary(
+                getContext(), data);
+        if (cardTitle != null) {
+            cardTitle.setText(maskOrdinary
+                    ? PrivacyMask.HIDDEN_TEXT
+                    : (masked
+                            ? PrivacyMask.maskCodeInText(data.title, data.code)
+                            : (data.title != null ? data.title : "")));
+        }
+        if (cardBody != null) {
+            cardBody.setText(maskOrdinary
+                    ? ""
+                    : (masked
+                            ? PrivacyMask.maskCodeInText(data.text, data.code)
+                            : (data.text != null ? data.text : "")));
+        }
+        // v244: enlarged code in the open card.
+        // v463（用户 2026-11-23 "显示成 xx码:xxxxx"）：卡片
+        // 里的大码也改成标签 + 冒号 + 码（"验证码:123456" /
+        // "取件码:070797"），跟胶囊一个格式。柜号不拼进来，
+        // 它有自己的一行（cardCabinet）。
+        if (cardCode != null) {
+            if (data.code != null) {
+                cardCode.setText(masked
+                        ? PrivacyMask.maskedCodeLine(data)
+                        : formatCodeLabel(data));
+                cardCode.setVisibility(VISIBLE);
+            } else {
+                cardCode.setVisibility(GONE);
+            }
+        }
+        // v245: locker number under the big code.
+        if (cardCabinet != null) {
+            if (data.cabinet != null) {
+                cardCabinet.setText(data.cabinet);
+                cardCabinet.setVisibility(VISIBLE);
+            } else {
+                cardCabinet.setVisibility(GONE);
+            }
+        }
+    }
+
+    /** v524: re-render this capsule for the current masking state.
+     * Called when the screen turns on / the phone is unlocked, so
+     * a code capsule that popped masked gets its full text back
+     * (and vice versa). v526: ordinary capsules need it too when
+     * the maskApps switch is on — the gate below lets both kinds
+     * through and bind/fillGenericCard re-evaluate the verdict. */
+    public void refreshMasking() {
+        if (data == null) {
+            return;
+        }
+        if (data.code == null && !(FeatureFlags.maskApps
+                && PrivacyMask.isOrdinary(data))) {
+            return;
+        }
+        bind(data);
+        if (cardExpanded) {
+            fillGenericCard();
+        }
+    }
+
     /** Grow this capsule into its card (same view, same tint), or
      * shrink it back. The pill hides and the card content shows;
      * the size itself is set by BubbleWindow via LayoutParams. */
@@ -3348,53 +3474,7 @@ public class CapsuleView extends FrameLayout {
             updateNaviCard();
         }
         if (expanded && data != null) {
-            // Fill the card from the notification.
-            if (cardIcon != null) {
-                if (data.icon != null) {
-                    cardIcon.setImageBitmap(data.icon);
-                } else if (data.largeIcon != null) {
-                    cardIcon.setImageBitmap(data.largeIcon);
-                } else {
-                    android.graphics.drawable.Drawable d =
-                            loadAppIcon(data.pkg);
-                    cardIcon.setImageDrawable(d);
-                }
-            }
-            if (cardAppName != null) {
-                cardAppName.setText(loadAppName(data.pkg));
-            }
-            if (cardTime != null) {
-                cardTime.setText(formatTime(data.postTime));
-            }
-            if (cardTitle != null) {
-                cardTitle.setText(
-                        data.title != null ? data.title : "");
-            }
-            if (cardBody != null) {
-                cardBody.setText(data.text != null ? data.text : "");
-            }
-            // v244: enlarged code in the open card.
-            // v463（用户 2026-11-23 \"显示成 xx码:xxxxx\"）：卡片
-            // 里的大码也改成标签 + 冒号 + 码（\"验证码:123456\" /
-            // \"取件码:070797\"），跟胶囊一个格式。柜号不拼进来，
-            // 它有自己的一行（cardCabinet）。
-            if (cardCode != null) {
-                if (data.code != null) {
-                    cardCode.setText(formatCodeLabel(data));
-                    cardCode.setVisibility(VISIBLE);
-                } else {
-                    cardCode.setVisibility(GONE);
-                }
-            }
-            // v245: locker number under the big code.
-            if (cardCabinet != null) {
-                if (data.cabinet != null) {
-                    cardCabinet.setText(data.cabinet);
-                    cardCabinet.setVisibility(VISIBLE);
-                } else {
-                    cardCabinet.setVisibility(GONE);
-                }
-            }
+            fillGenericCard();
         }
         // A swipe tail left on the pill (from a right swipe on the
         // open card) must not survive into the next mode.

@@ -77,6 +77,12 @@ public class SettingsStore {
     /** v511: 线上游戏名单在文件里的前缀
      * （g.<包名>=1，见 GamePackages）。 */
     public static final String PREFIX_GAME = "g.";
+    /** v525: 临时静默状态/设置在文件里的前缀
+     * （t.until=<ms> 等，见 TempSilence）。 */
+    public static final String PREFIX_TEMPSILENCE = "t.";
+    /** v535: 按应用提示音规则在文件里的前缀
+     * （s.<包名>=mute|<音效id>，见 SoundRules）。 */
+    public static final String PREFIX_SOUND = "s.";
 
     /** 读的候选位置（按顺序，第一个有内容的胜出）。 */
     private static String[] readPaths() {
@@ -202,6 +208,39 @@ public class SettingsStore {
                 }
                 sb.append(PREFIX_GAME).append(e.getKey())
                         .append('=')
+                        .append(e.getValue().toString()).append('\n');
+            }
+            // v525: 临时静默一并备份（t.until=<ms>、t.minutes=60、
+            // t.linkDnd=true…，见 TempSilence）。
+            SharedPreferences tPrefs = appCtx.getSharedPreferences(
+                    TempSilence.PREFS, Context.MODE_PRIVATE);
+            for (Map.Entry<String, ?> e : tPrefs.getAll().entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                sb.append(PREFIX_TEMPSILENCE).append(e.getKey())
+                        .append('=')
+                        .append(e.getValue().toString()).append('\n');
+            }
+            // v535: 按应用提示音规则一并备份。prefs 键是
+            // "soundrule_<包名>"，落盘剥掉前缀写成 s.<包名>=<值>
+            // （同 r./x. 的口径：前缀后面就是包名）。
+            SharedPreferences sPrefs = appCtx.getSharedPreferences(
+                    SoundRules.PREFS, Context.MODE_PRIVATE);
+            for (Map.Entry<String, ?> e : sPrefs.getAll().entrySet()) {
+                if (e.getKey() == null || e.getValue() == null) {
+                    continue;
+                }
+                if (!e.getKey().startsWith(
+                        SoundRules.KEY_PREFIX)) {
+                    continue;
+                }
+                String pkg = e.getKey().substring(
+                        SoundRules.KEY_PREFIX.length());
+                if (pkg.isEmpty()) {
+                    continue;
+                }
+                sb.append(PREFIX_SOUND).append(pkg).append('=')
                         .append(e.getValue().toString()).append('\n');
             }
             return sb.toString();
@@ -335,11 +374,17 @@ public class SettingsStore {
                     SceneExceptions.PREFS, Context.MODE_PRIVATE).edit();
             SharedPreferences.Editor gEd = appCtx.getSharedPreferences(
                     GamePackages.PREFS, Context.MODE_PRIVATE).edit();
+            SharedPreferences.Editor tEd = appCtx.getSharedPreferences(
+                    TempSilence.PREFS, Context.MODE_PRIVATE).edit();
+            SharedPreferences.Editor sEd = appCtx.getSharedPreferences(
+                    SoundRules.PREFS, Context.MODE_PRIVATE).edit();
             boolean fChanged = false;
             boolean aChanged = false;
             boolean rChanged = false;
             boolean xChanged = false;
             boolean gChanged = false;
+            boolean tChanged = false;
+            boolean sChanged = false;
             for (Map.Entry<String, String> e : map.entrySet()) {
                 String k = e.getKey();
                 String v = e.getValue();
@@ -350,6 +395,17 @@ public class SettingsStore {
                     // 不能把它当布尔恢复（会把 int 写成布尔，下次
                     // getInt 就 ClassCastException 闪退）。直接跳过。
                     if ("musicLed_taps".equals(key)) {
+                        continue;
+                    }
+                    // v535: 提示音的三个键是字符串（当前音效 id、
+                    // 自定义文件名/公开路径），必须按字符串恢复
+                    // ——混进布尔恢复的话，下次 getString 直接
+                    // ClassCastException（v482 同款坑）。
+                    if ("bubbleSoundId".equals(key)
+                            || "bubbleCustomName".equals(key)
+                            || "bubbleCustomPath".equals(key)) {
+                        fEd.putString(key, v);
+                        fChanged = true;
                         continue;
                     }
                     fEd.putBoolean(key, "true".equalsIgnoreCase(v));
@@ -391,6 +447,49 @@ public class SettingsStore {
                         gEd.putString(key, "1");
                         gChanged = true;
                     }
+                } else if (k.startsWith(PREFIX_TEMPSILENCE)) {
+                    // v525: 临时静默——混合类型（until 是 long、
+                    // minutes/dndFilter 是 int、其余是 boolean），
+                    // 必须按 key 分型恢复，不能混进 f.* 的布尔
+                    // 恢复里（v482 同款坑）。
+                    String key = k.substring(
+                            PREFIX_TEMPSILENCE.length());
+                    try {
+                        if (TempSilence.KEY_UNTIL.equals(key)) {
+                            tEd.putLong(key, Long.parseLong(v));
+                            tChanged = true;
+                        } else if (TempSilence.KEY_MINUTES
+                                .equals(key)
+                                || TempSilence.KEY_DND_FILTER
+                                        .equals(key)) {
+                            tEd.putInt(key, Integer.parseInt(v));
+                            tChanged = true;
+                        } else if (TempSilence.KEY_LINK_DND
+                                .equals(key)
+                                || TempSilence.KEY_CALL_BREAK
+                                        .equals(key)
+                                || TempSilence.KEY_DND_BY_US
+                                        .equals(key)) {
+                            tEd.putBoolean(key,
+                                    "true".equalsIgnoreCase(v));
+                            tChanged = true;
+                        }
+                    } catch (NumberFormatException ignored) {
+                        // 坏行跳过。
+                    }
+                } else if (k.startsWith(PREFIX_SOUND)) {
+                    // v535: 按应用提示音规则是字符串（v538:
+                    // follow / none / mute（旧）或音效 id），
+                    // 按字符串恢复进专用 prefs，键补回
+                    // "soundrule_" 前缀；值不合法就跳过。
+                    String pkg = k.substring(
+                            PREFIX_SOUND.length());
+                    String sv = SoundRules.parseValue(v);
+                    if (!pkg.isEmpty() && sv != null) {
+                        sEd.putString(
+                                SoundRules.KEY_PREFIX + pkg, sv);
+                        sChanged = true;
+                    }
                 }
             }
             if (fChanged) {
@@ -408,8 +507,14 @@ public class SettingsStore {
             if (gChanged) {
                 gEd.commit();
             }
+            if (tChanged) {
+                tEd.commit();
+            }
+            if (sChanged) {
+                sEd.commit();
+            }
             return fChanged || aChanged || rChanged || xChanged
-                    || gChanged;
+                    || gChanged || tChanged || sChanged;
         } catch (Throwable ignored) {
             // 恢复失败不影响主流程。
             return false;

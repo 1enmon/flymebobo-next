@@ -511,6 +511,30 @@ public class BubbleWindow {
         });
     }
 
+    /** v524: re-render visible code capsules for the current
+     * masking state — called on screen-on / unlock, so a capsule
+     * that popped masked gets its full text back when the phone
+     * is unlocked (and vice versa). Only code capsules re-render;
+     * refreshMasking() on the view no-ops for anything else. */
+    public void refreshMasking() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (dock != null) {
+                        for (int i = 0; i < dock.getChildCount(); i++) {
+                            android.view.View v = dock.getChildAt(i);
+                            if (v instanceof CapsuleView) {
+                                ((CapsuleView) v).refreshMasking();
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+    }
+
     public void init(Context app) {
         if (windowAdded || this.app != null) {
             return;
@@ -684,6 +708,11 @@ public class BubbleWindow {
                         // the scene hide above never covered it,
                         // so it kept glowing through games.
                         BubbleWindow.this.hideMusicLed();
+                        // v531: scene-entry receipt — the same
+                        // v2 fullscreen animation the settings
+                        // switch plays (guard: sceneMode on,
+                        // screen on, unlocked; once per entry).
+                        BubbleWindow.this.maybePlaySceneEnterAnim();
                     } else {
                         // v507: restore the LED with the windows
                         // if music is still playing.
@@ -701,11 +730,28 @@ public class BubbleWindow {
                             }
                         } catch (Throwable ignored) {
                         }
-                        BubbleWindow.this.flushSuppressedQueue();
+                        // v532: the flush runs first, synchronously
+                        // — the exit animation below is only its
+                        // receipt and must never delay it. The
+                        // flushed count feeds the exit subtitle.
+                        int flushed =
+                                BubbleWindow.this.flushSuppressedQueue();
+                        BubbleWindow.this.maybePlaySceneExitAnim(flushed);
                     }
                 }
             });
             this.sceneGuard.start();
+        } catch (Throwable ignored) {
+        }
+        // v525: a timed silence can survive a SystemUI restart
+        // (its state was loaded by XposedEntry before init) —
+        // arm the expiry flush for whatever is left of it.
+        // v533: seed the exit-receipt session flag the same
+        // way, so a silence already in force at (re)start
+        // still gets its exit animation when it ends.
+        try {
+            silenceSessionOn = TempSilence.suppressionOn(app);
+            scheduleSilenceFlush();
         } catch (Throwable ignored) {
         }
         // Phone-state listener (v117, ported whole from 1.x
@@ -945,27 +991,33 @@ public class BubbleWindow {
         if (!data.isCall && this.sceneGuard != null
                 && this.sceneGuard.isSuppressed()) {
             FileLog.i("SceneGate pkg=" + data.pkg
+                    + " sceneMode=" + FeatureFlags.sceneMode
                     + " excepted=" + SceneExceptions.isExcepted(data.pkg)
                     + " stored=" + SceneExceptions.flatten(
                             SceneExceptions.snapshot()));
         }
-        if (!data.isCall && this.sceneGuard != null
+        if (!data.isCall && FeatureFlags.sceneMode
+                && this.sceneGuard != null
                 && this.sceneGuard.isSuppressed()
                 && !SceneExceptions.isExcepted(data.pkg)) {
-            synchronized (this.suppressedQueue) {
-                java.util.Iterator<NotifData> qit =
-                        this.suppressedQueue.iterator();
-                while (qit.hasNext()) {
-                    NotifData old = qit.next();
-                    if (old.key != null && old.key.equals(data.key)) {
-                        qit.remove();
-                    }
-                }
-                this.suppressedQueue.add(data);
-                while (this.suppressedQueue.size() > 20) {
-                    this.suppressedQueue.poll();
-                }
-            }
+            enqueueSuppressed(data);
+            return;
+        }
+        // v525: temporary silence / DND linkage — while silenced
+        // (timed silence running, or system DND on with the
+        // linkage switch on), ordinary notifications queue in
+        // the same suppressed queue and re-pop in order on
+        // restore (maybeFlushSilenceQueue). Same pre-dedup
+        // placement as the scene gate, same reason. Music /
+        // downloads / live activities are exempt inside
+        // TempSilence.shouldQueue; calls follow the call-break
+        // switch.
+        if (TempSilence.shouldQueue(app, data)) {
+            FileLog.i("TempSilence queue pkg=" + data.pkg
+                    + " call=" + data.isCall
+                    + " timed=" + TempSilence.isActive()
+                    + " linkDnd=" + TempSilence.linkDnd);
+            enqueueSuppressed(data);
             return;
         }
         // v197: synchronous duplicate-delivery guard (see
@@ -1015,10 +1067,516 @@ public class BubbleWindow {
         });
     }
 
+    /** Queue a notification for later re-delivery (scene guard
+     * and temporary silence share the queue). Same-key entries
+     * are replaced so an update does not pop twice on flush;
+     * the queue is FIFO and capped at 20. */
+    private void enqueueSuppressed(NotifData data) {
+        synchronized (this.suppressedQueue) {
+            java.util.Iterator<NotifData> qit =
+                    this.suppressedQueue.iterator();
+            while (qit.hasNext()) {
+                NotifData old = qit.next();
+                if (old.key != null && old.key.equals(data.key)) {
+                    qit.remove();
+                }
+            }
+            this.suppressedQueue.add(data);
+            while (this.suppressedQueue.size() > 20) {
+                this.suppressedQueue.poll();
+            }
+        }
+    }
+
+    // ---- v525: temporary silence flush plumbing ----
+    // The silence state carries its own end timestamp, so the
+    // flush does not depend on the APP process: a delayed
+    // runnable fires at expiry, and DND-off / state-change
+    // broadcasts call maybeFlushSilenceQueue too. Flushing goes
+    // back through onNotification, so if another suppression
+    // (scene, a fresh silence) is up by then, items simply
+    // re-queue — never pop early.
+
+    private final Runnable tsExpiryRunnable = new Runnable() {
+        @Override
+        public void run() {
+            maybeFlushSilenceQueue("expiry", null);
+        }
+    };
+
+    /** The APP pushed a new silence state (start / end /
+     * settings change): re-arm the expiry flush, and flush at
+     * once if nothing suppresses anymore (early cancel). */
+    public void onTempSilenceStateChanged() {
+        onTempSilenceStateChanged(null);
+    }
+
+    /** v533: endReason is the APP-side end reason ("cancel" /
+     * "expired" / "dndOff") on an end broadcast, null for
+     * starts and settings changes. It routes the silence-exit
+     * animation: an in-app "cancel" is receipted by the APP
+     * itself (MainActivity plays it with the flushed count
+     * this process broadcasts back); every other road is
+     * receipted here in SystemUI. */
+    public void onTempSilenceStateChanged(
+            final String endReason) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                scheduleSilenceFlush();
+                maybeFlushSilenceQueue("state", endReason);
+            }
+        });
+    }
+
+    /** v531: fullscreen-anim window params, truly edge-to-edge.
+     * v529's recipe (TYPE_APPLICATION_OVERLAY + LAYOUT_IN_
+     * SCREEN + LAYOUT_NO_LIMITS) still left a bright strip of
+     * wallpaper at the very top and bottom on Flyme (wei's
+     * screenshot 4366): the window was framed inside the
+     * display cutout / system-bar insets. The missing pieces
+     * are layoutInDisplayCutoutMode (SHORT_EDGES pre-30,
+     * ALWAYS on 30+) and, on API 30+, fitInsetsTypes=0 so no
+     * inset type eats into the frame. MATCH_PARENT both ways.
+     * v533 (wei): FLAG_NOT_TOUCHABLE — the animation is not
+     * tappable and must play to completion; touches fall
+     * through to whatever the user is operating underneath. */
+    private static WindowManager.LayoutParams
+            fullscreenAnimParams(String title) {
+        WindowManager.LayoutParams lp =
+                new WindowManager.LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams
+                                .TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_NOT_TOUCHABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_IN_SCREEN
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT);
+        lp.gravity = android.view.Gravity.TOP
+                | android.view.Gravity.LEFT;
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            lp.layoutInDisplayCutoutMode = WindowManager
+                    .LayoutParams
+                    .LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+            try {
+                lp.setFitInsetsTypes(0);
+            } catch (Throwable ignored) {
+            }
+        } else if (android.os.Build.VERSION.SDK_INT >= 28) {
+            lp.layoutInDisplayCutoutMode = WindowManager
+                    .LayoutParams
+                    .LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        lp.setTitle(title);
+        return lp;
+    }
+
+    /** v529: the DND-linkage start animation veil, while up.
+     * v533: the silence-exit animation shares this slot, so a
+     * start and an exit receipt never stack. */
+    private View silenceAnimVeil;
+
+    /** v533: a silence session (timed, or DND-linkage) is
+     * currently suppressing, as last evaluated by
+     * maybeFlushSilenceQueue / init. The falling edge is what
+     * fires the exit-animation receipt — exactly once per
+     * session, whichever road ends it. */
+    private boolean silenceSessionOn;
+
+    /** v531: the scene-enter animation veil, while up. */
+    private View sceneAnimVeil;
+
+    /** v529: the silence was pulled up by the DND linkage
+     * (user opened system Do Not Disturb elsewhere) — play the
+     * same start animation the in-app button plays, as the
+     * "it really turned on" receipt, on a fullscreen overlay
+     * window here in SystemUI. Skipped (never queued for
+     * later) while the screen is off or the keyguard is up:
+     * a receipt nobody can see is just noise. The window type
+     * follows the v483 music-LED recipe — TYPE_APPLICATION_
+     * OVERLAY + LAYOUT_IN_SCREEN is what Flyme's window
+     * manager actually铺 full-screen. v533: the window is
+     * NOT_TOUCHABLE — no tap-to-dismiss, it plays to
+     * completion while touches pass through. */
+    public void maybePlayDndSilenceAnim() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (app == null || wm == null) {
+                    return;
+                }
+                try {
+                    android.os.PowerManager pm =
+                            (android.os.PowerManager) app
+                                    .getSystemService(
+                                            Context.POWER_SERVICE);
+                    if (pm == null || !pm.isInteractive()) {
+                        FileLog.i("TempSilence anim skip"
+                                + " (screen off)");
+                        return;
+                    }
+                    if (PrivacyMask.isLocked(app)) {
+                        FileLog.i("TempSilence anim skip"
+                                + " (locked)");
+                        return;
+                    }
+                    if (silenceAnimVeil != null) {
+                        return;
+                    }
+                    final SilenceAnim.Handle[] hh =
+                            new SilenceAnim.Handle[1];
+                    SilenceAnim.Handle h = SilenceAnim.create(
+                            app, SilenceAnim.subtitleDnd(),
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (hh[0] != null
+                                            && silenceAnimVeil
+                                                    == hh[0].veil) {
+                                        silenceAnimVeil = null;
+                                        try {
+                                            wm.removeView(
+                                                    hh[0].veil);
+                                        } catch (Throwable
+                                                ignored) {
+                                        }
+                                    }
+                                }
+                            });
+                    hh[0] = h;
+                    WindowManager.LayoutParams lp =
+                            fullscreenAnimParams(
+                                    "flymebobo-silence-anim");
+                    silenceAnimVeil = h.veil;
+                    wm.addView(h.veil, lp);
+                    h.play();
+                    FileLog.i("TempSilence anim play (dnd link)");
+                } catch (Throwable t) {
+                    silenceAnimVeil = null;
+                }
+            }
+        });
+    }
+
+    /** v531: entering a game/video scene — play the SAME v2
+     * fullscreen animation the settings switch plays (wei:
+     * both scene triggers must look identical), here in
+     * SystemUI on the edge-to-edge overlay window. Called
+     * from the scene guard listener, which only fires on
+     * transitions — entering plays once per scene session,
+     * leaving resets, re-entering plays again. Skipped when
+     * the scene-mode master switch is off (the gate is off
+     * anyway), and while the screen is off or the keyguard
+     * is up (never queued for later — same rule as the DND
+     * silence receipt). */
+    public void maybePlaySceneEnterAnim() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (app == null || wm == null) {
+                    return;
+                }
+                if (!FeatureFlags.sceneMode) {
+                    return;
+                }
+                try {
+                    android.os.PowerManager pm =
+                            (android.os.PowerManager) app
+                                    .getSystemService(
+                                            Context.POWER_SERVICE);
+                    if (pm == null || !pm.isInteractive()) {
+                        FileLog.i("SceneAnim skip (screen off)");
+                        return;
+                    }
+                    if (PrivacyMask.isLocked(app)) {
+                        FileLog.i("SceneAnim skip (locked)");
+                        return;
+                    }
+                    if (sceneAnimVeil != null) {
+                        return;
+                    }
+                    final SilenceAnim.Handle[] hh =
+                            new SilenceAnim.Handle[1];
+                    SilenceAnim.Handle h = SilenceAnim.create(
+                            app, SilenceAnim.SCENE,
+                            SilenceAnim.subtitleScene(),
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (hh[0] != null
+                                            && sceneAnimVeil
+                                                    == hh[0].veil) {
+                                        sceneAnimVeil = null;
+                                        try {
+                                            wm.removeView(
+                                                    hh[0].veil);
+                                        } catch (Throwable
+                                                ignored) {
+                                        }
+                                    }
+                                }
+                            });
+                    hh[0] = h;
+                    sceneAnimVeil = h.veil;
+                    wm.addView(h.veil, fullscreenAnimParams(
+                            "flymebobo-scene-anim"));
+                    h.play();
+                    FileLog.i("SceneAnim play (enter scene)");
+                } catch (Throwable t) {
+                    sceneAnimVeil = null;
+                }
+            }
+        });
+    }
+
+    /** v532: leaving a game/video scene — the EXIT receipt,
+     * the same v2 fullscreen animation as the entry (wei:
+     * exit gets the fullscreen treatment too, only the copy
+     * changes). Title 「场景模式已退出」; the subtitle reports
+     * the exit flush that just ran in the scene listener —
+     * "N 条消息已补弹" with the real flushed count, or
+     * "通知恢复正常" when nothing was queued. Called from
+     * the scene guard listener right AFTER flushSuppressedQueue
+     * ran synchronously, so the animation never delays the
+     * re-delivery it receipts. The guard only fires on
+     * transitions, so one exit plays once. Same guards as
+     * the entry receipt: sceneMode off, screen off or
+     * keyguard up → skip, never queued (logged). */
+    public void maybePlaySceneExitAnim(final int flushed) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (app == null || wm == null) {
+                    return;
+                }
+                if (!FeatureFlags.sceneMode) {
+                    return;
+                }
+                try {
+                    android.os.PowerManager pm =
+                            (android.os.PowerManager) app
+                                    .getSystemService(
+                                            Context.POWER_SERVICE);
+                    if (pm == null || !pm.isInteractive()) {
+                        FileLog.i("SceneAnim exit skip"
+                                + " (screen off)");
+                        return;
+                    }
+                    if (PrivacyMask.isLocked(app)) {
+                        FileLog.i("SceneAnim exit skip (locked)");
+                        return;
+                    }
+                    if (sceneAnimVeil != null) {
+                        return;
+                    }
+                    final SilenceAnim.Handle[] hh =
+                            new SilenceAnim.Handle[1];
+                    SilenceAnim.Handle h = SilenceAnim.create(
+                            app, SilenceAnim.SCENE_EXIT,
+                            flushed > 0
+                                    ? SilenceAnim
+                                            .subtitleSceneExitFlushed(
+                                                    flushed)
+                                    : SilenceAnim
+                                            .subtitleSceneExitEmpty(),
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (hh[0] != null
+                                            && sceneAnimVeil
+                                                    == hh[0].veil) {
+                                        sceneAnimVeil = null;
+                                        try {
+                                            wm.removeView(
+                                                    hh[0].veil);
+                                        } catch (Throwable
+                                                ignored) {
+                                        }
+                                    }
+                                }
+                            });
+                    hh[0] = h;
+                    sceneAnimVeil = h.veil;
+                    wm.addView(h.veil, fullscreenAnimParams(
+                            "flymebobo-scene-anim"));
+                    h.play();
+                    FileLog.i("SceneAnim play (exit scene)"
+                            + " flushed=" + flushed);
+                } catch (Throwable t) {
+                    sceneAnimVeil = null;
+                }
+            }
+        });
+    }
+
+    /** The system interruption filter changed (any source):
+     * if DND just went off and no timed silence is running,
+     * whatever it queued can pop now. */
+    public void onDndChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                maybeFlushSilenceQueue("dnd", null);
+            }
+        });
+    }
+
+    private void scheduleSilenceFlush() {
+        handler.removeCallbacks(tsExpiryRunnable);
+        long delay = TempSilence.untilMs
+                - System.currentTimeMillis();
+        if (delay > 0) {
+            handler.postDelayed(tsExpiryRunnable, delay + 500);
+        }
+    }
+
+    /** v533: the flush evaluation, now also the silence
+     * session tracker. While suppression holds it only marks
+     * the session on; on the falling edge it flushes first
+     * (the re-delivery is never delayed by the animation),
+     * then receipts the end:
+     *  - the flushed count is broadcast back to the APP on
+     *    every session end, so an in-app cancel can print
+     *    the real count in its own exit animation;
+     *  - unless the end was that in-app cancel (endReason
+     *    "cancel" — the APP plays the receipt), SystemUI
+     *    plays the exit animation itself: expiry (APP alarm
+     *    or this process's own runnable), a manual DND-off
+     *    early cancel, and a pure DND-linkage session ending
+     *    all land here. */
+    private void maybeFlushSilenceQueue(String why,
+            String endReason) {
+        if (app == null) {
+            return;
+        }
+        if (TempSilence.suppressionOn(app)) {
+            silenceSessionOn = true;
+            return;
+        }
+        boolean wasSession = silenceSessionOn;
+        silenceSessionOn = false;
+        int flushed = 0;
+        boolean has;
+        synchronized (this.suppressedQueue) {
+            has = !this.suppressedQueue.isEmpty();
+        }
+        if (has) {
+            FileLog.i("TempSilence flush why=" + why);
+            flushed = flushSuppressedQueue();
+        }
+        if (!wasSession) {
+            return;
+        }
+        broadcastSilenceFlushed(flushed);
+        if (!"cancel".equals(endReason)) {
+            maybePlaySilenceExitAnim(flushed);
+        }
+    }
+
+    /** v533: tell the APP an end-of-silence flush ran and
+     * how much it re-delivered (0 included — the APP needs
+     * the "nothing was queued" answer too, to print
+     * 「通知恢复正常」 without guessing). */
+    private void broadcastSilenceFlushed(int n) {
+        try {
+            Intent i = new Intent(NotificationService
+                    .ACTION_TEMP_SILENCE_FLUSHED);
+            i.setPackage("com.chenan.flymebobo");
+            i.putExtra(TempSilence.EXTRA_FLUSHED, n);
+            app.sendBroadcast(i);
+            FileLog.i("TempSilence flushed receipt n=" + n);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v533: the silence EXIT receipt — the same v2
+     * fullscreen animation as the start (wei: 跟场景退出
+     * 同款), moon illustration, title 「临时静默已结束」;
+     * the subtitle reports the flush that just ran —
+     * "N 条消息已补弹" with the real count, or
+     * "通知恢复正常" when nothing was queued. Played by
+     * SystemUI for every end road except the in-app cancel
+     * (the APP receipts that one itself — see
+     * maybeFlushSilenceQueue). Same guards as the start
+     * receipt: screen off or keyguard up → skip, never
+     * queued for later. Shares the silenceAnimVeil slot
+     * with the start animation so the two never stack. */
+    public void maybePlaySilenceExitAnim(final int flushed) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (app == null || wm == null) {
+                    return;
+                }
+                try {
+                    android.os.PowerManager pm =
+                            (android.os.PowerManager) app
+                                    .getSystemService(
+                                            Context.POWER_SERVICE);
+                    if (pm == null || !pm.isInteractive()) {
+                        FileLog.i("TempSilence exit anim skip"
+                                + " (screen off)");
+                        return;
+                    }
+                    if (PrivacyMask.isLocked(app)) {
+                        FileLog.i("TempSilence exit anim skip"
+                                + " (locked)");
+                        return;
+                    }
+                    if (silenceAnimVeil != null) {
+                        return;
+                    }
+                    final SilenceAnim.Handle[] hh =
+                            new SilenceAnim.Handle[1];
+                    SilenceAnim.Handle h = SilenceAnim.create(
+                            app, SilenceAnim.SILENCE_EXIT,
+                            flushed > 0
+                                    ? SilenceAnim
+                                            .subtitleSilenceExitFlushed(
+                                                    flushed)
+                                    : SilenceAnim
+                                            .subtitleSilenceExitEmpty(),
+                            new Runnable() {
+                                @Override
+                                public void run() {
+                                    if (hh[0] != null
+                                            && silenceAnimVeil
+                                                    == hh[0].veil) {
+                                        silenceAnimVeil = null;
+                                        try {
+                                            wm.removeView(
+                                                    hh[0].veil);
+                                        } catch (Throwable
+                                                ignored) {
+                                        }
+                                    }
+                                }
+                            });
+                    hh[0] = h;
+                    silenceAnimVeil = h.veil;
+                    wm.addView(h.veil, fullscreenAnimParams(
+                            "flymebobo-silence-anim"));
+                    h.play();
+                    FileLog.i("TempSilence exit anim play"
+                            + " flushed=" + flushed);
+                } catch (Throwable t) {
+                    silenceAnimVeil = null;
+                }
+            }
+        });
+    }
+
     /** Scene guard: re-deliver everything queued during a
      * game/video scene. Goes back through onNotification so the
-     * normal dedup / grouping / pop logic applies unchanged. */
-    private void flushSuppressedQueue() {
+     * normal dedup / grouping / pop logic applies unchanged.
+     * v532: returns how many were flushed — the scene-exit
+     * animation prints the real count in its subtitle. */
+    private int flushSuppressedQueue() {
         java.util.ArrayList<NotifData> copy;
         synchronized (this.suppressedQueue) {
             copy = new java.util.ArrayList<>(this.suppressedQueue);
@@ -1030,6 +1588,7 @@ public class BubbleWindow {
         for (NotifData d : copy) {
             onNotification(d);
         }
+        return copy.size();
     }
 
     // v176 (method 1): the system removed a notification (user
@@ -2064,8 +2623,12 @@ public class BubbleWindow {
                 cm.setPrimaryClip(
                         android.content.ClipData.newPlainText(
                                 "验证码", code));
+                // v524: 打码状态下 Toast 也不露码（剪贴板还是真码）。
+                String toast = PrivacyMask.shouldMask(app)
+                        ? "验证码已复制"
+                        : "验证码 " + code + " 已复制";
                 android.widget.Toast.makeText(app,
-                        "验证码 " + code + " 已复制",
+                        toast,
                         android.widget.Toast.LENGTH_SHORT).show();
             }
         } catch (Throwable ignored) {
@@ -2639,6 +3202,18 @@ public class BubbleWindow {
         // update).
         if (isLiveUpdate) {
             return;
+        }
+        // v534: 气泡提示音——走到这里的都是真弹出（更新刷新已在
+        // 上面 return）。只给普通气泡响一声：音乐/下载/实况/
+        // 导航/来电这些特殊胶囊各有自己的存在感，不响（wei 定）。
+        // 开关、节流、静音/勿扰判断都在 BubbleSound 里。场景/
+        // 静默排队时气泡根本走不到这里；补弹时逐条走 popCapsule，
+        // 按同一规则响（节流保证一波只响第一声）。
+        // v535: 带上包名——按应用规则（静音/指定音效）在
+        // BubbleSound.play 里查 SoundRules 定夺。
+        if (!data.isMusic && !data.isDownload && !data.isLive
+                && !data.isNavi && !data.isBus && !data.isCall) {
+            BubbleSound.play(app, data.pkg);
         }
         // v244: a verification code auto-copies on pop (user
         // 2026-11-21 "验证码这种就自动复制"). Pickup codes do
