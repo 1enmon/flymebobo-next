@@ -1084,7 +1084,11 @@ public class BubbleWindow {
         // the same notification key per conversation, so the same-key
         // guard swallows the second message. The v146 key+content
         // backstop still catches true duplicates.
+        // v542: recalled snapshots exempt too — a recall tap
+        // re-delivers within the 2s window by design (onRecallTap
+        // also removes the seen slot; belt and braces).
         if (!data.isMusic && !data.isDownload && !data.isLive
+                && !data.recalled
                 && data.key != null
                 && !"com.tencent.mm".equals(data.pkg)
                 && !"com.tencent.mobileqq".equals(data.pkg)) {
@@ -3035,7 +3039,13 @@ public class BubbleWindow {
         // was counted as a duplicate and dropped — only the first
         // capsule ever popped. The v146 key+content backstop still
         // catches true duplicates (same key + same content).
+        // v542: recalled snapshots exempt from BOTH dedup layers
+        // below — a recall re-delivers the same fingerprint and
+        // key+content seconds after the original pop, which is
+        // the feature working, not a duplicate (wei 实测 v540
+        // 点了回看把手没反应，根因就是被这里吞掉).
         if (data != null && !data.isMusic && !data.isDownload
+                && !data.recalled
                 && data.pkg != null
                 && !"com.tencent.mm".equals(data.pkg)
                 && !"com.tencent.mobileqq".equals(data.pkg)) {
@@ -3079,8 +3089,11 @@ public class BubbleWindow {
         // title/text within 1h = the same message, drop it even if
         // the module let it through (reconnect re-delivery). Same key
         // + new content = an update, let it through.
+        // v542: recalled snapshots exempt — WeChat/QQ are NOT
+        // exempt from this layer, so it swallowed their recalls
+        // even though they pass the v100 layer above.
         if (data != null && !data.isMusic && !data.isDownload
-                && data.key != null) {
+                && !data.recalled && data.key != null) {
             String digest = (data.title == null ? "" : data.title)
                     + "\u0001" + (data.text == null ? "" : data.text);
             long now = System.currentTimeMillis();
@@ -3530,6 +3543,12 @@ public class BubbleWindow {
         if (!data.isMusic && !data.isDownload && !data.isLive
                 && !data.isNavi && !data.isBus && !data.isCall) {
             BubbleSound.play(app, data.pkg);
+        }
+        // v542: 回看重投真正上屏的回执——走到这里说明去重/门控
+        // 全部放行、是真弹出（原地更新已在上方 return）。下一轮
+        // 看日志时以这条为准核对回看有没有真的弹出来。
+        if (data.recalled) {
+            FileLog.i("Recall show pkg=" + data.pkg);
         }
         // v244: a verification code auto-copies on pop (user
         // 2026-11-21 "验证码这种就自动复制"). Pickup codes do
