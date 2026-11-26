@@ -136,6 +136,13 @@ public class NotificationService extends NotificationListenerService {
      * in the in-app exit animation. */
     public static final String ACTION_TEMP_SILENCE_FLUSHED =
             "com.chenan.flymebobo.TEMP_SILENCE_FLUSHED";
+    /** v541: APP -> SystemUI, the settings-side scene-mode
+     * animation just played. Extra: "ts" (long, when it played).
+     * Scene enter/exit/settings animations share one 30-minute
+     * cooldown (SceneAnimCooldown); this broadcast syncs the
+     * timestamp into SystemUI on top of the shared file. */
+    public static final String ACTION_SCENE_ANIM =
+            "com.chenan.flymebobo.SCENE_ANIM";
     /** v311: Amap live navigation (foot/ride) — Amap process ->
      * SystemUI, turn + distance from ModuleRoute.notifyNaviInfo.
      * Extras: "bizType" (footnavi/ridenavi), "title", "content",

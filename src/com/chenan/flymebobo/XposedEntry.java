@@ -354,6 +354,8 @@ public class XposedEntry extends XposedModule {
         // queue flush on DND-off must not depend on the APP
         // process being alive).
         filter.addAction(NotificationService.ACTION_TEMP_SILENCE);
+        // v541: APP 设置里播了场景动画 → 同步冷却时间戳进来。
+        filter.addAction(NotificationService.ACTION_SCENE_ANIM);
         filter.addAction(android.app.NotificationManager
                 .ACTION_INTERRUPTION_FILTER_CHANGED);
         BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -392,7 +394,23 @@ public class XposedEntry extends XposedModule {
                     BubbleWindow bw = BubbleWindow.getInstance();
                     if (bw != null) {
                         bw.refreshMasking();
+                        // v539: unlocked — the recall handle may
+                        // show again (if its 3 minutes are not up).
+                        bw.refreshRecallHandle();
                     }
+                    return;
+                }
+                // v541: the APP played the scene-mode
+                // animation from its settings switch — merge
+                // the timestamp into the shared 30-minute
+                // cooldown so a real scene entry/exit right
+                // after does not replay the animation.
+                if (NotificationService.ACTION_SCENE_ANIM.equals(
+                        intent.getAction())) {
+                    long ts = intent.getLongExtra("ts", 0);
+                    SceneAnimCooldown.noteExternalPlayed(ts);
+                    FileLog.i("SceneAnim cooldown sync (app)"
+                            + " ts=" + ts);
                     return;
                 }
                 // v525: temporary-silence state pushed by the
@@ -518,6 +536,14 @@ public class XposedEntry extends XposedModule {
                     // v262: scroll switch flips apply at once.
                     if ("scroll".equals(fkey)) {
                         BubbleWindow.getInstance().refreshLyricsScroll();
+                    }
+                    // v539: 回看胶囊关掉时立即清栈收把手（开着
+                    // 时不用做什么——入栈发生在划掉的那一刻）。
+                    if ("recallCapsule".equals(fkey) && !fenabled) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onRecallCapsuleDisabled();
+                        }
                     }
                     // v376: callRight flips move an active call
                     // capsule between the dock and the right window.

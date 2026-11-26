@@ -117,6 +117,19 @@ public class FeatureFlags {
     // musicLed_taps 同款坑：写成布尔后 getString 直接崩）。
     public static volatile String bubbleCustomPath = "";
     public static volatile String bubbleCustomName = "";
+    // v539: 回看胶囊——手动划掉的普通气泡收进屏幕左边缘的
+    // 回看栈，点边缘把手逐个原样重弹（BubbleWindow 实现）。
+    // 默认关（wei 特别要求：主动开关，用户自己在设置里开启
+    // 才有这功能）；关着时不入栈、不出把手。开→关立即清栈
+    // 收把手（XposedEntry 把拨动转给 BubbleWindow
+    // .onRecallCapsuleDisabled）。
+    public static volatile boolean recallCapsule = false;
+    // v540: 自动复制验证码——识别出验证码时自动写剪贴板
+    // （v244 起的老行为）。默认开（= 现状）；关掉后验证码
+    // 只显示、不复制（BubbleWindow.autoCopyVerifyCode 入口
+    // 查这个开关）。取件码本来就不自动复制，不归它管。
+    // 开关嵌在「验证码与隐私」卡里（parent=code）。
+    public static volatile boolean autoCopyCode = true;
 
     public static void set(String key, boolean enabled) {
         if (key == null) {
@@ -175,6 +188,12 @@ public class FeatureFlags {
         } else if ("bubbleSound".equals(key)) {
             bubbleSound = enabled;
             FileLog.i("BubbleSound -> " + (enabled ? "on" : "off"));
+        } else if ("recallCapsule".equals(key)) {
+            recallCapsule = enabled;
+            FileLog.i("RecallCapsule -> " + (enabled ? "on" : "off"));
+        } else if ("autoCopyCode".equals(key)) {
+            autoCopyCode = enabled;
+            FileLog.i("AutoCopyCode -> " + (enabled ? "on" : "off"));
         }
         // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
@@ -225,6 +244,10 @@ public class FeatureFlags {
             musicVideo = fileOrPrefsBool("musicVideo", prefs, true);
             // v534: 气泡提示音——默认开（wei 明确要的）。
             bubbleSound = fileOrPrefsBool("bubbleSound", prefs, true);
+            // v539: 回看胶囊——默认关（主动开关，wei 定）。
+            recallCapsule = fileOrPrefsBool("recallCapsule", prefs, false);
+            // v540: 自动复制验证码——默认开（= v244 起的老行为）。
+            autoCopyCode = fileOrPrefsBool("autoCopyCode", prefs, true);
             // v534: 当前音效 id（字符串 prefs，默认 "soft" 轻木）。
             // v535: 自定义文件路径/名也是字符串——三个字符串键都
             // 走逐键安全读：某个键万一被旧备份写坏成别的类型，

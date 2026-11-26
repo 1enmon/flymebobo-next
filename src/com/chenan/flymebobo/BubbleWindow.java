@@ -120,6 +120,31 @@ public class BubbleWindow {
     private boolean sceneSuppressed;
     private final java.util.ArrayDeque<NotifData> suppressedQueue =
             new java.util.ArrayDeque<>();
+    // v539: 边缘回看胶囊（wei 2026-11-26 审预览拍板）。普通气泡
+    // 被手动左滑消散时，快照进回看栈（头=最近，最多 5 条）；
+    // 栈非空时屏幕左边缘出竖向小把手（↩ + 橙色角标 +「回看」
+    // 竖字），点它逐个经 onNotification 原样重弹（照样过场景/
+    // 静默的门）。把手停 3 分钟无人点 → 清栈淡出。重弹的快照
+    // 打 recalled 标记，再划掉不入栈。开关 recallCapsule 默认
+    // 关（主动开关）：关着不入栈、不出把手；开→关立即清栈。
+    private final java.util.ArrayDeque<NotifData> recallStack =
+            new java.util.ArrayDeque<>();
+    private static final int RECALL_MAX = 5;
+    private static final long RECALL_TTL_MS = 3 * 60_000L;
+    private FrameLayout recallRoot;
+    private android.widget.TextView recallBadge;
+    private WindowManager.LayoutParams recallParams;
+    private boolean recallWindowAdded;
+    private final Runnable recallExpiryRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (!recallStack.isEmpty()) {
+                FileLog.i("Recall expire n=" + recallStack.size());
+            }
+            recallStack.clear();
+            hideRecallHandle();
+        }
+    };
     /** v320: Amap bus live navigation state (no voice). Mode A
      * (waiting) shows real-time arrival from BusNaviHook; mode B
      * (on the bus) shows next stop / remaining stations, computed
@@ -507,6 +532,19 @@ public class BubbleWindow {
                     }
                 } catch (Throwable ignored) {
                 }
+                // v539: the recall handle never shows with the
+                // screen off; on wake it re-evaluates (keyguard
+                // still locked -> stays hidden until unlock).
+                try {
+                    if (recallRoot != null) {
+                        if (on) {
+                            refreshRecallHandle();
+                        } else {
+                            recallRoot.setVisibility(View.GONE);
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
             }
         });
     }
@@ -704,6 +742,12 @@ public class BubbleWindow {
                     if (immersive) {
                         BubbleWindow.this.root.setVisibility(View.GONE);
                         BubbleWindow.this.pileRoot.setVisibility(View.GONE);
+                        // v539: the recall handle hides in-scene
+                        // too (refresh re-evaluates on exit).
+                        if (BubbleWindow.this.recallRoot != null) {
+                            BubbleWindow.this.recallRoot
+                                    .setVisibility(View.GONE);
+                        }
                         // v507: the music LED is its own window —
                         // the scene hide above never covered it,
                         // so it kept glowing through games.
@@ -730,6 +774,9 @@ public class BubbleWindow {
                             }
                         } catch (Throwable ignored) {
                         }
+                        // v539: scene over — the recall handle may
+                        // come back (refresh checks the rest).
+                        BubbleWindow.this.refreshRecallHandle();
                         // v532: the flush runs first, synchronously
                         // — the exit animation below is only its
                         // receipt and must never delay it. The
@@ -1088,6 +1135,246 @@ public class BubbleWindow {
         }
     }
 
+    // ---- v539: 边缘回看胶囊 ----
+    // Manual left-swipe dissipate is the ONLY way in (the three
+    // capsule onSwipeLeft runnables call manualDissipate instead
+    // of dissipateOne directly; auto-dissipate and blank-tap
+    // dissipation call dissipateOne themselves and never land
+    // here). Ordinary capsules only: music / download / live /
+    // navi / bus / call never stack.
+
+    /** Manual swipe-away: leave a snapshot in the recall stack,
+     * then dissipate as usual. */
+    private void manualDissipate(NotifData d) {
+        pushRecall(d);
+        dissipateOne(d);
+    }
+
+    private void pushRecall(NotifData d) {
+        if (d == null || !FeatureFlags.recallCapsule || d.recalled) {
+            return;
+        }
+        if (d.isMusic || d.isDownload || d.isLive || d.isNavi
+                || d.isBus || d.isCall) {
+            return;
+        }
+        // Same key replaces: a re-posted conversation swiped
+        // twice must not stack a stale copy under the fresh one.
+        if (d.key != null) {
+            java.util.Iterator<NotifData> it = recallStack.iterator();
+            while (it.hasNext()) {
+                NotifData o = it.next();
+                if (o != null && d.key.equals(o.key)) {
+                    it.remove();
+                }
+            }
+        }
+        recallStack.addFirst(d);
+        while (recallStack.size() > RECALL_MAX) {
+            recallStack.removeLast();
+        }
+        FileLog.i("Recall push pkg=" + d.pkg
+                + " n=" + recallStack.size());
+        armRecallTimer();
+        refreshRecallHandle();
+    }
+
+    private void armRecallTimer() {
+        handler.removeCallbacks(recallExpiryRunnable);
+        if (!recallStack.isEmpty()) {
+            handler.postDelayed(recallExpiryRunnable, RECALL_TTL_MS);
+        }
+    }
+
+    /** The switch flipped off: clear the stack and take the
+     * handle down at once (called from XposedEntry). */
+    public void onRecallCapsuleDisabled() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                recallStack.clear();
+                handler.removeCallbacks(recallExpiryRunnable);
+                hideRecallHandle();
+            }
+        });
+    }
+
+    /** Tap the edge handle: re-deliver the most recently swiped
+     * capsule through onNotification, so the scene / silence
+     * gates apply exactly as for a fresh arrival (it queues
+     * instead of popping when a gate is up — never bypasses).
+     * The snapshot is marked recalled first: swiping the
+     * re-popped capsule away again does not re-stack it. */
+    private void onRecallTap() {
+        NotifData d = recallStack.pollFirst();
+        if (d == null) {
+            refreshRecallHandle();
+            return;
+        }
+        FileLog.i("Recall pop pkg=" + d.pkg
+                + " left=" + recallStack.size());
+        d.recalled = true;
+        // A fast recall (< 2s after the original delivery) would
+        // be swallowed by the seen-key duplicate guard; the user
+        // explicitly asked for this one back, so clear its slot.
+        if (d.key != null) {
+            synchronized (seenNotifKeys) {
+                seenNotifKeys.remove(d.key);
+            }
+        }
+        armRecallTimer();
+        refreshRecallHandle();
+        onNotification(d);
+    }
+
+    private boolean isScreenInteractive() {
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager)
+                    app.getSystemService(Context.POWER_SERVICE);
+            return pm == null || pm.isInteractive();
+        } catch (Throwable ignored) {
+            return true;
+        }
+    }
+
+    private boolean isKeyguardLocked() {
+        try {
+            android.app.KeyguardManager km =
+                    (android.app.KeyguardManager) app.getSystemService(
+                            Context.KEYGUARD_SERVICE);
+            return km != null && km.isKeyguardLocked();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** Show / update / hide the edge handle from the current
+     * state. The window exists only while the stack is
+     * non-empty; visibility additionally requires the feature
+     * on, screen interactive, keyguard unlocked and no
+     * immersive scene (the scene listener and setScreenOn call
+     * this as those states change; unlock comes via
+     * XposedEntry's USER_PRESENT branch). */
+    public void refreshRecallHandle() {
+        if (!FeatureFlags.recallCapsule || recallStack.isEmpty()) {
+            hideRecallHandle();
+            return;
+        }
+        ensureRecallHandle();
+        if (recallRoot == null || wm == null) {
+            return;
+        }
+        if (!recallWindowAdded) {
+            try {
+                recallRoot.setTranslationX(-dp(26));
+                wm.addView(recallRoot, recallParams);
+                recallWindowAdded = true;
+                recallRoot.animate().translationX(0)
+                        .setDuration(220).start();
+            } catch (Throwable ignored) {
+                return;
+            }
+        }
+        if (recallBadge != null) {
+            recallBadge.setText(String.valueOf(recallStack.size()));
+        }
+        boolean show = isScreenInteractive() && !isKeyguardLocked()
+                && !sceneSuppressed;
+        recallRoot.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private void hideRecallHandle() {
+        if (recallRoot != null && recallWindowAdded && wm != null) {
+            try {
+                wm.removeView(recallRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        recallWindowAdded = false;
+    }
+
+    private void ensureRecallHandle() {
+        if (recallRoot != null || app == null || wm == null) {
+            return;
+        }
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            android.widget.LinearLayout tab =
+                    new android.widget.LinearLayout(app);
+            tab.setOrientation(android.widget.LinearLayout.VERTICAL);
+            tab.setGravity(Gravity.CENTER_HORIZONTAL);
+            tab.setPadding(0, dp(7), 0, dp(7));
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(Color.argb(222, 28, 32, 44));
+            float r = dp(14);
+            bg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+            tab.setBackground(bg);
+            android.widget.TextView arrow =
+                    new android.widget.TextView(app);
+            arrow.setText("↩");
+            arrow.setTextColor(Color.WHITE);
+            arrow.setTextSize(13);
+            arrow.setGravity(Gravity.CENTER);
+            tab.addView(arrow);
+            recallBadge = new android.widget.TextView(app);
+            recallBadge.setTextColor(Color.WHITE);
+            recallBadge.setTextSize(11);
+            recallBadge.setTypeface(recallBadge.getTypeface(),
+                    android.graphics.Typeface.BOLD);
+            recallBadge.setGravity(Gravity.CENTER);
+            GradientDrawable bbg = new GradientDrawable();
+            bbg.setShape(GradientDrawable.OVAL);
+            bbg.setColor(Color.rgb(255, 120, 71));
+            recallBadge.setBackground(bbg);
+            android.widget.LinearLayout.LayoutParams blp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            dp(17), dp(17));
+            blp.topMargin = dp(3);
+            recallBadge.setLayoutParams(blp);
+            tab.addView(recallBadge);
+            android.widget.TextView label =
+                    new android.widget.TextView(app);
+            label.setText("回\n看");
+            label.setTextColor(Color.argb(190, 255, 255, 255));
+            label.setTextSize(9.5f);
+            label.setGravity(Gravity.CENTER);
+            android.widget.LinearLayout.LayoutParams llp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            llp.topMargin = dp(3);
+            label.setLayoutParams(llp);
+            tab.addView(label);
+            rootL.addView(tab, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            rootL.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    onRecallTap();
+                }
+            });
+            recallRoot = rootL;
+            recallParams = new WindowManager.LayoutParams(
+                    dp(26), dp(76),
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            recallParams.gravity = Gravity.START | Gravity.TOP;
+            // Below the capsule zone, like the approved preview
+            // (the tab sat under the capsule, ~45% down).
+            android.util.DisplayMetrics dm =
+                    app.getResources().getDisplayMetrics();
+            recallParams.y = (int) (dm.heightPixels * 0.42f);
+            recallParams.setTitle("flymebobo-recall");
+        } catch (Throwable ignored) {
+        }
+    }
+
     // ---- v525: temporary silence flush plumbing ----
     // The silence state carries its own end timestamp, so the
     // flush does not depend on the APP process: a delayed
@@ -1300,6 +1587,17 @@ public class BubbleWindow {
                     if (sceneAnimVeil != null) {
                         return;
                     }
+                    // v541: 场景动画 30 分钟合并冷却（开/退
+                    // 共用），冷却中只跳过动画，场景功能本身
+                    // 不受影响；既有规则跳过的不走到这里、不
+                    // 消耗机会。
+                    long cdEnter = SceneAnimCooldown.remainingMs();
+                    if (cdEnter > 0) {
+                        FileLog.i("SceneAnim cooldown skip"
+                                + " (enter), "
+                                + (cdEnter / 60000) + " min left");
+                        return;
+                    }
                     final SilenceAnim.Handle[] hh =
                             new SilenceAnim.Handle[1];
                     SilenceAnim.Handle h = SilenceAnim.create(
@@ -1325,6 +1623,8 @@ public class BubbleWindow {
                     sceneAnimVeil = h.veil;
                     wm.addView(h.veil, fullscreenAnimParams(
                             "flymebobo-scene-anim"));
+                    // v541: 确实要播了才记冷却时间。
+                    SceneAnimCooldown.markPlayed();
                     h.play();
                     FileLog.i("SceneAnim play (enter scene)");
                 } catch (Throwable t) {
@@ -1374,6 +1674,14 @@ public class BubbleWindow {
                     if (sceneAnimVeil != null) {
                         return;
                     }
+                    // v541: 与开启共用同一个 30 分钟冷却。
+                    long cdExit = SceneAnimCooldown.remainingMs();
+                    if (cdExit > 0) {
+                        FileLog.i("SceneAnim cooldown skip"
+                                + " (exit), "
+                                + (cdExit / 60000) + " min left");
+                        return;
+                    }
                     final SilenceAnim.Handle[] hh =
                             new SilenceAnim.Handle[1];
                     SilenceAnim.Handle h = SilenceAnim.create(
@@ -1404,6 +1712,8 @@ public class BubbleWindow {
                     sceneAnimVeil = h.veil;
                     wm.addView(h.veil, fullscreenAnimParams(
                             "flymebobo-scene-anim"));
+                    // v541: 确实要播了才记冷却时间。
+                    SceneAnimCooldown.markPlayed();
                     h.play();
                     FileLog.i("SceneAnim play (exit scene)"
                             + " flushed=" + flushed);
@@ -2609,8 +2919,14 @@ public class BubbleWindow {
 
     /** v244: copy a verification code to the clipboard and
      * confirm with a short Toast. Runs in SystemUI, which may
-     * write the clipboard. */
+     * write the clipboard.
+     * v540: 入口先过「自动复制验证码」开关（FeatureFlags
+     * .autoCopyCode，默认开 = 老行为）——关掉后验证码只显示
+     * 不复制，识别/钉住都不受影响。 */
     private void autoCopyVerifyCode(String code) {
+        if (!FeatureFlags.autoCopyCode) {
+            return;
+        }
         if (code == null || app == null) {
             return;
         }
@@ -4578,10 +4894,13 @@ public class BubbleWindow {
                     // v154: a manual right-swipe on the open card
                     // dismisses the notification (no capsule pops
                     // back); otherwise it dissipates the capsule.
+                    // v539: the dissipate goes through
+                    // manualDissipate so the recall stack gets
+                    // its snapshot first.
                     if (isCardKey(d.key)) {
                         dismissOpenCard(d);
                     } else {
-                        dissipateOne(d);
+                        manualDissipate(d);
                     }
                 }
             });
@@ -4716,7 +5035,7 @@ public class BubbleWindow {
                             if (isCardKey(d.key)) {
                                 dismissOpenCard(d);
                             } else {
-                                dissipateOne(d);
+                                manualDissipate(d);
                             }
                         }
                     });
@@ -4883,7 +5202,7 @@ public class BubbleWindow {
                             if (isCardKey(item.key)) {
                                 dismissOpenCard(item);
                             } else {
-                                dissipateOne(item);
+                                manualDissipate(item);
                             }
                         }
                     });

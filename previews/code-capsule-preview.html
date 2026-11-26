@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>验证码胶囊大码 · 预览</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px;}
+.banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px;}
+h3 { width:100%; max-width:392px; font-size:15px; margin:14px 0 8px;}
+h3 span { color:#7a8699; font-weight:400; font-size:12.5px;}
+.stage { position:relative; width:100%; max-width:392px; height:300px; border-radius:26px; overflow:hidden; box-shadow:0 10px 30px rgba(30,40,60,.22); background:linear-gradient(160deg,#7d9bbd 0%,#4d6a8c 50%,#2c4258 100%);}
+.stage.tall { height:340px;}
+.clock { position:absolute; top:34px; left:0; right:0; text-align:center; color:rgba(255,255,255,.9); font-size:38px; font-weight:200;}
+.cap { position:absolute; left:10px; width:252px; border-radius:26px; background:rgba(28,32,44,.9); display:flex; align-items:center; gap:9px; padding:0 14px 0 6px; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.35);}
+.cap.ic { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none;}
+.cap.tt { flex:1; min-width:0;}
+.cap.t1 { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.cap.t2 { font-size:12px; color:rgba(255,255,255,.7); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.cap.old { top:110px; height:52px;}
+.cap.new { height:60px;}
+.cap.code { font-size:23px; font-weight:800; letter-spacing:3px; line-height:1.15; color:#ffd76a;}
+.cap.lab { font-size:11px; color:rgba(255,255,255,.72);}
+.cap.locker { font-size:12.5px; color:#ffd76a; font-weight:600;}
+.tag { position:absolute; right:12px; font-size:11px; color:rgba(255,255,255,.85); background:rgba(0,0,0,.3); padding:4px 9px; border-radius:999px;}
+.note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06);}
+.note b { color:#1c2434;}
+</style>
+</head>
+<body>
+<div class="banner">⚠ 验证码胶囊优化 · 设计预览<br>码直接上胶囊脸，不用展开卡片</div>
+
+<h3>现状 <span>胶囊上有码，但是小字跟标签挤一行</span></h3>
+<div class="stage">
+<div class="clock">11:52</div>
+<div class="cap old">
+<div class="ic" style="background:#3b82f6">信</div>
+<div class="tt"><div class="t1">短信</div><div class="t2">验证码:835201</div></div>
+</div>
+<div class="tag" style="top:118px">码在第二行 · 小字</div>
+</div>
+
+<h3>新版 · 验证码 <span>第二行就是大码</span></h3>
+<div class="stage">
+<div class="clock">11:52</div>
+<div class="cap new" style="top:104px">
+<div class="ic" style="background:#3b82f6">信</div>
+<div class="tt"><div class="lab">短信 · 验证码</div><div class="code">835 201</div></div>
+</div>
+<div class="cap new" style="top:184px">
+<div class="ic" style="background:#22c55e">微</div>
+<div class="tt"><div class="lab">微信 · 验证码</div><div class="code">409 776</div></div>
+</div>
+<div class="tag" style="top:112px">瞥一眼就读完</div>
+</div>
+
+<h3>新版 · 取件码与打码 <span>柜号跟上、敏感场景照旧盖</span></h3>
+<div class="stage tall">
+<div class="clock">11:52</div>
+<div class="cap new" style="top:96px">
+<div class="ic" style="background:#f97316">丰</div>
+<div class="tt"><div class="lab">丰巢 · 取件码</div><div class="code" style="font-size:20px">6-2-1089 <span class="locker">2-01柜</span></div></div>
+</div>
+<div class="cap new" style="top:176px">
+<div class="ic" style="background:#3b82f6">信</div>
+<div class="tt"><div class="lab">短信 · 验证码</div><div class="code" style="color:rgba(255,255,255,.55)">••• •••</div></div>
+</div>
+<div class="tag" style="top:104px">取件码带柜号</div>
+<div class="tag" style="top:184px">锁屏/录屏时自动打码</div>
+</div>
+
+<div class="note"><b>设计要点：</b>① 改动本质是排版升级：现在第二行是小字「验证码:835201」，新版胶囊略长高（52→60dp），第一行小字「应用 · 验证码」，第二行 23sp 粗体码、3 位一组空格分段（如 835 201）方便读；② 取件码同理，码后跟柜号；③ 胶囊原来的点击/展开行为不变，展开卡里的大码保留；④ 自动复制照旧；⑤ 敏感场景（锁屏/录屏/投屏）胶囊上的码照旧变 •••，跟 2.4.5 的打码规则一致；⑥ 只对识别出码的通知生效，普通气泡不变。</div>
+</body>
+</html>

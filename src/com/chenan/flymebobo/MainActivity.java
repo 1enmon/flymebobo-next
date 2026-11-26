@@ -124,6 +124,17 @@ public class MainActivity extends Activity {
             new Feature("notif", "通知气泡", "普通通知的胶囊总开关",
                     "通知变成左贴边胶囊，点一下展开成卡片看全文。\n钉住的胶囊一直留着；没钉住的可以右滑消散、左滑收进扇子。\n永不自动展开。",
                     Color.rgb(59, 130, 246), "泡"),
+            // v539: 回看胶囊——嵌进「通知气泡」卡片里。默认关
+            // （wei 定：主动开关，用户自己开启才有这功能）。
+            // 开着时手动左滑消散的普通气泡收进屏幕左边缘的
+            // 回看栈（最多最近 5 条、停 3 分钟），点边缘把手
+            // 逐个原样重弹；自动消散、点开、被新气泡顶掉的不
+            // 收，音乐/下载/实况/导航/来电不收。重弹照样过
+            // 场景/静默的门（排队），不绕过；重弹的再划掉不
+            // 再入栈。实现在 BubbleWindow（回看栈 + 把手窗）。
+            new Feature("recallCapsule", "回看胶囊", "划掉的气泡留个边缘入口，可重新弹出",
+                    "默认关，自己开启才生效。\n开着时，手动划掉（左滑消散）的普通气泡会收进屏幕左边缘的回看胶囊：最多留最近 5 条，停 3 分钟没人点就自动清掉。\n点边缘把手，划掉的气泡逐个原样重新弹出；重弹的气泡再划掉不会再收。\n自动消散、点开、被新气泡顶掉的不收；音乐、下载、实况、导航、来电不收。",
+                    Color.rgb(59, 130, 246), "回", false, "notif"),
             // v536: 提示音升为「通知气泡」卡下面的一张独立展开
             // 卡（buildSoundCard 手工挂，parent 记 "soundcard"
             // 只为不占顶层行、也不被任何顶层卡按 parent 自动
@@ -151,6 +162,15 @@ public class MainActivity extends Activity {
             new Feature("code", "验证码与隐私", "验证码、取件码和隐私打码",
                     "识别出验证码自动复制到剪贴板，取件码自动钉住不消散。\n胶囊只显示大字码、不带标题；智能柜的柜号一起显示，中英文都认。",
                     Color.rgb(34, 197, 94), "码"),
+            // v540: 自动复制验证码开关（wei 要求）——v244 起
+            // 验证码一直是无条件自动复制，这次给个开关。默认
+            // 开（= 现状）；关掉后验证码只显示、不写剪贴板。
+            // 排在「敏感打码」分区标题之前（码本身那一区）。
+            // 「验证码与隐私」总开关（code）关时此行置灰
+            // （refreshCodeLinkage）。
+            new Feature("autoCopyCode", "自动复制验证码", "验证码一到就复制到剪贴板",
+                    "开着（默认）：识别出验证码，胶囊弹出的同时把码复制到剪贴板，切过去直接粘贴。\n关掉：验证码只显示、不复制，剪贴板保持原样。\n取件码本来就不自动复制，不受这个开关管。",
+                    Color.rgb(34, 197, 94), "复", true, "code"),
             // v524: 敏感打码——嵌进“验证取件码”卡片里。总开关 +
             // 锁屏、录屏/投屏两个分开关（用户 2026-11-26 “1得加
             // 开关”）。开着时锁屏/录屏/投屏状态下验证码、取件码
@@ -419,6 +439,10 @@ public class MainActivity extends Activity {
     // v528: 敏感打码联动（总开关 mask 依附关系）用的子行/子开关引用。
     private final Map<String, View> maskChildRows = new HashMap<>();
     private final Map<String, View> maskChildSwitches = new HashMap<>();
+    // v540: 「自动复制验证码」行与开关——「验证码与隐私」
+    // 总开关（code）关时置灰联动（refreshCodeLinkage）。
+    private View autoCopyCodeRow;
+    private View autoCopyCodeSwitch;
     // v534: 气泡提示音开关（通知气泡总开关联动置灰用）。
     // v537: 开关在展开区第一行（buildSoundMasterRow），
     // 还是这个引用。
@@ -3108,13 +3132,34 @@ public class MainActivity extends Activity {
 
     /** v531: 在设置里拨开「场景模式」开关时播的 B 版全屏
      * 动画（wei 拍板：开关动画用全屏版；进游戏时 SystemUI
-     * 侧播同款，两个触发点视觉完全一致）。关开关不播。 */
+     * 侧播同款，两个触发点视觉完全一致）。关开关不播。
+     * v541: 与 SystemUI 的进/出场景动画共用 30 分钟冷却
+     * （SceneAnimCooldown），冷却中只跳动画、开关照常生效；
+     * 真播了才记时间并广播给 SystemUI 同步。 */
     private void showSceneStartAnim() {
-        showFullscreenAnim(SilenceAnim.SCENE,
+        long remain = SceneAnimCooldown.remainingMs();
+        if (remain > 0) {
+            FileLog.i("SceneAnim cooldown skip (settings), "
+                    + (remain / 60000) + " min left");
+            return;
+        }
+        boolean played = showFullscreenAnim(SilenceAnim.SCENE,
                 SilenceAnim.subtitleScene());
+        if (played) {
+            long ts = SceneAnimCooldown.markPlayed();
+            try {
+                Intent i = new Intent(
+                        NotificationService.ACTION_SCENE_ANIM);
+                i.putExtra("ts", ts);
+                sendBroadcast(i);
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
-    private void showFullscreenAnim(SilenceAnim.Style style,
+    /** v541: 返回是否真的把动画播出去了（showSceneStartAnim
+     * 靠它决定记不记冷却时间）；老调用方忽略返回值。 */
+    private boolean showFullscreenAnim(SilenceAnim.Style style,
             String subtitle) {
         try {
             final ViewGroup decor =
@@ -3142,8 +3187,10 @@ public class MainActivity extends Activity {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
             h.play();
+            return true;
         } catch (Throwable ignored) {
         }
+        return false;
     }
 
     // ================= 应用名单（卡内） =================
@@ -3767,6 +3814,10 @@ public class MainActivity extends Activity {
         addSearch("通知气泡", "胶囊类型", "通知 气泡 胶囊 贴边 总开关",
                 topCardViews.size() > 0 ? topCardViews.get(0) : null,
                 null);
+        // v539: 回看胶囊是通知气泡卡里的子开关。
+        addSearch("回看胶囊", "通知气泡 › 回看胶囊",
+                "回看 错过 历史 找回 划掉 恢复",
+                subRowViews.get("recallCapsule"), "notif");
         // v536: 提示音是主页展开卡（贴着通知气泡卡），搜索
         // 展开这张卡定位（同安静规则条目的做法）。
         addSearch("气泡提示音", "胶囊类型 › 气泡提示音",
@@ -3797,6 +3848,9 @@ public class MainActivity extends Activity {
                 "验证码 取件码 复制 钉住 柜号 快递 短信码 隐私",
                 topCardViews.size() > 3 ? topCardViews.get(3) : null,
                 null);
+        addSearch("自动复制验证码", "验证码与隐私 › 自动复制验证码",
+                "复制 剪贴板 自动复制 验证码 粘贴",
+                subRowViews.get("autoCopyCode"), "code");
         addSearch("敏感打码", "验证码与隐私 › 敏感打码",
                 "打码 验证码 锁屏 录屏 投屏 隐私 隐藏 码 敏感",
                 subRowViews.get("mask"), "code");
@@ -4242,8 +4296,10 @@ public class MainActivity extends Activity {
         }
         // v528: 验证码与隐私卡——子行都建完后，刷一次敏感打码
         // 总开关与三个子开关的初始联动状态。
+        // v540: 同理刷一次自动复制行的初始联动状态。
         if ("code".equals(f.key)) {
             refreshMaskLinkage();
+            refreshCodeLinkage();
         }
         // v534: 通知气泡卡——子行建完后刷一次提示音的初始联动。
         if ("notif".equals(f.key)) {
@@ -4397,6 +4453,9 @@ public class MainActivity extends Activity {
                 || "maskApps".equals(sub.key)) {
             maskChildRows.put(sub.key, row);
         }
+        if ("autoCopyCode".equals(sub.key)) {
+            autoCopyCodeRow = row;
+        }
         wrap.addView(row);
         return wrap;
     }
@@ -4457,6 +4516,9 @@ public class MainActivity extends Activity {
                 || "maskRecord".equals(f.key)
                 || "maskApps".equals(f.key)) {
             maskChildSwitches.put(f.key, sw);
+        }
+        if ("autoCopyCode".equals(f.key)) {
+            autoCopyCodeSwitch = sw;
         }
         sw.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -4545,6 +4607,11 @@ public class MainActivity extends Activity {
                 // PrivacyMask 本来就是总开关 AND 子开关）。
                 if ("mask".equals(f.key)) {
                     refreshMaskLinkage();
+                }
+                // v540: 「验证码与隐私」是自动复制的总开关——
+                // 拨它时同步刷新自动复制行的置灰/可点状态。
+                if ("code".equals(f.key)) {
+                    refreshCodeLinkage();
                 }
                 // v534: 通知气泡是提示音的总开关——拨它时同步
                 // 刷新提示音行的置灰/可点状态（联动，wei 定）。
@@ -5029,6 +5096,23 @@ public class MainActivity extends Activity {
                 row.setAlpha(link
                         ? (isOn(k) ? 1f : 0.45f) : 0.45f);
             }
+        }
+    }
+
+    /** v540: 「验证码与隐私」总开关（code）是「自动复制
+     * 验证码」的总开关（wei 的联动规矩，与打码同理）：
+     * 总开关关 → 自动复制行置灰且开关不可点；总开关开 →
+     * 按自动复制自己的标志位恢复。行为层 BubbleWindow
+     * 本来就先过 code 功能门（关了验证码根本不识别），
+     * 这里只补 UI 联动。 */
+    private void refreshCodeLinkage() {
+        boolean link = isOn("code");
+        if (autoCopyCodeSwitch != null) {
+            autoCopyCodeSwitch.setEnabled(link);
+        }
+        if (autoCopyCodeRow != null) {
+            autoCopyCodeRow.setAlpha(link
+                    ? (isOn("autoCopyCode") ? 1f : 0.45f) : 0.45f);
         }
     }
 

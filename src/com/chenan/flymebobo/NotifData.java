@@ -41,6 +41,12 @@ public class NotifData {
      * UPDATE (like music), not a duplicate. Set by the hook after
      * construction. */
     public boolean isLive;
+    /** v539: true once this snapshot has been re-popped from
+     * the recall stack （回看胶囊）. A recalled capsule swiped
+     * away again must NOT re-enter the stack (no infinite
+     * recall loop). Set by BubbleWindow when the recall handle
+     * re-delivers it. */
+    public boolean recalled;
     /** v311: Amap live navigation capsule (foot/ride) — turn +
      * distance from the Amap hook, not from a notification.
      * Auto-pins on pop like a download. Set by BubbleWindow

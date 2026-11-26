@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>边缘回看胶囊 · 预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  .stage { position:relative; width:100%; max-width:392px; height:520px; border-radius:26px; overflow:hidden; box-shadow:0 10px 30px rgba(30,40,60,.22); background:linear-gradient(160deg,#8fb573 0%,#5d8a63 45%,#33523f 100%); }
+  .clock { position:absolute; top:52px; left:0; right:0; text-align:center; color:rgba(255,255,255,.92); font-size:50px; font-weight:200; }
+  .date { position:absolute; top:112px; left:0; right:0; text-align:center; color:rgba(255,255,255,.75); font-size:13px; }
+  .icons { position:absolute; left:20px; right:20px; bottom:64px; display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+  .icons i { display:block; height:50px; border-radius:14px; background:rgba(255,255,255,.25); }
+  /* notification capsule */
+  .cap { position:absolute; left:10px; top:180px; width:238px; height:52px; border-radius:26px; background:rgba(28,32,44,.88); display:flex; align-items:center; gap:9px; padding:0 14px 0 6px; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.35); transform:translateX(-115%); transition:transform .45s cubic-bezier(.22,1.2,.36,1), opacity .3s; z-index:10; }
+  .cap.in { transform:translateX(0); }
+  .cap.away { transform:translateX(-115%); opacity:.4; }
+  .cap .ic { width:40px; height:40px; border-radius:50%; background:#22c55e; display:flex; align-items:center; justify-content:center; font-size:16px; flex:none; }
+  .cap .tt { flex:1; min-width:0; }
+  .cap .t1 { font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cap .t2 { font-size:12px; color:rgba(255,255,255,.72); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cap .x { font-size:15px; color:rgba(255,255,255,.65); padding:6px 2px; cursor:pointer; flex:none; }
+  /* recall tab */
+  .tab { position:absolute; left:0; top:252px; width:26px; height:76px; border-radius:0 14px 14px 0; background:rgba(28,32,44,.82); color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; cursor:pointer; transform:translateX(-110%); transition:transform .4s cubic-bezier(.22,1.2,.36,1), opacity .5s; z-index:9; box-shadow:4px 6px 18px rgba(0,0,0,.3); }
+  .tab.in { transform:translateX(0); }
+  .tab.fade { opacity:0; pointer-events:none; }
+  .tab .arr { font-size:13px; }
+  .tab .n { font-size:12px; font-weight:700; background:#ff7847; border-radius:999px; min-width:17px; height:17px; display:flex; align-items:center; justify-content:center; padding:0 4px; }
+  .tab .lb { font-size:9.5px; color:rgba(255,255,255,.75); writing-mode:vertical-rl; letter-spacing:2px; }
+  .hint { position:absolute; left:0; right:0; bottom:14px; text-align:center; color:rgba(255,255,255,.85); font-size:12.5px; text-shadow:0 1px 6px rgba(0,0,0,.4); padding:0 20px; line-height:1.6; }
+  .ctl { width:100%; max-width:392px; display:flex; gap:8px; margin-top:12px; }
+  .ctl button { flex:1; border:none; border-radius:999px; padding:11px 4px; font-size:13.5px; font-weight:600; cursor:pointer; background:#1c2434; color:#fff; }
+  .ctl button.sub { background:#fff; color:#1c2434; box-shadow:0 2px 8px rgba(30,40,60,.08); }
+  .ctl button:disabled { opacity:.35; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 边缘回看胶囊 · 设计预览<br>按顺序点下面三个按钮，走一遍完整流程</div>
+
+  <div class="stage">
+    <div class="clock">11:45</div>
+    <div class="date">11月26日 星期四</div>
+    <div class="cap" id="cap">
+      <div class="ic" id="capIc">微</div>
+      <div class="tt"><div class="t1" id="capT1">微信 · 小陈</div><div class="t2" id="capT2">在吗？文件发我一下</div></div>
+      <div class="x" id="capX">✕</div>
+    </div>
+    <div class="tab" id="tab"><span class="arr">↩</span><span class="n" id="tabN">1</span><span class="lb">回看</span></div>
+    <div class="icons"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="hint" id="hint">第 1 步：先点「来一条消息」</div>
+  </div>
+
+  <div class="ctl">
+    <button id="btnNew">① 来一条消息</button>
+    <button class="sub" id="btnTab" disabled>③ 点回看胶囊</button>
+  </div>
+
+  <div class="note"><b>规则（示意，可改）：</b>① 只有<b>手动划掉</b>的气泡进回看（自动消散的不进，默认它已经看够了）；② 回看胶囊贴左边缘，带数字角标，最多存最近 <b>5 条</b>，停留 <b>3 分钟</b>没人点就自己淡走；③ 点它逐个重弹，点开或划掉都算处理完，角标递减，弹完胶囊消失；④ 重弹时划掉的<b>不再入栈</b>，不会无限循环；⑤ 带开关，老规矩。</div>
+
+<script>
+  var msgs = [
+    { ic:'微', bg:'#22c55e', t1:'微信 · 小陈', t2:'在吗？文件发我一下' },
+    { ic:'淘', bg:'#f97316', t1:'淘宝', t2:'你的包裹已到达驿站' },
+    { ic:'信', bg:'#3b82f6', t1:'短信 · 银行', t2:'尾号 8848 消费 32.00 元' }
+  ];
+  var idx = 0, stack = [], current = null;
+  var cap = document.getElementById('cap'), tab = document.getElementById('tab');
+  var hint = document.getElementById('hint');
+  var btnNew = document.getElementById('btnNew'), btnTab = document.getElementById('btnTab');
+  var fadeTimer = null;
+
+  function showCap(m) {
+    current = m;
+    document.getElementById('capIc').textContent = m.ic;
+    document.getElementById('capIc').style.background = m.bg;
+    document.getElementById('capT1').textContent = m.t1;
+    document.getElementById('capT2').textContent = m.t2;
+    cap.classList.remove('away'); cap.classList.add('in');
+  }
+  function syncTab() {
+    document.getElementById('tabN').textContent = stack.length;
+    if (stack.length > 0) {
+      tab.classList.add('in'); tab.classList.remove('fade');
+      btnTab.disabled = false;
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(function () { tab.classList.add('fade'); hint.textContent = '（示意）3 分钟没人点，回看胶囊自己淡走，栈清空'; stack = []; btnTab.disabled = true; }, 25000);
+    } else {
+      tab.classList.remove('in'); btnTab.disabled = true;
+    }
+  }
+  btnNew.addEventListener('click', function () {
+    if (cap.classList.contains('in')) return;
+    showCap(msgs[idx % msgs.length]); idx++;
+    hint.textContent = '第 2 步：点气泡右边的 ✕ 把它划掉（模拟手势划走）';
+  });
+  document.getElementById('capX').addEventListener('click', function () {
+    if (!current) return;
+    cap.classList.add('away'); cap.classList.remove('in');
+    if (!current.recalled) { stack.unshift(current); if (stack.length > 5) stack.pop(); }
+    current = null;
+    setTimeout(function () { cap.classList.remove('away'); }, 480);
+    syncTab();
+    hint.textContent = stack.length ? '气泡进了回看栈 — 左边缘多了个小胶囊，角标是积压条数。再来一条，或者点「③ 点回看胶囊」' : hint.textContent;
+  });
+  function recall() {
+    if (!stack.length || cap.classList.contains('in')) return;
+    var m = stack.pop(); m.recalled = true;
+    showCap(m); syncTab();
+    hint.textContent = '重弹出来了 — 跟新气泡一样能点开、能划掉；划掉不再入栈。栈里还剩 ' + stack.length + ' 条';
+  }
+  btnTab.addEventListener('click', recall);
+  tab.addEventListener('click', recall);
+</script>
+</body>
+</html>

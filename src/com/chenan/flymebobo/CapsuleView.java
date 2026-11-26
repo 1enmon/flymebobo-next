@@ -39,6 +39,10 @@ public class CapsuleView extends FrameLayout {
      * 接听钮 40dp、计时 16sp）。 */
     public static final int CALL_WIDTH_DP = 240;
     public static final int CALL_HEIGHT_DP = 60;
+    /** v540: 带码胶囊高度——验证码/取件码胶囊改两行排版
+     * （小字应用名·标签 + 23sp 大码）后，52dp 装不下，定为
+     * 60dp。只对识别出码的胶囊生效，普通胶囊仍走外观高度。 */
+    public static final int CODE_HEIGHT_DP = 60;
     /** 平板判定：最小宽度 >= 600dp 即平板。 */
     public static boolean isTablet(Context ctx) {
         return ctx.getResources().getConfiguration().smallestScreenWidthDp >= 600;
@@ -78,6 +82,10 @@ public class CapsuleView extends FrameLayout {
         if (d != null && d.isMusic) {
             return Appearance.musicCapsuleHeightDp;
         }
+        // v540: 带码胶囊固定 60dp（两行新排版）。
+        if (d != null && d.code != null) {
+            return CODE_HEIGHT_DP;
+        }
         return Appearance.capsuleHeightDp;
     }
 
@@ -104,6 +112,10 @@ public class CapsuleView extends FrameLayout {
         }
         if (data != null && data.isMusic) {
             return Appearance.musicCapsuleHeightDp;
+        }
+        // v540: 带码胶囊固定 60dp（两行新排版）。
+        if (data != null && data.code != null) {
+            return CODE_HEIGHT_DP;
         }
         return Appearance.capsuleHeightDp;
     }
@@ -2347,6 +2359,77 @@ public class CapsuleView extends FrameLayout {
         return d.code;
     }
 
+    /** v540: 胶囊脸上的码排版（wei 2026-11-26 审过的修正版
+     * 预览）：纯数字 6 位按 3+3 分段（"835 201"），一眼读
+     * 完；4 位不分段；其他长度、含字母数字的码、带分隔符
+     * 的取件码（"6-2-1089"）都按原始形态显示，不硬切。 */
+    public static String formatCodeDigits(String code) {
+        if (code == null) {
+            return "";
+        }
+        if (code.length() == 6 && isAllDigits(code)) {
+            return code.substring(0, 3) + " " + code.substring(3);
+        }
+        return code;
+    }
+
+    private static boolean isAllDigits(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** v540: 打码时胶囊第二行的圆点：纯数字 6 位同样 3+3
+     * 分段（"••• •••"），其余按码长逐字圆点（与
+     * PrivacyMask.maskedCodeLine 的计数口径一致）。标签
+     * 已经挪到第一行，第二行不再带标签。 */
+    private static String maskedCodeDots(String code) {
+        if (code != null && code.length() == 6 && isAllDigits(code)) {
+            return "••• •••";
+        }
+        int n = (code != null && !code.isEmpty()) ? code.length() : 6;
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            b.append('•');
+        }
+        return b.toString();
+    }
+
+    /** v540: 胶囊第二行完整文本：大码（或打码圆点）+ 柜号。
+     * 柜号跟在码后同行、字号小一号（15sp，码是 23sp），
+     * 用 AbsoluteSizeSpan 压小，" · " 分隔跟柜号一起压。 */
+    private CharSequence codeCapsuleLine(NotifData d, boolean masked) {
+        String main = masked
+                ? maskedCodeDots(d.code)
+                : formatCodeDigits(d.code);
+        if (d.cabinet == null) {
+            return main;
+        }
+        android.text.SpannableStringBuilder b =
+                new android.text.SpannableStringBuilder(main);
+        int start = b.length();
+        b.append(" · ").append(d.cabinet);
+        b.setSpan(new android.text.style.AbsoluteSizeSpan(15, true),
+                start, b.length(),
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        return b;
+    }
+
+    /** v540: 胶囊第一行（小字）：应用名 + "·" + 码标签。
+     * 用应用名不用通知标题——标题本身可能含码，打码与否
+     * 都不该原样上脸（v524 的防泄漏口径并到这里）。 */
+    private String codeTitleLine(NotifData d) {
+        String label = (d.codeLabel != null && !d.codeLabel.isEmpty())
+                ? d.codeLabel : "验证码";
+        return loadAppName(d.pkg) + " · " + label;
+    }
+
     public void bind(NotifData notifData) {
         // v447: 同一通来电重绑时别把已接听状态清掉——来电通知会
         // 重发，bind() 每次都把 callAnswered/collapsedToTimer
@@ -2384,36 +2467,33 @@ public class CapsuleView extends FrameLayout {
         // show "验证码 123456" / "取餐码 4821" as line 2
         // instead of the full sentence.
         if (notifData.code != null) {
-            // v246/v247: a code is the whole point of the capsule
-            // — show ONLY the code, enlarged. Verification: just
-            // the digits. Pickup: digits + cabinet when there is
-            // one ("070797 · 2-01柜" / "173351 · 第17箱").
-            // No label, no sentence (user 2026-11-21 "识别到验证
-            // 码后胶囊也只显示验证码" / "加大显示" / "取件码
-            // 这些也显示啊").
-            // v463（用户 2026-11-23 "显示成 xx码:xxxxx"）：
-            // 不直接显示裸码，显示成标签 + 冒号 + 码——
-            // "验证码:123456" / "取件码:070797"，取件码有柜号
-            // 的还带上（"取件码:070797 · 2-01柜"）。
-            // v524: 敏感打码——锁屏/录屏/投屏时只显示
-            // 「验证码 ••••••」，不露码（柜号照常显示）。
+            // v540: 排版升级（wei 2026-11-26 审过的修正版预览，
+            // 取代 v246/v463 的一行「验证码:123456」小字）：
+            // 两行——第一行小字「应用名 · 验证码」，第二行
+            // 23sp 粗体大码（纯数字 6 位 3+3 分段，柜号跟码
+            // 后同行、字号小一号），胶囊高随之 60dp
+            // （heightDpFor/baseHeightDp 的 code 分流）。
+            // v524 打码：第二行换分段圆点、不露码（柜号照旧
+            // 显示）；第一行是应用名+标签，不涉密，照旧。
+            // 展开卡里的大码仍走 formatCodeLabel，不动。
             boolean maskCode = PrivacyMask.shouldMask(getContext());
-            String line2 = maskCode
-                    ? PrivacyMask.maskedCodeLine(notifData)
-                    : formatCodeLabel(notifData);
-            if (!maskCode && notifData.isPickupCode
-                    && notifData.cabinet != null) {
-                line2 += " · " + notifData.cabinet;
-            }
-            this.textView.setText(line2);
+            this.titleView.setText(codeTitleLine(notifData));
+            this.titleView.setTextSize(
+                    TypedValue.COMPLEX_UNIT_SP, 11f);
+            this.titleView.setTypeface(
+                    this.titleView.getTypeface(),
+                    android.graphics.Typeface.NORMAL);
+            this.textView.setText(
+                    codeCapsuleLine(notifData, maskCode));
             // v395: a reused view may have had the line hidden
             // (empty text) — a code always shows.
             this.textView.setVisibility(VISIBLE);
             this.textView.setTextSize(
-                    TypedValue.COMPLEX_UNIT_SP, 20f);
+                    TypedValue.COMPLEX_UNIT_SP, 23f);
             this.textView.setTypeface(
                     this.textView.getTypeface(),
                     android.graphics.Typeface.BOLD);
+            this.textView.setLetterSpacing(0.08f);
         } else {
             this.textView.setText(notifData.text != null ? notifData.text : "");
             // v395: an empty second line takes no space — a call
@@ -2428,11 +2508,18 @@ public class CapsuleView extends FrameLayout {
                             ? GONE : VISIBLE);
             // v246: reset size/weight — a CapsuleView reused
             // after a code capsule must not keep 20sp bold.
+            // v540: 一并复位 23sp/字距和标题行的 11sp 常规体。
             this.textView.setTextSize(
                     TypedValue.COMPLEX_UNIT_SP, 12f);
             this.textView.setTypeface(
                     this.textView.getTypeface(),
                     android.graphics.Typeface.NORMAL);
+            this.textView.setLetterSpacing(0f);
+            this.titleView.setTextSize(
+                    TypedValue.COMPLEX_UNIT_SP, 13f);
+            this.titleView.setTypeface(
+                    this.titleView.getTypeface(),
+                    android.graphics.Typeface.BOLD);
         }
         this.lyricsView.setText(
                 notifData.lyrics != null ? notifData.lyrics : "");
@@ -2643,13 +2730,10 @@ public class CapsuleView extends FrameLayout {
         // v524: 打码的胶囊标题显示应用名——通知标题本身可能含码
         // （"您的验证码是 123456"），不能原样放出来。应用名 +
         // 「验证码 ••••••」，跟预览定案一致。
-        if (notifData.code != null
-                && PrivacyMask.shouldMask(getContext())) {
-            if (titleView != null) {
-                titleView.setText(loadAppName(notifData.pkg));
-                titleView.setVisibility(VISIBLE);
-            }
-        }
+        // v540: 这块覆盖已撤——bind 的 code 分支现在无论打码
+        // 与否都把标题设成「应用名 · 标签」（codeTitleLine，
+        // 永不用通知标题原文），防泄漏口径不变，不需要再在
+        // 这里按打码状态单独覆盖一遍。
         // v526: 普通应用也打码——开关开着且打码场景生效时，
         // 普通通知胶囊也只显示应用名 +「内容已隐藏」，标题
         // 正文不露（与验证码打码同一套场景判定）。跟上面码
@@ -3314,10 +3398,10 @@ public class CapsuleView extends FrameLayout {
         // shows only the enlarged code (user 2026-11-21 "如果识
         // 别出了取件码或者验证码，胶囊就不要标题了，直接显示验
         // 证码就行了").
-        boolean showCode = data != null && data.code != null;
+        // v540: 两行排版后标题行回归——显示小字「应用名 ·
+        // 标签」（bind 的 code 分支设），不再藏。
         lyricsRoll.setVisibility(showLyrics ? VISIBLE : GONE);
-        titleView.setVisibility(
-                (showLyrics || showCode) ? GONE : VISIBLE);
+        titleView.setVisibility(showLyrics ? GONE : VISIBLE);
         textView.setVisibility(showLyrics ? GONE : VISIBLE);
         if (showLyrics) {
             // Re-select so the marquee restarts on every rebind.
