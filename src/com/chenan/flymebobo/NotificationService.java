@@ -1176,6 +1176,7 @@ public class NotificationService extends NotificationListenerService {
             Intent intent = new Intent(ACTION_LYRIC);
             intent.putExtra("key", this.musicKey);
             intent.putExtra("lyrics", lyric);
+            intent.putExtra("lyricSrc", lyricSrc);
             try {
                 sendBroadcast(intent);
             } catch (Throwable th) {

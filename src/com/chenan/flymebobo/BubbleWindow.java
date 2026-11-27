@@ -11295,10 +11295,17 @@ public class BubbleWindow {
         });
     }
 
-    public void updateMusicLyric(final String key, final String lyric) {
+    public void updateMusicLyric(final String key, final String lyric,
+            final String lyricSrc) {
         if (key == null || lyric == null) {
             return;
         }
+        // v617: 歌词来源记在 SystemUI 侧——NS 进程的
+        // FileLog 不落这个文件（两份日志实测零条），
+        // 来源随 ACTION_LYRIC 广播带过来在这边记。
+        FileLog.i("Lyric line src="
+                + (lyricSrc == null ? "unknown" : lyricSrc)
+                + " -> " + lyric);
         handler.post(new Runnable() {
             @Override
             public void run() {

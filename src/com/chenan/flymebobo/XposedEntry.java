@@ -1102,7 +1102,10 @@ public class XposedEntry extends XposedModule {
                         intent.getAction())) {
                     String key = intent.getStringExtra("key");
                     String lyrics = intent.getStringExtra("lyrics");
-                    BubbleWindow.getInstance().updateMusicLyric(key, lyrics);
+                    String lyricSrc =
+                            intent.getStringExtra("lyricSrc");
+                    BubbleWindow.getInstance().updateMusicLyric(
+                            key, lyrics, lyricSrc);
                     return;
                 }
                 // Incoming / ongoing call (v103).
