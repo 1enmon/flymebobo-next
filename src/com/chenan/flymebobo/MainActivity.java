@@ -1096,13 +1096,11 @@ public class MainActivity extends Activity {
         root.addView(guideBtn);
         searchTargets.put("guide", guideBtn);
 
-        // v572: 轻气泡下换三栏外壳（收纳 / 时光机 / 设置），
-        // 设置页就是上面建好的这张滚动页，整体搬进第三栏。
-        if (lightUi) {
-            setContentView(buildLightShell(scroll));
-        } else {
-            setContentView(scroll);
-        }
+        // v572: 轻气泡下曾换三栏外壳（收纳 / 时光机 /
+        // 设置）。v594: wei 定——App 里去掉收纳与时光机
+        // 两页，只要设置页（三栏外壳与镜像页代码留树里
+        // 停用，面板里的收纳/时光机不受影响）。
+        setContentView(scroll);
         // v572: 切换动画的入场衔接——新页先盖一层新底色，
         // 380ms 淡出，落点与动画的漫换色不断层。
         if (pendingModeAnimIn) {
@@ -1415,29 +1413,8 @@ public class MainActivity extends Activity {
                 && quietBody.getVisibility() == View.VISIBLE) {
             startQuietTicker();
         }
-        // v572: 轻气泡三栏——回前台先按镜像刷一遍，再挂广播
-        // 收实时变化（SystemUI 每次写镜像都会广播）。
-        if (lightUi) {
-            refreshLightMirrorViews();
-            if (lightMirrorReceiver == null) {
-                lightMirrorReceiver =
-                        new android.content.BroadcastReceiver() {
-                            @Override
-                            public void onReceive(
-                                    android.content.Context c,
-                                    Intent i) {
-                                refreshLightMirrorViews();
-                            }
-                        };
-                try {
-                    registerReceiver(lightMirrorReceiver,
-                            new android.content.IntentFilter(
-                                    BubbleWindow.ACTION_LIGHT_MIRROR),
-                            android.content.Context.RECEIVER_EXPORTED);
-                } catch (Throwable ignored) {
-                }
-            }
-        }
+        // v594: 收纳/时光机两页已撤，镜像广播不再订阅
+        // （v572 的注册块停用）。
     }
 
 
