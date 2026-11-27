@@ -1230,7 +1230,7 @@ public class BubbleWindow {
      * （聊天通知的标题就是对方名字或群名）。 */
     private static String burstSenderKey(NotifData data) {
         String who = data.title == null ? "" : data.title.trim();
-        return data.pkg + "" + who;
+        return data.pkg + "\u0001" + who;
     }
 
     /** v555: 突破只管普通通知——来电/音乐/下载/实况/导航/
@@ -1520,12 +1520,18 @@ public class BubbleWindow {
     // 立即停闪（wei：点开后立即收纳、不要再继续闪烁）。
     private String lightFlashKey;
     private String lightSubFlashKey;
+    // v611: AI 摘要循环闪（wei 定：摘要完成了就发出
+    // 摘要通知一直闪；打开面板才停；放歌跟词时不显
+    // 示——歌词优先，音乐停了/词关了再接着闪）。
+    private String lightAiFlashText;
+    private boolean lightAiPillShowing;
     private final Runnable lightPulseEndRunnable = new Runnable() {
         @Override
         public void run() {
             boolean wasArrival = lightFlashKey != null;
             lightPulsing = false;
             lightFlashKey = null;
+            lightAiPillShowing = false;
             if (lightPill != null) {
                 lightPill.setVisibility(View.GONE);
             }
@@ -1543,6 +1549,9 @@ public class BubbleWindow {
                     && !"找不到当前歌词".equals(lightMusicLyric)) {
                 flashLightLyricPill(lightMusicLyric);
             }
+            // v611: AI 摘要续闪——没被到达/歌词占住就
+            // 接着闪（放歌跟词时 maybe 里让路、不闪）。
+            maybeFlashLightSummary();
         }
     };
     // 收纳面板（根=全屏透明层，盒在小签同侧）。
@@ -1598,6 +1607,41 @@ public class BubbleWindow {
     private final java.util.HashMap<String,
             android.widget.TextView> lightDlPcts =
                     new java.util.HashMap<>();
+    // v599: 每张下载卡最后一次拿到新数据的时间（防僵
+    // 尸卡清扫用，见 sweepStaleLightDownloads）。
+    private final java.util.HashMap<String, Long>
+            lightDlSeen = new java.util.HashMap<>();
+    // v600: 轻气泡 AI（摘要+打标）——SystemUI 只管发
+    // 请求与渲染：收纳栈变化（签名变）才广播给 App
+    // 进程分析，结果回来存这里。标签值 suspect /
+    // promo / important，按通知 key 存。
+    private String lightAiSummary;
+    private final java.util.HashMap<String, String>
+            lightAiTags = new java.util.HashMap<>();
+    private String lightAiReqSig;
+    private Runnable lightAiDebounce;
+    // v601: 信息卡片（本地解析）——收纳到的普通通知里
+    // 认出火车票/机票/快递/账单的，在面板里成票面卡
+    // 替代普通行（同码卡片口径）。按解析 id 存卡，
+    // 另存通知 key -> 卡 id（行跳过、打开/移除联动）。
+    // 持久化到 /sdcard/flymebobo/info_cards.txt，
+    // SystemUI 重启后恢复（源通知可能已不在栈里，卡
+    // 独立显示，靠卡上「删除」收）。
+    private final java.util.LinkedHashMap<String,
+            InfoParse.Card> lightInfoCards =
+                    new java.util.LinkedHashMap<>();
+    private final java.util.HashMap<String, String>
+            lightInfoKeyToId = new java.util.HashMap<>();
+    private boolean lightInfoLoaded;
+    // v605: 信息卡 AI 兜底+核对（wei 定：开了 AI 就
+    // 启用，本地+AI 同时核对）——待核对队列（防抖批
+    // 发）、已核对签名（key@postTime，防重复烧钱）。
+    private final java.util.LinkedHashMap<String,
+            NotifData> lightInfoAiPending =
+                    new java.util.LinkedHashMap<>();
+    private final java.util.HashSet<String>
+            lightInfoAiChecked = new java.util.HashSet<>();
+    private Runnable lightInfoAiDebounce;
     // v593: 码卡片倒计时（原文写了有效期才有）的活引
     // 用与到期点，按 key 存，面板开时 1 秒一刷。
     private final java.util.HashMap<String,
@@ -1882,8 +1926,16 @@ public class BubbleWindow {
         }
         FileLog.i("Light collect pkg=" + d.pkg
                 + " n=" + lightStack.size());
+        maybeMakeInfoCard(d);
         refreshLightDot();
-        flashLightPill(d);
+        // v595: wei 定——安静规则设了「收纳」(EDGE，含走
+        // 「全部应用」默认落到收纳的）的新通知直接进面
+        // 板、只提示角标，不闪药丸；跟随的照旧闪。
+        if (AppRules.modeFor(d.pkg) == AppRules.EDGE) {
+            FileLog.i("Light collect quiet pkg=" + d.pkg);
+        } else {
+            flashLightPill(d);
+        }
         if (lightPanelAdded && !lightPanelRecallMode) {
             rebuildLightPanelRows();
         }
@@ -1919,7 +1971,11 @@ public class BubbleWindow {
         FileLog.i("Light collect(music as notif) pkg="
                 + d.pkg + " n=" + lightStack.size());
         refreshLightDot();
-        flashLightPill(d);
+        // v595: 同 lightCollect——规则是「收纳」的只提
+        // 示角标，不闪药丸。
+        if (AppRules.modeFor(d.pkg) != AppRules.EDGE) {
+            flashLightPill(d);
+        }
         if (lightPanelAdded && !lightPanelRecallMode) {
             rebuildLightPanelRows();
         }
@@ -1959,6 +2015,65 @@ public class BubbleWindow {
         });
     }
 
+    /** v598: 下载文案防闪（wei 录屏逐帧定位）——酷安
+     * 这类源成对重投下载通知：一份全量文案（正在下载
+     * 17% · 327MB/1.9GB）、一份简版（正在下载），卡面
+     * 文案跟着来回跳，看到就是一闪。同一下载的文案只
+     * 许换全、不许变短：新文案比旧的短且是旧的前缀时，
+     * 保留旧文案。 */
+    private static String lightDlTextGuard(String oldT,
+            String newT) {
+        if (newT == null) {
+            return oldT;
+        }
+        if (oldT == null || oldT.isEmpty()) {
+            return newT;
+        }
+        if (newT.length() < oldT.length()
+                && oldT.startsWith(newT)) {
+            return oldT;
+        }
+        return newT;
+    }
+
+    /** v599: 下载僵尸卡清扫（wei 04:29 截图+日志定
+     * 位）——英雄联盟手游这类源 04:00:23 发了一条「0%」
+     * 通知之后再也不更新、也不撤（下载在游戏内走，通
+     * 知是摆设），卡在面板里挂了半小时。规则：超过
+     * 10 分钟没有任何新数据的下载卡直接退休（连同活
+     * 引用与时间戳）；源头真恢复下载会重新发通知，卡
+     * 会自己回来。在 refreshLightDot 与开面板时各扫
+     * 一遍，只动数据不动视图（面板开着时由调用方重
+     * 建）。 */
+    private boolean sweepStaleLightDownloads() {
+        if (lightDownloads.isEmpty()) {
+            return false;
+        }
+        boolean changed = false;
+        long now = android.os.SystemClock.uptimeMillis();
+        java.util.Iterator<String> it =
+                lightDownloads.keySet().iterator();
+        while (it.hasNext()) {
+            String k = it.next();
+            Long seen = lightDlSeen.get(k);
+            if (seen == null) {
+                lightDlSeen.put(k, now);
+                continue;
+            }
+            if (now - seen.longValue() > 10 * 60 * 1000L) {
+                it.remove();
+                lightDlSeen.remove(k);
+                lightDlBars.remove(k);
+                lightDlTitles.remove(k);
+                lightDlTexts.remove(k);
+                lightDlPcts.remove(k);
+                FileLog.i("Light download stale retire");
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     /** v576: 下载进轻气泡——不弹经典胶囊，存进下载表，
      * 面板里当卡片显示（见 buildLightDownloadCard）；进
      * 度细更新走 updateDownloadProgress 的广播，这里只
@@ -1975,13 +2090,16 @@ public class BubbleWindow {
         } else {
             NotifData old = lightDownloads.get(d.key);
             if (old != null && old != d) {
-                old.title = d.title;
-                old.text = d.text;
+                old.title = lightDlTextGuard(old.title,
+                        d.title);
+                old.text = lightDlTextGuard(old.text, d.text);
                 if (d.downloadPct >= 0) {
                     old.downloadPct = d.downloadPct;
                 }
             }
         }
+        lightDlSeen.put(d.key,
+                android.os.SystemClock.uptimeMillis());
         refreshLightDot();
         if (lightPanelAdded && !lightPanelRecallMode) {
             if (isNew) {
@@ -2001,12 +2119,10 @@ public class BubbleWindow {
         if (d == null) {
             return;
         }
-        if (title != null) {
-            d.title = title;
-        }
-        if (text != null) {
-            d.text = text;
-        }
+        d.title = lightDlTextGuard(d.title, title);
+        d.text = lightDlTextGuard(d.text, text);
+        lightDlSeen.put(key,
+                android.os.SystemClock.uptimeMillis());
         if (pct >= 0) {
             d.downloadPct = pct;
         }
@@ -2794,6 +2910,9 @@ public class BubbleWindow {
         if (d == null || !FeatureFlags.lightMode || d.recalled) {
             return;
         }
+        // v601: 进时光机的通知若成过信息卡，卡联动收
+        // （提醒一并取消）。
+        removeInfoCardForKey(d.key);
         if (d.isMusic || d.isDownload || d.isLive || d.isNavi
                 || d.isBus || d.isCall) {
             return;
@@ -3023,6 +3142,9 @@ public class BubbleWindow {
                     // v576: 下载表也清掉，切回轻气泡不复活
                     // 旧下载卡（进行中的下载会重新到达）。
                     lightDownloads.clear();
+                    // v611: 摘要待闪一并清掉，别漏到经典去。
+                    lightAiFlashText = null;
+                    lightAiPillShowing = false;
                     lightMusicArt = null;
                     lightMusicPlaying = false;
                     lightMusicFavorite = false;
@@ -3055,8 +3177,22 @@ public class BubbleWindow {
             }
             return;
         }
-        if (lightStack.isEmpty() && lightMusicData == null
-                && lightDownloads.isEmpty()) {
+        // v601: 信息卡懒加载（重启后恢复一次）。
+        loadLightInfoCards();
+        // v599: 先清扫僵尸下载卡，下面的显隐判断用清
+        // 扫后的表（卡退休了小签该藏就藏）；面板正开
+        // 着时顺手把行重建了。
+        if (sweepStaleLightDownloads() && lightPanelAdded
+                && !lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        }
+        // v597: 常亮（wei 定正：常亮 = 一直显示，不是
+        // 不呼吸）开着时，栈空也不隐藏小签——照常呼吸、
+        // 照常发光，只是永远在。
+        if (!FeatureFlags.lightDotSteady
+                && lightStack.isEmpty() && lightMusicData == null
+                && lightDownloads.isEmpty()
+                && lightInfoCards.isEmpty()) {
             hideLightDot();
             if (lightPanelAdded) {
                 dismissLightPanel();
@@ -3082,6 +3218,670 @@ public class BubbleWindow {
         updateLightBadge();
         startLightBreathing();
         syncLightGlow();
+        maybeRequestAi();
+    }
+
+    /** v600: 收纳栈签名——栈里普通条目（带码的除外）
+     * 的 key+时间拼串哈希，栈一变签名就变。 */
+    private String lightAiSignature() {
+        StringBuilder sb = new StringBuilder();
+        for (NotifData d : lightStack) {
+            if (d.code != null || d.key == null) {
+                continue;
+            }
+            sb.append(d.key).append('@')
+                    .append(d.postTime).append(';');
+        }
+        return Integer.toHexString(sb.toString().hashCode())
+                + ":" + lightStack.size();
+    }
+
+    /** v600: AI 请求节流口——refreshLightDot 是收纳栈
+     * 变动的汇合点，这里统一判断：AI 开着、栈里有可
+     * 分析条目、签名没请求过，才排一次防抖（4 秒，
+     * v602 由 12 秒缩短；连续进出栈只发最后一发）。
+     * 验证码条目在组包时剔除，永不外送（wei 定红
+     * 线）。 */
+    private void maybeRequestAi() {
+        if (!FeatureFlags.lightMode || !FeatureFlags.aiEnabled
+                || (!FeatureFlags.aiSummary
+                        && !FeatureFlags.aiTags)) {
+            return;
+        }
+        boolean any = false;
+        for (NotifData d : lightStack) {
+            if (d.code == null) {
+                any = true;
+                break;
+            }
+        }
+        if (!any) {
+            return;
+        }
+        final String sig = lightAiSignature();
+        if (sig.equals(lightAiReqSig)) {
+            return;
+        }
+        if (lightAiDebounce != null) {
+            handler.removeCallbacks(lightAiDebounce);
+        }
+        lightAiDebounce = new Runnable() {
+            @Override
+            public void run() {
+                sendAiRequest(sig);
+            }
+        };
+        // v602: 防抖 12 秒 -> 4 秒（wei 嫌打标慢）；连
+        // 续进出栈仍只发最后一发，成本可控。
+        // v614: 再缩到 1.2 秒（wei 仍嫌慢）——打标已
+        // 走小模型，调用便宜，响应优先。
+        handler.postDelayed(lightAiDebounce, 1200);
+    }
+
+    private void sendAiRequest(String sig) {
+        if (app == null || !sig.equals(lightAiSignature())) {
+            return; // 栈又变了，等下一轮防抖
+        }
+        StringBuilder blob = new StringBuilder();
+        int n = 0;
+        for (NotifData d : lightStack) {
+            if (d.code != null || d.key == null) {
+                continue;
+            }
+            String t = d.title == null ? "" : d.title;
+            // v602: AI 也看全文（fullText），摘要/打标
+            // 不再被短正文截断误导。
+            String x = d.fullText() == null ? "" : d.fullText();
+            if ((t + x).contains("验证码")
+                    || (t + x).contains("校验码")) {
+                continue;
+            }
+            if (x.length() > 160) {
+                x = x.substring(0, 160);
+            }
+            blob.append(d.key).append("\u0001")
+                    .append(t.replace("\u0001", " ")
+                            .replace("\n", " "))
+                    .append("\u0001")
+                    .append(x.replace("\u0001", " ")
+                            .replace("\n", " "))
+                    .append("\n");
+            if (++n >= 20) {
+                break;
+            }
+        }
+        if (blob.length() == 0) {
+            return;
+        }
+        lightAiReqSig = sig;
+        android.content.Intent intent =
+                new android.content.Intent(
+                        NotificationService.ACTION_AI_ANALYZE);
+        intent.putExtra("sig", sig);
+        intent.putExtra("blob", blob.toString());
+        intent.putExtra("summary", FeatureFlags.aiSummary);
+        intent.putExtra("tags", FeatureFlags.aiTags);
+        try {
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+        FileLog.i("Light ai request sig=" + sig + " n=" + n);
+    }
+
+    /** v600: AI 结果回填（XposedEntry 收到广播后调）：
+     * 签名对得上当前栈才收；标签只留栈里还存在的
+     * key。面板开着就重建行。 */
+    public void onAiResult(String sig, String summary,
+            String tagsBlob) {
+        if (sig == null || !sig.equals(lightAiReqSig)) {
+            FileLog.i("Light ai result stale sig=" + sig);
+            return;
+        }
+        String prevSummary = lightAiSummary;
+        if (summary != null && !summary.isEmpty()) {
+            lightAiSummary = summary;
+        }
+        // v611: 新摘要就绪 → 边缘药丸循环闪（wei 定：
+        // 一直闪到打开面板；放歌跟词时先挂着不闪）。
+        // 与上一份摘要相同就不重复打扰。
+        if (lightAiSummary != null
+                && !lightAiSummary.equals(prevSummary)
+                && FeatureFlags.aiSummary
+                && !lightPanelAdded) {
+            lightAiFlashText = lightAiSummary;
+            maybeFlashLightSummary();
+            FileLog.i("Light ai summary flash start");
+        }
+        if (tagsBlob != null && !tagsBlob.isEmpty()) {
+            java.util.HashSet<String> live =
+                    new java.util.HashSet<>();
+            for (NotifData d : lightStack) {
+                if (d.key != null) {
+                    live.add(d.key);
+                }
+            }
+            for (String line : tagsBlob.split("\n")) {
+                String[] parts = line.split("\u0001", -1);
+                if (parts.length == 2
+                        && live.contains(parts[0])) {
+                    lightAiTags.put(parts[0], parts[1]);
+                }
+            }
+        }
+        FileLog.i("Light ai applied tags="
+                + lightAiTags.size());
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        }
+    }
+
+    /** v600: AI 开关翻动（XposedEntry 调）：总开关关
+     * 掉就清空摘要与标签并重建面板；打开则把签名清
+     * 掉，让下一轮 refresh 重新请求。 */
+    public void onAiSettingsChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (!FeatureFlags.aiEnabled) {
+                    lightAiSummary = null;
+                    lightAiTags.clear();
+                    stopLightSummaryFlash();
+                }
+                lightAiReqSig = null;
+                if (lightPanelAdded && !lightPanelRecallMode) {
+                    rebuildLightPanelRows();
+                }
+                maybeRequestAi();
+            }
+        });
+    }
+
+    /** v601: 信息卡片生成口——收纳到一条普通通知时
+     * 本地解析（InfoParse），认出票/单号/账单就成卡：
+     * 记映射（行渲染时跳过它）、落盘、带时间的票卡给
+     * App 进程排自动提醒。本模块自己的通知（提醒本
+     * 身）不解析，防自产自销。 */
+    private void maybeMakeInfoCard(NotifData d) {
+        if (!FeatureFlags.infoCards || d.code != null
+                || d.key == null
+                || "com.chenan.flymebobo".equals(d.pkg)) {
+            return;
+        }
+        // v602: 解析看全文（fullText）——短正文会被应
+        // 用截断（实测顺丰单号短正文只到第 11 位数）。
+        InfoParse.Card ic = InfoParse.tryParse(d.pkg,
+                d.title, d.fullText(), d.postTime);
+        if (ic == null) {
+            // 同 key 重投后内容变了、不再是信息卡：把旧
+            // 映射摘掉，行恢复普通显示。
+            if (lightInfoKeyToId.containsKey(d.key)) {
+                removeInfoCardForKey(d.key);
+            }
+            // v605: 本地没认出 → AI 兜底（开了 AI 才排队）。
+            queueInfoAiCheck(d);
+            return;
+        }
+        // v606: 退票/取消短信（wei 定要区分同一张
+        // 票）——撤掉对应票卡、提醒一并取消，不另
+        // 出卡。只认强信号词，购票短信里的「如需退
+        // 票」不误伤。
+        String full = d.fullText() == null
+                ? "" : d.fullText();
+        if (("train".equals(ic.kind)
+                || "flight".equals(ic.kind))
+                && (full.contains("退票成功")
+                        || full.contains("已退票")
+                        || full.contains("退款成功")
+                        || full.contains("已取消")
+                        || full.contains("取消成功"))) {
+            InfoParse.Card tgt = lightInfoCards.get(ic.id);
+            if (tgt == null && ic.fp != null) {
+                for (InfoParse.Card e
+                        : lightInfoCards.values()) {
+                    if (ic.fp.equals(e.fp)) {
+                        tgt = e;
+                        break;
+                    }
+                }
+            }
+            if (tgt != null) {
+                lightInfoCards.remove(tgt.id);
+                if (tgt.eventTime > 0) {
+                    sendInfoRemind(false, tgt);
+                }
+                saveLightInfoCards();
+                FileLog.i("Light info cancel kind="
+                        + ic.kind + " id=" + tgt.id);
+            }
+            return;
+        }
+        // v606: 同票合并——指纹相同 = 同一张票，新短
+        // 信更新原卡（改签换时间/座位也并进来、提醒
+        // 跟着重排），不再出一张重复卡。
+        if (!lightInfoCards.containsKey(ic.id)
+                && ic.fp != null) {
+            for (InfoParse.Card e : lightInfoCards.values()) {
+                if (!ic.fp.equals(e.fp)) {
+                    continue;
+                }
+                long oldEv = e.eventTime;
+                boolean evChanged = oldEv != ic.eventTime;
+                if (evChanged && oldEv > 0
+                        && FeatureFlags.infoRemind) {
+                    sendInfoRemind(false, e);
+                }
+                e.title = ic.title;
+                e.sub = ic.sub;
+                e.extra = ic.extra;
+                e.copyText = ic.copyText;
+                e.eventTime = ic.eventTime;
+                e.ai = false;
+                String prevId2 = lightInfoKeyToId.put(
+                        d.key, e.id);
+                if (prevId2 != null
+                        && !prevId2.equals(e.id)
+                        && !lightInfoKeyToId.containsValue(
+                                prevId2)) {
+                    lightInfoCards.remove(prevId2);
+                }
+                FileLog.i("Light info merge fp=" + ic.fp
+                        + " into=" + e.id);
+                saveLightInfoCards();
+                if (evChanged && e.eventTime > 0
+                        && FeatureFlags.infoRemind) {
+                    sendInfoRemind(true, e);
+                }
+                queueInfoAiCheck(d);
+                return;
+            }
+        }
+        String prevId = lightInfoKeyToId.put(d.key, ic.id);
+        if (prevId != null && !prevId.equals(ic.id)
+                && !lightInfoKeyToId.containsValue(prevId)) {
+            lightInfoCards.remove(prevId);
+        }
+        boolean isNew = !lightInfoCards.containsKey(ic.id);
+        lightInfoCards.put(ic.id, ic);
+        FileLog.i("Light info card kind=" + ic.kind
+                + " new=" + isNew);
+        saveLightInfoCards();
+        if (isNew && ic.eventTime > 0
+                && FeatureFlags.infoRemind) {
+            sendInfoRemind(true, ic);
+        }
+        // v605: 本地认出了 → AI 同时核对（补时间/验
+        // 种类，开了 AI 才排队）。
+        queueInfoAiCheck(d);
+    }
+
+    /** v605: 信息卡 AI 兜底+核对排队（wei 定：开了
+     * AI 就启用，本地+AI 同时核对）。红线同 AI 组
+     * 包：带码条目与含验证码字样的永不外送。3 秒防
+     * 抖批发；同 key@postTime 只核对一次。 */
+    private void queueInfoAiCheck(NotifData d) {
+        if (!FeatureFlags.aiEnabled
+                || !FeatureFlags.infoCards
+                || d == null || d.key == null
+                || d.code != null) {
+            return;
+        }
+        String sig = d.key + "@" + d.postTime;
+        if (lightInfoAiChecked.contains(sig)) {
+            return;
+        }
+        String hay = (d.title == null ? "" : d.title)
+                + (d.fullText() == null ? "" : d.fullText());
+        if (hay.contains("验证码") || hay.contains("校验码")) {
+            return;
+        }
+        lightInfoAiPending.put(d.key, d);
+        if (lightInfoAiDebounce != null) {
+            handler.removeCallbacks(lightInfoAiDebounce);
+        }
+        lightInfoAiDebounce = new Runnable() {
+            @Override
+            public void run() {
+                sendInfoAiRequest();
+            }
+        };
+        handler.postDelayed(lightInfoAiDebounce, 3000);
+    }
+
+    private void sendInfoAiRequest() {
+        lightInfoAiDebounce = null;
+        if (lightInfoAiPending.isEmpty()) {
+            return;
+        }
+        if (lightInfoAiChecked.size() > 300) {
+            lightInfoAiChecked.clear();
+        }
+        StringBuilder blob = new StringBuilder();
+        int n = 0;
+        for (NotifData d : lightInfoAiPending.values()) {
+            if (n >= 8) {
+                break;
+            }
+            String id = lightInfoKeyToId.get(d.key);
+            InfoParse.Card cur = id != null
+                    ? lightInfoCards.get(id) : null;
+            String t = d.title == null ? "" : d.title;
+            String x = d.fullText() == null
+                    ? "" : d.fullText();
+            if (x.length() > 220) {
+                x = x.substring(0, 220);
+            }
+            blob.append(d.key).append('\u0001')
+                    .append(cur != null ? cur.kind : "")
+                    .append('\u0001')
+                    .append(t).append('\u0001')
+                    .append(x).append('\n');
+            lightInfoAiChecked.add(d.key + "@" + d.postTime);
+            n++;
+        }
+        lightInfoAiPending.clear();
+        if (n == 0) {
+            return;
+        }
+        android.content.Intent intent =
+                new android.content.Intent(
+                        NotificationService.ACTION_AI_ANALYZE);
+        intent.putExtra("infoBlob", blob.toString());
+        try {
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+        FileLog.i("Light info ai request n=" + n);
+    }
+
+    /** v605: AI 信息核对结果回递（XposedEntry 调）。
+     * 每行：key\u0001kind\u0001title\u0001sub\u0001eventMillis
+     * \u0001copyText。处置口径：本地没认出而 AI 认
+     * 出 → 补卡（标 AI 识别）；本地已认出 → AI 只补
+     * 本地缺的事件时间（提醒跟着排），种类对不上只
+     * 记日志不翻本地的卡（本地规则对已知格式是确
+     * 定性的，AI 会看错）。 */
+    public void onAiInfoResult(String blob) {
+        if (blob == null || blob.isEmpty()) {
+            return;
+        }
+        boolean changed = false;
+        for (String line : blob.split("\n")) {
+            String[] p = line.split("\u0001", -1);
+            if (p.length < 6) {
+                continue;
+            }
+            String key = p[0];
+            String kind = p[1];
+            long ev = 0;
+            try {
+                ev = Long.parseLong(p[4]);
+            } catch (Throwable ignored) {
+            }
+            NotifData d = null;
+            for (NotifData e : lightStack) {
+                if (key.equals(e.key)) {
+                    d = e;
+                    break;
+                }
+            }
+            if (d == null) {
+                continue;
+            }
+            String id = lightInfoKeyToId.get(key);
+            InfoParse.Card cur = id != null
+                    ? lightInfoCards.get(id) : null;
+            if ("none".equals(kind)) {
+                if (cur != null) {
+                    FileLog.i("Light info ai disagree(none)"
+                            + " local=" + cur.kind
+                            + " key=" + key);
+                }
+                continue;
+            }
+            if (!"train".equals(kind) && !"flight".equals(kind)
+                    && !"courier".equals(kind)
+                    && !"bill".equals(kind)) {
+                continue;
+            }
+            if (cur == null) {
+                InfoParse.Card ic = new InfoParse.Card();
+                ic.kind = kind;
+                ic.ai = true;
+                ic.title = p[2].isEmpty() ? kind : p[2];
+                ic.sub = p[3];
+                ic.extra = "";
+                ic.source = d.pkg;
+                ic.copyText = p[5].isEmpty() ? null : p[5];
+                ic.eventTime = ev;
+                ic.createdAt = d.postTime;
+                ic.id = "ai:" + kind + ":"
+                        + (ic.copyText != null
+                                ? ic.copyText : ic.title)
+                        + "|" + ev;
+                ic.fp = "ai|" + kind + "|" + ic.title
+                        + "|" + ev;
+                lightInfoCards.put(ic.id, ic);
+                lightInfoKeyToId.put(key, ic.id);
+                FileLog.i("Light info ai card kind=" + kind
+                        + " key=" + key);
+                if (ev > 0 && FeatureFlags.infoRemind
+                        && ("train".equals(kind)
+                                || "flight".equals(kind))) {
+                    sendInfoRemind(true, ic);
+                }
+                changed = true;
+            } else if (!kind.equals(cur.kind)) {
+                FileLog.i("Light info ai disagree kind"
+                        + " local=" + cur.kind + " ai=" + kind
+                        + " key=" + key);
+            } else if (cur.eventTime <= 0 && ev > 0) {
+                cur.eventTime = ev;
+                FileLog.i("Light info ai fill time kind="
+                        + kind + " key=" + key);
+                if (FeatureFlags.infoRemind
+                        && ("train".equals(kind)
+                                || "flight".equals(kind))) {
+                    sendInfoRemind(true, cur);
+                }
+                changed = true;
+            } else {
+                FileLog.i("Light info ai verified kind="
+                        + kind + " key=" + key);
+            }
+        }
+        if (changed) {
+            saveLightInfoCards();
+            if (lightPanelAdded && !lightPanelRecallMode) {
+                rebuildLightPanelRows();
+            }
+            refreshLightDot();
+        }
+    }
+
+    /** v601: 通知离开收纳（打开/左滑/溢出/清除都经
+     * lightPushRecall，或源通知被移除）时联动收卡：
+     * 同一张卡还有别的通知 key 映射着就不删卡。 */
+    private void removeInfoCardForKey(String key) {
+        if (key == null) {
+            return;
+        }
+        String id = lightInfoKeyToId.remove(key);
+        if (id == null
+                || lightInfoKeyToId.containsValue(id)) {
+            return;
+        }
+        InfoParse.Card ic = lightInfoCards.remove(id);
+        if (ic != null) {
+            saveLightInfoCards();
+            if (ic.eventTime > 0) {
+                sendInfoRemind(false, ic);
+            }
+        }
+    }
+
+    /** v601: 提醒排期/取消广播给 App 进程（NS 转
+     * InfoRemindReceiver 排精确闹钟）。 */
+    private void sendInfoRemind(boolean schedule,
+            InfoParse.Card ic) {
+        if (app == null || ic == null) {
+            return;
+        }
+        android.content.Intent intent =
+                new android.content.Intent(schedule
+                        ? NotificationService.ACTION_INFO_REMIND
+                        : NotificationService
+                                .ACTION_INFO_REMIND_CANCEL);
+        intent.putExtra("id", ic.id);
+        intent.putExtra("title", ic.title);
+        intent.putExtra("sub", ic.sub);
+        intent.putExtra("kind", ic.kind);
+        intent.putExtra("event", ic.eventTime);
+        try {
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v601: 信息卡开关翻动（XposedEntry 调）：关掉
+     * 就清掉全部信息卡（提醒一并取消）并重建面板。 */
+    public void onInfoCardsChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (!FeatureFlags.infoCards) {
+                    for (InfoParse.Card ic
+                            : lightInfoCards.values()) {
+                        if (ic.eventTime > 0) {
+                            sendInfoRemind(false, ic);
+                        }
+                    }
+                    lightInfoCards.clear();
+                    lightInfoKeyToId.clear();
+                    saveLightInfoCards();
+                }
+                if (lightPanelAdded && !lightPanelRecallMode) {
+                    rebuildLightPanelRows();
+                }
+                refreshLightDot();
+            }
+        });
+    }
+
+    private static final String INFO_CARDS_PATH =
+            "/sdcard/flymebobo/info_cards.txt";
+
+    /** v601: 信息卡落盘（镜像同款格式：每行一条、制
+     * 表符分隔、字段 URL 编码）。 */
+    private void saveLightInfoCards() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (InfoParse.Card ic : lightInfoCards.values()) {
+                String srcKey = "";
+                for (java.util.Map.Entry<String, String> e
+                        : lightInfoKeyToId.entrySet()) {
+                    if (e.getValue().equals(ic.id)) {
+                        srcKey = e.getKey();
+                        break;
+                    }
+                }
+                sb.append("I\t")
+                        .append(mirrorField(ic.id)).append('\t')
+                        .append(mirrorField(ic.kind)).append('\t')
+                        .append(mirrorField(ic.title)).append('\t')
+                        .append(mirrorField(ic.sub)).append('\t')
+                        .append(mirrorField(ic.extra)).append('\t')
+                        .append(mirrorField(ic.copyText))
+                        .append('\t')
+                        .append(ic.eventTime).append('\t')
+                        .append(mirrorField(srcKey)).append('\t')
+                        .append(ic.createdAt).append('\t')
+                        .append(ic.ai ? "1" : "").append('\t')
+                        .append(mirrorField(ic.fp))
+                        .append('\n');
+            }
+            java.io.File f = new java.io.File(INFO_CARDS_PATH);
+            if (f.getParentFile() != null) {
+                f.getParentFile().mkdirs();
+            }
+            java.io.FileOutputStream fos =
+                    new java.io.FileOutputStream(f);
+            fos.write(sb.toString().getBytes("UTF-8"));
+            fos.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v601: 启动后恢复信息卡（refreshLightDot 里懒
+     * 加载一次）。事件时间已过 24 小时的卡丢弃。 */
+    private void loadLightInfoCards() {
+        if (lightInfoLoaded) {
+            return;
+        }
+        lightInfoLoaded = true;
+        try {
+            java.io.File f = new java.io.File(INFO_CARDS_PATH);
+            if (!f.exists()) {
+                return;
+            }
+            java.io.BufferedReader br =
+                    new java.io.BufferedReader(
+                            new java.io.InputStreamReader(
+                                    new java.io.FileInputStream(f),
+                                    "UTF-8"));
+            String line;
+            long cutoff = System.currentTimeMillis()
+                    - 24L * 3600 * 1000;
+            while ((line = br.readLine()) != null) {
+                String[] p = line.split("\t", -1);
+                if (p.length < 10 || !"I".equals(p[0])) {
+                    continue;
+                }
+                InfoParse.Card ic = new InfoParse.Card();
+                ic.id = mirrorUnfield(p[1]);
+                ic.kind = mirrorUnfield(p[2]);
+                ic.title = mirrorUnfield(p[3]);
+                ic.sub = mirrorUnfield(p[4]);
+                ic.extra = mirrorUnfield(p[5]);
+                String cp = mirrorUnfield(p[6]);
+                ic.copyText = cp.isEmpty() ? null : cp;
+                try {
+                    ic.eventTime = Long.parseLong(p[7]);
+                    ic.createdAt = Long.parseLong(p[9]);
+                } catch (Throwable ignored) {
+                }
+                // v605: AI 产出标记（旧文件无此字段，缺省本地）。
+                ic.ai = p.length > 10 && "1".equals(p[10]);
+                // v606: 票据指纹（旧文件无此字段则为 null，
+                // 同票合并对老卡不生效，新短信来了自然补）。
+                if (p.length > 11) {
+                    String fpv = mirrorUnfield(p[11]);
+                    ic.fp = fpv.isEmpty() ? null : fpv;
+                }
+                if (ic.eventTime > 0 && ic.eventTime < cutoff) {
+                    continue;
+                }
+                lightInfoCards.put(ic.id, ic);
+                String srcKey = mirrorUnfield(p[8]);
+                if (!srcKey.isEmpty()) {
+                    lightInfoKeyToId.put(srcKey, ic.id);
+                }
+            }
+            br.close();
+            FileLog.i("Light info cards loaded n="
+                    + lightInfoCards.size());
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static String mirrorUnfield(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        try {
+            return java.net.URLDecoder.decode(s, "UTF-8");
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     // v591: 呼吸灯边缘发光——独立小窗（不触摸、只发
@@ -3092,6 +3892,20 @@ public class BubbleWindow {
     private WindowManager.LayoutParams lightGlowParams;
     private boolean lightGlowAdded;
 
+    /** v595: 光晕按当前呼吸灯颜色重设渐变（放歌流转时
+     * 不调——流转自己在写颜色）。 */
+    private void applyLightGlowColors() {
+        if (lightGlowBg == null) {
+            return;
+        }
+        int dc = FeatureFlags.lightDotColorInt();
+        lightGlowBg.setColors(new int[]{
+                Color.argb(165, Color.red(dc), Color.green(dc),
+                        Color.blue(dc)),
+                Color.argb(0, Color.red(dc), Color.green(dc),
+                        Color.blue(dc))});
+    }
+
     private void ensureLightGlow() {
         if (lightGlowRoot != null) {
             return;
@@ -3100,9 +3914,7 @@ public class BubbleWindow {
         lightGlowBg.setGradientType(
                 GradientDrawable.RADIAL_GRADIENT);
         lightGlowBg.setGradientRadius(dp(80));
-        lightGlowBg.setColors(new int[]{
-                Color.argb(165, 59, 130, 246),
-                Color.argb(0, 59, 130, 246)});
+        applyLightGlowColors();
         lightGlowRoot = new View(app);
         lightGlowRoot.setBackground(lightGlowBg);
         lightGlowParams = new WindowManager.LayoutParams(
@@ -3125,12 +3937,13 @@ public class BubbleWindow {
         boolean right = FeatureFlags.lightDotRight();
         lightGlowParams.gravity = (right ? Gravity.END
                 : Gravity.START) | Gravity.TOP;
-        lightGlowParams.y = lightDotParams.y + dp(19) - dp(85);
+        // v596: 签顶 = 窗口 y + 12（触摸扩区 padding），
+        // 光晕中心按签中心对齐：y + 12 + 19。
+        lightGlowParams.y = lightDotParams.y + dp(12) + dp(19)
+                - dp(85);
         lightGlowBg.setGradientCenter(right ? 1f : 0f, 0.5f);
         if (!lightMusicPlaying) {
-            lightGlowBg.setColors(new int[]{
-                    Color.argb(165, 59, 130, 246),
-                    Color.argb(0, 59, 130, 246)});
+            applyLightGlowColors();
         }
         if (lightGlowAdded && wm != null) {
             try {
@@ -3209,7 +4022,7 @@ public class BubbleWindow {
                         FrameLayout.LayoutParams.WRAP_CONTENT));
         // 竖签。
         lightTabBg = new GradientDrawable();
-        lightTabBg.setColor(Color.rgb(59, 130, 246));
+        lightTabBg.setColor(FeatureFlags.lightDotColorInt());
         lightDotTab = new View(app);
         lightDotTab.setBackground(lightTabBg);
         android.widget.LinearLayout.LayoutParams tabLp =
@@ -3385,8 +4198,8 @@ public class BubbleWindow {
                                     if (ny < 0) {
                                         ny = 0;
                                     }
-                                    if (ny > h - dp(38)) {
-                                        ny = h - dp(38);
+                                    if (ny > h - dp(64)) {
+                                        ny = h - dp(64);
                                     }
                                     lightDotParams.y = ny;
                                     if (lightDotAdded) {
@@ -3430,8 +4243,10 @@ public class BubbleWindow {
                         }
                     }
                 });
+        // v596: 窗口高 64 = 竖签 38 + 上下各 12 透明触摸
+        // 扩区（applyLightDotPos 里给根加的 padding）。
         lightDotParams = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT, dp(38),
+                WindowManager.LayoutParams.WRAP_CONTENT, dp(64),
                 WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams
@@ -3478,8 +4293,16 @@ public class BubbleWindow {
                 lightBadge.setLayoutParams(glp);
             }
         }
+        // v596: 触碰范围加一点（wei 定）——根窗口上下
+        // 与内侧各留 12dp 透明 padding 当触摸区，竖签本
+        // 身大小不变；y 补偿掉上 padding，签仍落在原来
+        // 的档位高度上（面板锚点/光晕/拖拽落档都按「签
+        // 顶 = 窗口 y + 12」对齐）。
+        int touchExt = dp(12);
+        lightDotRoot.setPadding(right ? touchExt : 0,
+                touchExt, right ? 0 : touchExt, touchExt);
         lightDotParams.y = Math.round(
-                h * FeatureFlags.lightDotYFrac());
+                h * FeatureFlags.lightDotYFrac()) - touchExt;
         // body 子顺序：贴左=[签,药丸列]，贴右=[药丸列,签]。
         if (lightPillCol != null) {
             lightPillCol.setGravity(
@@ -3513,7 +4336,8 @@ public class BubbleWindow {
                         0, 0, r, r, r, r, 0, 0});
             }
             if (!lightMusicPlaying) {
-                lightTabBg.setColor(Color.rgb(59, 130, 246));
+                lightTabBg.setColor(
+                        FeatureFlags.lightDotColorInt());
             }
         }
         // 角标贴签的外上角。
@@ -3554,7 +4378,8 @@ public class BubbleWindow {
         int h = app.getResources().getDisplayMetrics()
                 .heightPixels;
         float centerFrac = h > 0
-                ? (lightDotParams.y + dp(19)) / (float) h : 0.46f;
+                ? (lightDotParams.y + dp(12) + dp(19))
+                        / (float) h : 0.46f;
         int band = centerFrac < 0.31f ? 0
                 : (centerFrac < 0.59f ? 1 : 2);
         String pos = (FeatureFlags.lightDotRight() ? "R" : "L")
@@ -3788,9 +4613,24 @@ public class BubbleWindow {
                 || !FeatureFlags.lightMode) {
             return;
         }
+        // v599: 开面板前先清扫僵尸下载卡，别让它顶在
+        // 面板第一张装死。
+        sweepStaleLightDownloads();
+        // v611: 面板打开 = 摘要已经看上了，循环闪停。
+        stopLightSummaryFlash();
+        loadLightInfoCards();
         if (lightStack.isEmpty() && lightMusicData == null
-                && lightDownloads.isEmpty()) {
+                && lightDownloads.isEmpty()
+                && lightInfoCards.isEmpty()) {
             return;
+        }
+        // v602: 打标提速——面板打开时若有挂起的 AI 请
+        // 求，立即发，不等 4 秒防抖到点。
+        if (lightAiDebounce != null) {
+            handler.removeCallbacks(lightAiDebounce);
+            Runnable pending = lightAiDebounce;
+            lightAiDebounce = null;
+            pending.run();
         }
         // v589: 先抢下小签此刻的真实窗口 y——下面
         // dismissLightPanel 带的 refresh 会把小签 y 按
@@ -3836,7 +4676,9 @@ public class BubbleWindow {
         // 际位置），不再按档位比例重算——两者不一致时
         // 面板离小签老远（wei：「离呼吸灯也远」）。小
         // 签不在时才回落到档位比例。
-        int anchorY = dotLiveY >= 0 ? dotLiveY
+        // v596: dotLiveY 是窗口顶，签顶还要 +12（触摸
+        // 扩区 padding），锚点按签顶算、与 v589 口径一致。
+        int anchorY = dotLiveY >= 0 ? dotLiveY + dp(12)
                 : Math.round(app.getResources()
                         .getDisplayMetrics().heightPixels
                         * FeatureFlags.lightDotYFrac());
@@ -3927,8 +4769,8 @@ public class BubbleWindow {
      * 菜单直接在面板里、被长按行下方展开，其他行被自然
      * 挤开，不再走全屏浮层。再长按同一行收起；点任意条目
      * 走 dismissMenu() 一并收起。条目与经典菜单共用
-     * buildMenuItems（轻气泡下自动少「这个应用以后收纳」、
-     * 「放入时光机」恒有）。 */
+     * buildMenuItems（「放入时光机」恒有；「这个应用以
+     * 后收纳」v595 起轻气泡也出现）。 */
     private void toggleLightInlineMenu(View row, final NotifData d) {
         if (row == null || d == null
                 || !(row.getParent() instanceof android.view.ViewGroup)) {
@@ -4081,6 +4923,315 @@ public class BubbleWindow {
     /** v564: 面板内容重建——音乐卡永远置顶（收纳视图），
      * 其下头部计数 + 可滑列表（可视 5 条高）；底部时光机
      * 入口。时光机视图是同一个盒换内容。 */
+    /** v601: 信息卡片渲染（票面风格，wei 定：票就是
+     * 票的样子，不跟面板黑白模式）——火车票蓝磁票
+     * 底、机票白卡蓝带、快递/账单白卡。点卡=打开源
+     * 通知（还在栈里时）；「删除」=源通知进时光机、
+     * 卡收掉（重启恢复的孤儿卡只收卡）。 */
+    private View buildLightInfoCard(final InfoParse.Card ic) {
+        final android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        int accent;
+        String kindLabel;
+        if ("train".equals(ic.kind)) {
+            bg.setColor(Color.rgb(219, 234, 254));
+            accent = Color.rgb(29, 78, 216);
+            kindLabel = "火车票";
+        } else if ("flight".equals(ic.kind)) {
+            bg.setColor(Color.WHITE);
+            accent = Color.rgb(37, 99, 235);
+            kindLabel = "登机牌";
+        } else if ("courier".equals(ic.kind)) {
+            bg.setColor(Color.WHITE);
+            bg.setStroke(dp(1), Color.rgb(187, 247, 208));
+            accent = Color.rgb(22, 163, 74);
+            kindLabel = "快递";
+        } else {
+            bg.setColor(Color.WHITE);
+            bg.setStroke(dp(1), Color.rgb(254, 215, 170));
+            accent = Color.rgb(194, 65, 12);
+            kindLabel = "账单";
+        }
+        bg.setCornerRadius(dp(14));
+        card.setBackground(bg);
+        card.setPadding(dp(12), dp(9), dp(12), dp(10));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        if ("flight".equals(ic.kind)) {
+            android.widget.TextView band =
+                    new android.widget.TextView(app);
+            band.setText("登机牌 BOARDING PASS");
+            band.setTextColor(Color.WHITE);
+            band.setTextSize(10.5f);
+            band.setPadding(dp(8), dp(3), dp(8), dp(3));
+            GradientDrawable bb = new GradientDrawable();
+            bb.setColor(Color.rgb(37, 99, 235));
+            bb.setCornerRadius(dp(5));
+            band.setBackground(bb);
+            card.addView(band);
+        }
+        android.widget.LinearLayout topRow =
+                new android.widget.LinearLayout(app);
+        topRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        topRow.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.TextView kl =
+                new android.widget.TextView(app);
+        kl.setText(kindLabel
+                + (ic.ai ? " · AI 识别" : " · 本地识别"));
+        kl.setTextSize(11);
+        kl.setTextColor(accent);
+        kl.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        kl.setLayoutParams(new android.widget.LinearLayout
+                .LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f));
+        topRow.addView(kl);
+        android.widget.TextView del =
+                new android.widget.TextView(app);
+        del.setText("删除");
+        del.setTextSize(11.5f);
+        del.setTextColor(Color.rgb(220, 38, 38));
+        del.setPadding(dp(8), dp(2), dp(2), dp(2));
+        del.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                NotifData src = findLightInfoSource(ic);
+                if (src != null) {
+                    lightPushRecall(src);
+                } else {
+                    lightInfoCards.remove(ic.id);
+                    java.util.Iterator<java.util.Map.Entry<
+                            String, String>> it =
+                            lightInfoKeyToId.entrySet()
+                                    .iterator();
+                    while (it.hasNext()) {
+                        if (it.next().getValue()
+                                .equals(ic.id)) {
+                            it.remove();
+                        }
+                    }
+                    if (ic.eventTime > 0) {
+                        sendInfoRemind(false, ic);
+                    }
+                    saveLightInfoCards();
+                }
+                refreshLightDot();
+                if (lightPanelAdded && !lightPanelRecallMode) {
+                    rebuildLightPanelRows();
+                }
+            }
+        });
+        topRow.addView(del);
+        card.addView(topRow);
+        android.widget.TextView t =
+                new android.widget.TextView(app);
+        t.setText(ic.title);
+        t.setTextSize(15.5f);
+        t.setTextColor(Color.rgb(15, 23, 42));
+        t.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        t.setPadding(0, dp(3), 0, 0);
+        applyLightScroll(t);
+        card.addView(t);
+        if (ic.sub != null && !ic.sub.isEmpty()) {
+            android.widget.TextView s =
+                    new android.widget.TextView(app);
+            s.setText(ic.sub);
+            s.setTextSize(12.5f);
+            s.setTextColor(Color.rgb(51, 65, 85));
+            s.setPadding(0, dp(2), 0, 0);
+            card.addView(s);
+        }
+        if (ic.extra != null && !ic.extra.isEmpty()) {
+            android.widget.TextView e =
+                    new android.widget.TextView(app);
+            e.setText(ic.extra);
+            e.setTextSize(11.5f);
+            e.setTextColor(Color.rgb(100, 116, 139));
+            e.setPadding(0, dp(2), 0, 0);
+            card.addView(e);
+        }
+        if (ic.eventTime > 0 && ("train".equals(ic.kind)
+                || "flight".equals(ic.kind))) {
+            long diff = ic.eventTime
+                    - System.currentTimeMillis();
+            String when = new java.text.SimpleDateFormat(
+                    "MM-dd HH:mm", java.util.Locale.CHINA)
+                    .format(new java.util.Date(ic.eventTime));
+            String txt;
+            if (diff <= 0) {
+                txt = "时间：" + when + "（已过）";
+            } else {
+                long mins = diff / 60000L;
+                String d = mins >= 1440
+                        ? (mins / 1440) + " 天 "
+                                + (mins % 1440) / 60 + " 小时"
+                        : mins >= 60
+                                ? (mins / 60) + " 小时 "
+                                        + (mins % 60) + " 分"
+                                : mins + " 分钟";
+                txt = ("train".equals(ic.kind) ? "距发车 "
+                        : "距起飞 ") + d + " · " + when;
+            }
+            android.widget.TextView cdv =
+                    new android.widget.TextView(app);
+            cdv.setText(txt);
+            cdv.setTextSize(12);
+            cdv.setTextColor(accent);
+            cdv.setPadding(0, dp(3), 0, 0);
+            card.addView(cdv);
+        }
+        if (ic.copyText != null) {
+            final android.widget.TextView cp =
+                    new android.widget.TextView(app);
+            cp.setText("复制单号");
+            cp.setTextSize(12.5f);
+            cp.setTextColor(Color.WHITE);
+            cp.setGravity(Gravity.CENTER);
+            cp.setPadding(0, dp(6), 0, dp(6));
+            GradientDrawable cb = new GradientDrawable();
+            cb.setColor(Color.rgb(22, 163, 74));
+            cb.setCornerRadius(dp(8));
+            cp.setBackground(cb);
+            android.widget.LinearLayout.LayoutParams clp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            clp.topMargin = dp(7);
+            cp.setLayoutParams(clp);
+            cp.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    try {
+                        android.content.ClipboardManager cm =
+                                (android.content.ClipboardManager)
+                                        app.getSystemService(
+                                                android.content.Context
+                                                        .CLIPBOARD_SERVICE);
+                        if (cm != null) {
+                            cm.setPrimaryClip(
+                                    android.content.ClipData
+                                            .newPlainText("单号",
+                                                    ic.copyText));
+                            cp.setText("已复制");
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+            card.addView(cp);
+        }
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                NotifData src = findLightInfoSource(ic);
+                if (src != null) {
+                    dismissLightPanel();
+                    lightOpenItem(src);
+                }
+            }
+        });
+        return card;
+    }
+
+    /** v601: 按信息卡反查还在收纳栈里的源通知。 */
+    private NotifData findLightInfoSource(InfoParse.Card ic) {
+        String srcKey = null;
+        for (java.util.Map.Entry<String, String> e
+                : lightInfoKeyToId.entrySet()) {
+            if (e.getValue().equals(ic.id)) {
+                srcKey = e.getKey();
+                break;
+            }
+        }
+        if (srcKey == null) {
+            return null;
+        }
+        for (NotifData d : lightStack) {
+            if (srcKey.equals(d.key)) {
+                return d;
+            }
+        }
+        return null;
+    }
+
+    /** v600: AI 摘要卡（预览定稿样式）——浅蓝底、蓝
+     * 色小标「AI 摘要」、一句话正文、底部小字注明 AI
+     * 生成。白色模式浅蓝底深字，黑色模式深蓝底浅字。 */
+    private View buildLightAiCard() {
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(lpWhite() ? Color.rgb(239, 246, 255)
+                : Color.rgb(23, 37, 63));
+        bg.setCornerRadius(dp(14));
+        if (lpWhite()) {
+            bg.setStroke(dp(1), Color.rgb(191, 219, 254));
+        }
+        card.setBackground(bg);
+        card.setPadding(dp(12), dp(9), dp(12), dp(9));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        android.widget.TextView label =
+                new android.widget.TextView(app);
+        label.setText("✦ AI 摘要");
+        label.setTextSize(11);
+        label.setTextColor(lpWhite()
+                ? Color.rgb(37, 99, 235)
+                : Color.rgb(147, 197, 253));
+        label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        card.addView(label);
+        android.widget.TextView body =
+                new android.widget.TextView(app);
+        body.setText(lightAiSummary);
+        body.setTextSize(13);
+        body.setTextColor(lpTitleC());
+        body.setLineSpacing(0, 1.25f);
+        android.widget.LinearLayout.LayoutParams blp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        blp.topMargin = dp(3);
+        body.setLayoutParams(blp);
+        card.addView(body);
+        android.widget.TextView foot =
+                new android.widget.TextView(app);
+        foot.setText("AI 生成 · 仅供参考");
+        foot.setTextSize(10);
+        foot.setTextColor(lpFaintC());
+        android.widget.LinearLayout.LayoutParams flp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        flp.topMargin = dp(4);
+        foot.setLayoutParams(flp);
+        card.addView(foot);
+        return card;
+    }
+
     private void rebuildLightPanelRows() {
         if (lightPanelBox == null || !lightPanelAdded) {
             return;
@@ -4146,7 +5297,14 @@ public class BubbleWindow {
             hideLightDot();
             return;
         }
-        // 音乐卡永远置顶。
+        // v605: 面板卡片顺序（wei 定）：AI 开了的话
+        // AI 摘要卡放最上面，音乐第二，其他卡片第三。
+        if (FeatureFlags.aiEnabled && FeatureFlags.aiSummary
+                && lightAiSummary != null
+                && !lightAiSummary.isEmpty()) {
+            lightPanelBox.addView(buildLightAiCard());
+        }
+        // 音乐卡第二（无 AI 摘要时它就是第一）。
         if (lightMusicData != null) {
             lightPanelBox.addView(buildLightMusicCard());
         }
@@ -4157,6 +5315,15 @@ public class BubbleWindow {
         for (NotifData cd : lightStack) {
             if (cd.code != null) {
                 lightPanelBox.addView(buildLightCodeCard(cd));
+            }
+        }
+        // v601: 信息卡片紧随码卡片——本地解析出的火车
+        // 票/机票/快递/账单成票面卡，下面的行列表跳过
+        // 它们的源通知。票面颜色不跟面板黑白模式（票
+        // 就是票的样子，wei 定）。
+        if (FeatureFlags.infoCards) {
+            for (InfoParse.Card ic : lightInfoCards.values()) {
+                lightPanelBox.addView(buildLightInfoCard(ic));
             }
         }
         // v576: 下载卡在音乐卡之下、收纳列表之上。
@@ -4183,9 +5350,29 @@ public class BubbleWindow {
         android.widget.LinearLayout rows =
                 new android.widget.LinearLayout(app);
         rows.setOrientation(android.widget.LinearLayout.VERTICAL);
-        for (NotifData d : lightStack) {
+        // v605: 普通通知按时间排列（wei 定）——按通知
+        // 自身时间 postTime 从新到旧渲染（推送补投/迟
+        // 到的通知不再乱序）；栈的到达序不动，出栈与
+        // 溢出逻辑照旧。
+        java.util.List<NotifData> byTime =
+                new java.util.ArrayList<>(lightStack);
+        java.util.Collections.sort(byTime,
+                new java.util.Comparator<NotifData>() {
+                    @Override
+                    public int compare(NotifData a,
+                            NotifData b) {
+                        return Long.compare(b.postTime,
+                                a.postTime);
+                    }
+                });
+        for (NotifData d : byTime) {
             // v591: 带码的已在上面成卡，行里跳过。
             if (d.code != null) {
+                continue;
+            }
+            // v601: 成了信息卡的源通知也在上面成卡，跳过。
+            if (d.key != null
+                    && lightInfoKeyToId.containsKey(d.key)) {
                 continue;
             }
             rows.addView(buildLightRow(d, false));
@@ -4466,6 +5653,27 @@ public class BubbleWindow {
                 && menuForLightPanel;
     }
 
+    /** v595: 呼吸灯颜色翻动（XposedEntry 转发）——签身
+     * 与光晕立即换成新色；放歌流转中不动它（停歌回落
+     * 时按新色，见音乐出栈处的回落写色）。 */
+    public void onLightDotColorChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                FileLog.i("Light dotColor applied -> "
+                        + FeatureFlags.lightDotColor);
+                if (lightMusicPlaying) {
+                    return;
+                }
+                if (lightTabBg != null) {
+                    lightTabBg.setColor(
+                            FeatureFlags.lightDotColorInt());
+                }
+                applyLightGlowColors();
+            }
+        });
+    }
+
     /** v572: 黑/白模式翻动（XposedEntry 转发）——小签拆掉
      * 按新皮重建，面板开着就关掉重开（整套颜色在构建时
      * 定死，重建最稳）。 */
@@ -4560,6 +5768,59 @@ public class BubbleWindow {
                                     .LayoutParams.WRAP_CONTENT));
         }
         row.addView(mid);
+        // v600: AI 语义标签 chip（打标开且这条有标签
+        // 时）——疑似诈骗红、重要蓝、促销灰，摆在时间
+        // 左边。时光机行不打标（recall 直接跳过）。
+        if (!recall && FeatureFlags.aiEnabled
+                && FeatureFlags.aiTags && d.key != null) {
+            String tag = lightAiTags.get(d.key);
+            String tagLabel = null;
+            int tagBg = 0, tagInk = 0;
+            if ("suspect".equals(tag)) {
+                tagLabel = "疑似诈骗";
+                tagBg = lpWhite() ? Color.rgb(254, 226, 226)
+                        : Color.rgb(69, 26, 26);
+                tagInk = lpWhite() ? Color.rgb(185, 28, 28)
+                        : Color.rgb(252, 165, 165);
+            } else if ("important".equals(tag)) {
+                tagLabel = "重要";
+                tagBg = lpWhite() ? Color.rgb(219, 234, 254)
+                        : Color.rgb(30, 58, 95);
+                tagInk = lpWhite() ? Color.rgb(29, 78, 216)
+                        : Color.rgb(147, 197, 253);
+            } else if ("promo".equals(tag)) {
+                tagLabel = "促销";
+                tagBg = lpWhite() ? Color.rgb(241, 245, 249)
+                        : Color.rgb(51, 65, 85);
+                tagInk = lpWhite() ? Color.rgb(100, 116, 139)
+                        : Color.rgb(203, 213, 225);
+            }
+            if (tagLabel != null) {
+                android.widget.TextView chip =
+                        new android.widget.TextView(app);
+                chip.setText(tagLabel);
+                chip.setTextSize(10);
+                chip.setTextColor(tagInk);
+                chip.setPadding(dp(5), dp(1), dp(5), dp(1));
+                GradientDrawable cg = new GradientDrawable();
+                cg.setColor(tagBg);
+                cg.setCornerRadius(dp(6));
+                chip.setBackground(cg);
+                android.widget.LinearLayout.LayoutParams clp =
+                        new android.widget.LinearLayout
+                                .LayoutParams(
+                                        android.widget.LinearLayout
+                                                .LayoutParams
+                                                .WRAP_CONTENT,
+                                        android.widget.LinearLayout
+                                                .LayoutParams
+                                                .WRAP_CONTENT);
+                clp.leftMargin = dp(6);
+                clp.rightMargin = dp(2);
+                chip.setLayoutParams(clp);
+                row.addView(chip);
+            }
+        }
         android.widget.TextView ago =
                 new android.widget.TextView(app);
         ago.setText(lightAgoText(d.postTime));
@@ -5342,6 +6603,8 @@ public class BubbleWindow {
         if (!lightLyricFollow) {
             // v569: 词关了，歌词下面的副药丸一并收。
             lightSubEndRunnable.run();
+            // v611: 词关了——挂着的 AI 摘要可以闪了。
+            maybeFlashLightSummary();
         }
         if (lightMusicLyricBtn != null) {
             lightMusicLyricBtn.setActive(lightLyricFollow);
@@ -5393,6 +6656,68 @@ public class BubbleWindow {
         handler.removeCallbacks(lightPulseEndRunnable);
         handler.postDelayed(lightPulseEndRunnable, 11200);
         FileLog.i("Light lyric line " + line);
+    }
+
+    /** v611: AI 摘要药丸（wei 定：摘要完成就闪、一
+     * 直闪到打开面板）。内容 =「✦ AI 摘要：」+ 摘要
+     * 文，整行模式（同歌词药丸）可折行。续闪由收尾
+     * 逻辑 lightPulseEndRunnable 驱动。 */
+    private void flashLightSummaryPill() {
+        if (lightAiFlashText == null) {
+            return;
+        }
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null
+                || !lightDotAdded) {
+            return;
+        }
+        lightPillIcon.setVisibility(View.GONE);
+        setLightPillLyricMode(true);
+        lightPillLabel.setText(
+                "✦ AI 摘要：" + lightAiFlashText);
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightPulsing = true;
+        lightAiPillShowing = true;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+    }
+
+    /** v611: 摘要待闪的统一入口——占位/时机不对就
+     * 先挂着，条件齐了再亮：面板开着不闪、到达闪与
+     * 歌词闪占着药丸时不抢、放歌跟词时不显示（wei
+     * 定歌词优先）。 */
+    private void maybeFlashLightSummary() {
+        if (lightAiFlashText == null || lightPanelAdded
+                || lightFlashKey != null || lightPulsing) {
+            return;
+        }
+        if (lightMusicData != null && lightLyricFollow) {
+            return;
+        }
+        flashLightSummaryPill();
+    }
+
+    /** v611: 停掉摘要循环闪（打开面板/关 AI 时）。 */
+    private void stopLightSummaryFlash() {
+        if (lightAiFlashText == null) {
+            return;
+        }
+        lightAiFlashText = null;
+        if (lightAiPillShowing) {
+            lightAiPillShowing = false;
+            handler.removeCallbacks(lightPulseEndRunnable);
+            lightPulsing = false;
+            if (lightPill != null) {
+                lightPill.setVisibility(View.GONE);
+            }
+            if (lightDotTab != null && !lightSubShowing) {
+                lightDotTab.setVisibility(View.VISIBLE);
+            }
+        }
     }
 
     /** v566: 药丸文字模式——到达药丸（应用名）保持紧凑
@@ -5529,12 +6854,15 @@ public class BubbleWindow {
                     }
                     if (lightTabBg != null) {
                         lightTabBg.setColor(
-                                Color.rgb(59, 130, 246));
+                                FeatureFlags.lightDotColorInt());
                     }
                     refreshLightDot();
                     if (lightPanelAdded) {
                         rebuildLightPanelRows();
                     }
+                    // v611: 音乐停了——挂着的 AI 摘要
+                    // 可以接着闪了。
+                    maybeFlashLightSummary();
                 }
             }
         });
@@ -5829,8 +7157,8 @@ public class BubbleWindow {
      * 菜单共用一份）。条目口径：回复/打开应用回复/标为已读
      * 按通知自带能力出现；稍后提醒固定有；放入时光机——经
      * 典看时光机（原回看）开关、轻气泡恒有；这个应用以后
-     * 收纳——轻气泡不出现（wei 定：轻气泡模式不要这个，
-     * 本来就全收纳）；这个应用不再弹固定有。条目点击里调
+     * 收纳——两边都出现（v595 起轻气泡恢复：收纳档与跟
+     * 随档待遇有别，不是死按钮）；这个应用不再弹固定有。条目点击里调
      * 的 dismissMenu() 同时管浮层菜单与内嵌菜单的收起。 */
     private void buildMenuItems(
             android.widget.LinearLayout panel, final NotifData d,
@@ -5907,11 +7235,12 @@ public class BubbleWindow {
         // v559: 有效值是 POP（显式弹出例外，绕过默认
         // 收纳）时它现在也是照常弹的，同样显示这一行。
         int effRule = AppRules.modeFor(d.pkg);
-        // v570: 轻气泡不出现这一行（wei 定——轻气泡里普通
-        // 通知本来就全收纳，这行是死按钮）。
-        if (!FeatureFlags.lightMode
-                && (effRule == AppRules.DEFAULT
-                || effRule == AppRules.POP)) {
+        // v595: wei 改规矩——轻气泡里「收纳」档的新通知
+        // 直接进面板、只提示角标，跟随的照旧闪药丸，两
+        // 档待遇有别，这一行在轻气泡下恢复显示（v570 的
+        // 移除作废）。
+        if (effRule == AppRules.DEFAULT
+                || effRule == AppRules.POP) {
             panel.addView(buildMenuRow("⇥", "这个应用以后收纳",
                     null, new View.OnClickListener() {
                         @Override
@@ -8013,6 +9342,19 @@ public class BubbleWindow {
                         rebuildLightPanelRows();
                     }
                 }
+                // v601: 源通知被移除时信息卡联动收（若
+                // 它还在收纳栈里，removeNotifByKey 那条
+                // 路也会经 lightPushRecall 再收一次，幂
+                // 等无碍）。
+                if (FeatureFlags.lightMode
+                        && lightInfoKeyToId.containsKey(key)) {
+                    removeInfoCardForKey(key);
+                    refreshLightDot();
+                    if (lightPanelAdded
+                            && !lightPanelRecallMode) {
+                        rebuildLightPanelRows();
+                    }
+                }
                 removeNotifByKey(key);
                 rebuildDock();
             }
@@ -8391,8 +9733,12 @@ public class BubbleWindow {
                 // data.code 赋过值。同款识别（含柜号），
                 // 识别完再收纳。
                 if (FeatureFlags.code && data.code == null) {
+                    // v602: 识别看全文（fullText）——取件
+                    // 码/验证码常在 bigText 里，短正文会被
+                    // 应用截断（实测菜鸟取件码短正文只到
+                    // 「取件码：8」）。
                     String[] found = extractCode(data.title,
-                            data.text);
+                            data.fullText());
                     if (found != null) {
                         data.code = found[0];
                         data.codeLabel = found[1];
@@ -8400,7 +9746,7 @@ public class BubbleWindow {
                                 isPickupKeyword(found[1]);
                         if (data.isPickupCode) {
                             data.cabinet = extractCabinet(
-                                    data.title, data.text);
+                                    data.title, data.fullText());
                         }
                     }
                 }
@@ -8454,7 +9800,9 @@ public class BubbleWindow {
         // v259: code switch off = skip recognition entirely, the
         // notification still pops as a regular capsule.
         if (FeatureFlags.code && data != null && data.code == null) {
-            String[] found = extractCode(data.title, data.text);
+            // v602: 同轻气泡侧——识别看全文（fullText）。
+            String[] found = extractCode(data.title,
+                    data.fullText());
             if (found != null) {
                 data.code = found[0];
                 data.codeLabel = found[1];
@@ -8463,8 +9811,8 @@ public class BubbleWindow {
                 // number — show it too (user 2026-11-21
                 // "如果有柜号肯定也要显示啊").
                 if (data.isPickupCode) {
-                    data.cabinet =
-                            extractCabinet(data.title, data.text);
+                    data.cabinet = extractCabinet(data.title,
+                            data.fullText());
                 }
             }
         }
@@ -8480,8 +9828,11 @@ public class BubbleWindow {
                 && !data.isCall && !data.isMusic && !data.isDownload
                 && !data.isLive && !data.isNavi && !data.isBus
                 && data.code == null) {
+            // v604: 关键词也扫全文（fullText）——促销词
+            // 常只在 bigText 里，短正文扫不到。
             String hay = (data.title == null ? "" : data.title)
-                    + "\n" + (data.text == null ? "" : data.text);
+                    + "\n" + (data.fullText() == null
+                            ? "" : data.fullText());
             for (String w : FeatureFlags.filterWordList()) {
                 if (!w.isEmpty() && hay.contains(w)) {
                     FileLog.i("KeywordFilter hit pkg=" + data.pkg

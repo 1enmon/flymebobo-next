@@ -411,6 +411,7 @@ public class SettingsStore {
                             || "recallTtlMin".equals(key)
                             || "filterWords".equals(key)
                             || "lightDotPos".equals(key)
+                            || "lightDotColor".equals(key)
                             || "lightPanelStyle".equals(key)) {
                         fEd.putString(key, v);
                         fChanged = true;

@@ -319,6 +319,9 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_CALL_RESULT);
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
+        filter.addAction(NotificationService.ACTION_AI_RESULT);
+        filter.addAction(
+                NotificationService.ACTION_AI_INFO_RESULT);
         filter.addAction(NotificationService.ACTION_LIGHT_OPEN);
         filter.addAction(NotificationService.ACTION_LIGHT_RECALL_OPEN);
         filter.addAction(NotificationService.ACTION_APP_RULES);
@@ -603,6 +606,34 @@ public class XposedEntry extends XposedModule {
                             bw.refreshLightDot();
                         }
                     }
+                    // v596: 常亮开关翻动——refresh 里按常显
+                    // 口径重判小签显隐（v597 定正：常亮 =
+                    // 一直显示，呼吸不变）。
+                    if ("lightDotSteady".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.refreshLightDot();
+                        }
+                    }
+                    // v600: AI 三个开关翻动——开则立即按当前
+                    // 收纳栈请求一次分析，关总开关则清掉摘
+                    // 要与标签。
+                    if ("aiEnabled".equals(fkey)
+                            || "aiSummary".equals(fkey)
+                            || "aiTags".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onAiSettingsChanged();
+                        }
+                    }
+                    // v601: 信息卡片总开关翻动——关掉时
+                    // BubbleWindow 清卡重建面板。
+                    if ("infoCards".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onInfoCardsChanged();
+                        }
+                    }
                     // v564: 小签位置是字符串——设置页 chips /
                     // 拖动落盘回推都借这条广播带 pos extra。
                     if ("lightDotPos".equals(fkey)) {
@@ -634,6 +665,27 @@ public class XposedEntry extends XposedModule {
                             FileLog.i("Light style -> "
                                     + FeatureFlags
                                             .lightPanelStyle);
+                        }
+                    }
+                    // v595: 呼吸灯颜色是字符串——设置页色点
+                    // 借这条广播带 color extra，SystemUI 立
+                    // 即给小签与光晕换色。
+                    if ("lightDotColor".equals(fkey)) {
+                        String cid = intent.getStringExtra(
+                                "color");
+                        if (cid != null) {
+                            FeatureFlags.lightDotColor =
+                                    FeatureFlags
+                                            .parseLightDotColor(
+                                                    cid);
+                            FileLog.i("Light dotColor -> "
+                                    + FeatureFlags
+                                            .lightDotColor);
+                            BubbleWindow bw =
+                                    BubbleWindow.getInstance();
+                            if (bw != null) {
+                                bw.onLightDotColorChanged();
+                            }
                         }
                     }
                     // v557: 长按菜单开关关掉——正开着的菜单立即
@@ -1097,6 +1149,32 @@ public class XposedEntry extends XposedModule {
                     }
                     return;
                 }
+                // v600: AI 分析结果（App 进程联网算完广播
+                // 回来）——交给 BubbleWindow 存摘要与标签。
+                if (NotificationService.ACTION_AI_RESULT.equals(
+                        intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onAiResult(
+                                intent.getStringExtra("sig"),
+                                intent.getStringExtra(
+                                        "summaryText"),
+                                intent.getStringExtra("tagsBlob"));
+                    }
+                    return;
+                }
+                // v605: 信息卡 AI 兜底/核对结果——交给
+                // BubbleWindow 补卡/补时间。
+                if (NotificationService.ACTION_AI_INFO_RESULT
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onAiInfoResult(
+                                intent.getStringExtra(
+                                        "infoResult"));
+                    }
+                    return;
+                }
                 // Live download progress (v95, v98, v99: title
                 // carries the percent, "正在下载 45%", text is content).
                 if (NotificationService.ACTION_DOWNLOAD.equals(
@@ -1373,6 +1451,13 @@ public class XposedEntry extends XposedModule {
                 NotifData data = new NotifData(
                         key, displayPkg, title, text, postTime, null,
                         albumArt, isMusic, lyrics, isDownload);
+                // v604: NS 路带来的完整正文（经典侧识别
+                // 同轻气泡走 fullText，wei 定）。
+                try {
+                    data.bigText = intent.getStringExtra(
+                            "bigText");
+                } catch (Throwable ignored) {
+                }
                 // v239: download percent for the capsule bar.
                 try {
                     data.downloadPct = intent.getIntExtra(

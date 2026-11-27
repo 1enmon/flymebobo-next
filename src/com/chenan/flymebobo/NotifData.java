@@ -17,6 +17,22 @@ public class NotifData {
     /** Mutable: live download progress (v95) rewrites line 2 in place,
      * so a rebuild shows the latest percent instead of the stale one. */
     public String text;
+    /** v602: 通知的完整正文（android.bigText 原样）。
+     * 很多应用短正文放 text、全文放 bigText（测试 App
+     * 与 12306/快递类都是），而模块历来只读 text——识
+     * 别类功能（验证码/取件码、信息卡片、AI）要用
+     * fullText() 看全文，显示仍用 text 不变。 */
+    public String bigText;
+
+    /** v602: 识别用的全文：bigText 与 text 取更长的。 */
+    public String fullText() {
+        if (bigText != null && !bigText.isEmpty()
+                && (text == null
+                        || bigText.length() > text.length())) {
+            return bigText;
+        }
+        return text;
+    }
     public final long postTime;
     public final Bitmap icon;
     /** Mutable (v218): late session album art is applied in place

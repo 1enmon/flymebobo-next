@@ -329,6 +329,13 @@ public class MainActivity extends Activity {
             new Feature("qqFree", "QQ音乐flyme版免费听", "常开，无需设置",
                     "打开 QQ 音乐 Flyme 版，自动查剩余免费时长，\n低于 2 小时自动领奖励补到 4 小时。\n两次领取间隔不少于 4 小时。\n领满会弹提示；本来就 ≥2 小时也会提示。\n不支持主动领取，免费听一直开着。",
                     Color.rgb(190, 18, 60), "免", true, "music", true),
+            // v609: 网络歌词兜底（wei 定：归音乐管，从
+            // AI 卡移过来）——挂在音乐卡下，经典/轻气泡
+            // 两边都出这一行。默认开（v88 起的老行为）。
+            new Feature("lyricNet", "网络歌词兜底",
+                    "播放器不送歌词时多源找词；找过的自动存本地",
+                    "播放器自己不送歌词行时，按歌名+歌手依次去 LRCLIB、网易云、QQ 音乐找带时间轴的歌词，跟着播放进度显示；三个源都没有时，若 AI 助手里填了 Key，再让 AI 默写兜底（时间按进度估算）。\n找到的歌词自动存一份在本地，同一首歌下次播放直接用、不再联网，断网也能显示。",
+                    Color.rgb(219, 39, 119), "词", true, "music"),
     };
 
     // v336: 顶层卡片（parent == null 的开关）。嵌套开关不单独占行，
@@ -495,7 +502,22 @@ public class MainActivity extends Activity {
     private boolean lightUi;
     private View modeCardView;
     private View lightCardView;
+    // v595: 轻气泡卡改点击展开（wei 定：和安静规则一样）；
+    // body/箭头留引用给搜索跳转展开（expandCard "light"）。
+    private View lightBody;
+    private TextView lightChev;
+    // v603: AI 助手独立成卡（wei 定）——卡/body/箭头
+    // 引用给搜索跳转展开（expandCard "ai"）。
+    private View aiCardView;
+    private View aiBody;
+    private TextView aiChev;
+    // v612: AI 风险告知书「同意」后回拨开关的一次性
+    // 放行标记（防弹窗拦截把自己绕成死循环）。
+    private boolean aiRiskAgreed;
     private final java.util.Map<String, TextView> lightPosChips =
+            new java.util.HashMap<>();
+    // v595: 呼吸灯颜色色点（id → chip），同 lightPosChips。
+    private final java.util.Map<String, TextView> lightColorChips =
             new java.util.HashMap<>();
     // v567: 面板外观五项的当前值 [宽dp,可见行数,圆角dp,
     // 不透明%,比例%]，buildLightCard 从 prefs 载入，滑条
@@ -510,6 +532,16 @@ public class MainActivity extends Activity {
     // 开关联动置灰。
     private final java.util.HashMap<String, View>
             lightMusicSubViews = new java.util.HashMap<>();
+    // v600: 轻气泡「AI 助手」子设置行（收纳摘要/语义
+    // 打标），供总开关联动置灰。
+    private final java.util.HashMap<String, View>
+            lightAiSubViews = new java.util.HashMap<>();
+    // v601: 轻气泡「信息卡片」子设置行（自动提醒），
+    // 供总开关联动置灰；提前量 chips 单独存引用重绘。
+    private final java.util.HashMap<String, View>
+            lightInfoSubViews = new java.util.HashMap<>();
+    private final java.util.HashMap<Integer, TextView>
+            infoLeadChips = new java.util.HashMap<>();
     private View[] lightTabPages;
     private TextView[] lightTabBtns;
     private LinearLayout lightHomeList;
@@ -908,6 +940,10 @@ public class MainActivity extends Activity {
             list.addView(buildGroupLabel("轻气泡", false));
             lightCardView = buildLightCard();
             list.addView(lightCardView);
+            // v603: AI 助手独立成卡（wei 定），紧跟轻
+            // 气泡卡，同在「轻气泡」组里。
+            aiCardView = buildAiCard();
+            list.addView(aiCardView);
         } else {
             list.addView(buildGroupLabel("外观", false));
             list.addView(buildAppearanceCard());
@@ -2590,14 +2626,605 @@ public class MainActivity extends Activity {
 
     /** 轻气泡专属卡：小签位置（左右 × 上中下药丸）+ 说明 +
      * 切回经典常驻入口。 */
-    private View buildLightCard() {
-        LinearLayout card = newColorCard(LIGHT_CARD_COLOR);
-        card.addView(buildColorCardHead(LIGHT_CARD_COLOR, "轻",
-                "轻气泡", "简洁收纳 · 点边缘小签打开面板"));
-        LinearLayout body = new LinearLayout(this);
+    /** v603: AI 助手独立成卡（wei 定：「ai功能单独
+     * 出来」）——不再寄居轻气泡卡，轻气泡组里单独一
+     * 张可展开卡；标题去掉「自带 Key」字样（wei
+     * 定），Key 仍由用户自己填，落盘走 AiKey 加密
+     * （系统密钥库），开启时 Toast 提示本地加密储
+     * 存。仅轻气泡模式出现（AI 只分析收纳栈）。 */
+    /** v612: AI 风险告知书（wei 定：每次打开 AI 助
+     * 手开关都弹、强制阅读 10 秒、同意才真开）。同
+     * 意按钮带倒计时，10 秒内点不动；取消/点外面关
+     * 掉 = 不开启。同意后置一次性放行标记并回拨开
+     * 关，走正常开启流程。 */
+    private void showAiRiskDialog(final View switchView) {
+        final android.app.Dialog dlg =
+                new android.app.Dialog(this);
+        dlg.requestWindowFeature(
+                android.view.Window.FEATURE_NO_TITLE);
+        android.widget.LinearLayout box =
+                new android.widget.LinearLayout(this);
+        box.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        box.setPadding(dp(20), dp(18), dp(20), dp(16));
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(Color.WHITE);
+        bg.setCornerRadius(dp(16));
+        box.setBackground(bg);
+        TextView title = new TextView(this);
+        title.setText("开启 AI 助手前请先阅读");
+        title.setTextSize(16);
+        title.setTextColor(L_INK);
+        title.getPaint().setFakeBoldText(true);
+        box.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("风险告知与免责声明 · 每次开启都会展示");
+        sub.setTextSize(12);
+        sub.setTextColor(L_SUB);
+        android.widget.LinearLayout.LayoutParams subLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        subLp.topMargin = dp(3);
+        sub.setLayoutParams(subLp);
+        box.addView(sub);
+        android.widget.ScrollView scroll =
+                new android.widget.ScrollView(this);
+        TextView body = new TextView(this);
+        body.setText("一、数据会离开你的手机\n"
+                + "开启后，被收纳通知的标题和正文会发送到你填写的 AI 服务商（默认 DeepSeek）处理，用于生成摘要、标签和信息卡核对。通知可能包含聊天内容、账单金额、行程信息等个人内容；发送后受服务商隐私政策约束，其留存与使用本模块无法控制。\n\n"
+                + "二、这些内容永远不会发送\n"
+                + "验证码、校验码类通知，以及带验证码 / 取件码的条目，永不发送给 AI。\n\n"
+                + "三、Key 与费用\n"
+                + "API Key 只加密储存在本机（系统密钥库托管），不会上传到模块作者的任何服务器。调用 AI 服务产生的费用由你与服务商结算；Key 请妥善保管、勿泄露，保管责任在你本人。\n\n"
+                + "四、结果仅供参考（免责）\n"
+                + "AI 生成的摘要、标签（含「疑似诈骗」判断）和信息核对结果由大模型自动生成，可能出现错误、遗漏或误判，仅供参考，不能作为付款、拦截、出行等决定的唯一依据。因依赖 AI 结果产生的任何损失，本模块与作者不承担责任。\n\n"
+                + "五、随时可以关闭\n"
+                + "关闭 AI 助手总开关后立即停止一切发送。点「我已阅读并同意」即视为你已理解并接受以上内容。");
+        body.setTextSize(13.5f);
+        body.setTextColor(L_BODY);
+        body.setLineSpacing(dp(3), 1f);
+        scroll.addView(body);
+        android.widget.LinearLayout.LayoutParams scrollLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        dp(280));
+        scrollLp.topMargin = dp(10);
+        scroll.setLayoutParams(scrollLp);
+        box.addView(scroll);
+        android.widget.LinearLayout row =
+                new android.widget.LinearLayout(this);
+        row.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams rowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        rowLp.topMargin = dp(14);
+        row.setLayoutParams(rowLp);
+        android.widget.Button cancel =
+                new android.widget.Button(this);
+        cancel.setText("取消");
+        cancel.setTextSize(14);
+        cancel.setTextColor(L_SUB);
+        cancel.setBackground(null);
+        android.widget.LinearLayout.LayoutParams cLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f);
+        cancel.setLayoutParams(cLp);
+        row.addView(cancel);
+        final android.widget.Button agree =
+                new android.widget.Button(this);
+        agree.setText("我已阅读并同意（10）");
+        agree.setTextSize(14);
+        agree.setEnabled(false);
+        agree.setTextColor(Color.rgb(148, 163, 184));
+        android.graphics.drawable.GradientDrawable aBg =
+                new android.graphics.drawable.GradientDrawable();
+        aBg.setColor(Color.rgb(226, 232, 240));
+        aBg.setCornerRadius(dp(10));
+        agree.setBackground(aBg);
+        android.widget.LinearLayout.LayoutParams aLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        2f);
+        agree.setLayoutParams(aLp);
+        row.addView(agree);
+        box.addView(row);
+        dlg.setContentView(box);
+        android.view.Window win = dlg.getWindow();
+        if (win != null) {
+            win.setBackgroundDrawable(
+                    new android.graphics.drawable
+                            .ColorDrawable(
+                                    Color.TRANSPARENT));
+            android.view.WindowManager.LayoutParams wlp =
+                    win.getAttributes();
+            wlp.width = (int) (getResources()
+                    .getDisplayMetrics().widthPixels * 0.88);
+            win.setAttributes(wlp);
+        }
+        final android.os.Handler h = new android.os.Handler(
+                android.os.Looper.getMainLooper());
+        final int[] left = new int[]{10};
+        final Runnable[] tick = new Runnable[1];
+        tick[0] = new Runnable() {
+            @Override
+            public void run() {
+                left[0]--;
+                if (left[0] <= 0) {
+                    agree.setEnabled(true);
+                    agree.setText("我已阅读并同意");
+                    agree.setTextColor(Color.WHITE);
+                    android.graphics.drawable.GradientDrawable on =
+                            new android.graphics.drawable
+                                    .GradientDrawable();
+                    on.setColor(L_ACCENT);
+                    on.setCornerRadius(dp(10));
+                    agree.setBackground(on);
+                } else {
+                    agree.setText(
+                            "我已阅读并同意（" + left[0] + "）");
+                    h.postDelayed(tick[0], 1000);
+                }
+            }
+        };
+        h.postDelayed(tick[0], 1000);
+        dlg.setOnDismissListener(
+                new android.content.DialogInterface
+                        .OnDismissListener() {
+                    @Override
+                    public void onDismiss(
+                            android.content.DialogInterface d) {
+                        h.removeCallbacks(tick[0]);
+                    }
+                });
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dlg.dismiss();
+            }
+        });
+        agree.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                aiRiskAgreed = true;
+                dlg.dismiss();
+                switchView.performClick();
+                aiRiskAgreed = false;
+            }
+        });
+        dlg.show();
+    }
+
+    private View buildAiCard() {
+        LinearLayout card = newColorCard(
+                Color.rgb(37, 99, 235));
+        LinearLayout head = buildColorCardHead(
+                Color.rgb(37, 99, 235), "AI", "AI 助手",
+                "收纳摘要 · 语义打标 · Key 本地加密储存");
+        card.addView(head);
+        final TextView chev = buildExpandChevron();
+        head.addView(chev);
+        final LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(dp(12), dp(2), dp(12), dp(12));
+        body.setVisibility(View.GONE);
         card.addView(body);
+        aiBody = body;
+        aiChev = chev;
+        final boolean[] expanded = new boolean[]{false};
+        body.setTag(expanded);
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                body.setVisibility(expanded[0]
+                        ? View.VISIBLE : View.GONE);
+                setChevronExpanded(chev, expanded[0]);
+            }
+        });
+        // v603: 原 v600 节内容原样搬入（开关/输入框/
+        // 保存/联动都不动），只改归属与 Key 的落盘形
+        // 式（见下 AiKey 加密）。
+
+        body.addView(buildSubSwitch(new Feature(
+                "aiEnabled", "AI 助手",
+                "收纳摘要与语义打标，默认关；开启后通知标题与正文会发送给 AI 服务",
+                "", Color.rgb(37, 99, 235), "AI", false,
+                null)));
+        lightAiSubViews.clear();
+        View aiSumRow = buildSubSwitch(new Feature(
+                "aiSummary", "收纳摘要",
+                "面板顶部一句话总结收纳里的通知",
+                "", Color.rgb(37, 99, 235), "摘", true, null));
+        lightAiSubViews.put("aiSummary", aiSumRow);
+        body.addView(aiSumRow);
+        View aiTagRow = buildSubSwitch(new Feature(
+                "aiTags", "语义打标",
+                "给收纳通知打疑似诈骗 / 促销 / 重要标签",
+                "", Color.rgb(37, 99, 235), "标", true, null));
+        lightAiSubViews.put("aiTags", aiTagRow);
+        body.addView(aiTagRow);
+        // v609: 网络歌词兜底已按 wei 的话移去音乐
+        // 卡片那边（FEATURES 表 parent=music），AI
+        // 卡里不再放这一行。
+        final android.content.SharedPreferences aiPrefs =
+                getSharedPreferences("flymebobo_ai",
+                        MODE_PRIVATE);
+        final EditText aiKeyIn = new EditText(this);
+        aiKeyIn.setHint("DeepSeek API Key（必填）");
+        aiKeyIn.setText(AiKey.decrypt(
+                aiPrefs.getString("aiKey", "")));
+        aiKeyIn.setTextSize(13);
+        aiKeyIn.setTextColor(L_INK);
+        aiKeyIn.setHintTextColor(L_SUB);
+        aiKeyIn.setSingleLine(true);
+        aiKeyIn.setInputType(android.text.InputType
+                .TYPE_CLASS_TEXT
+                | android.text.InputType
+                        .TYPE_TEXT_VARIATION_PASSWORD);
+        body.addView(aiKeyIn);
+        // v614: wei 的硅基流动邀请链接（他本人提供）：
+        // 没 Key 的用户点此注册，双方都有免费额度。
+        TextView aiInvite = new TextView(this);
+        aiInvite.setText("没有 Key？用邀请链接注册硅基流动，双方都有免费额度 ›");
+        aiInvite.setTextSize(12.5f);
+        aiInvite.setTextColor(L_ACCENT);
+        aiInvite.getPaint().setUnderlineText(true);
+        aiInvite.setPadding(0, dp(2), 0, dp(6));
+        aiInvite.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                try {
+                    startActivity(new android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(
+                                    "https://cloud.siliconflow.cn/i/9B788WmL")));
+                } catch (Throwable ignored) {
+                }
+            }
+        });
+        body.addView(aiInvite);
+        final EditText aiBaseIn = new EditText(this);
+        aiBaseIn.setHint("接口地址");
+        aiBaseIn.setText(aiPrefs.getString("aiBase",
+                "https://api.deepseek.com"));
+        aiBaseIn.setTextSize(13);
+        aiBaseIn.setTextColor(L_INK);
+        aiBaseIn.setHintTextColor(L_SUB);
+        aiBaseIn.setSingleLine(true);
+        body.addView(aiBaseIn);
+        final EditText aiModelIn = new EditText(this);
+        aiModelIn.setHint("摘要模型（大而稳）");
+        aiModelIn.setText(aiPrefs.getString("aiModel",
+                "deepseek-chat"));
+        aiModelIn.setTextSize(13);
+        aiModelIn.setTextColor(L_INK);
+        aiModelIn.setHintTextColor(L_SUB);
+        aiModelIn.setSingleLine(true);
+        body.addView(aiModelIn);
+        // v614: 打标单独一个小模型（wei 定：打标求快、
+        // 摘要求稳）；留空 = 跟随摘要模型。
+        final EditText aiModelFastIn = new EditText(this);
+        aiModelFastIn.setHint("打标模型（小而快，可留空）");
+        aiModelFastIn.setText(aiPrefs.getString("aiModelFast",
+                ""));
+        aiModelFastIn.setTextSize(13);
+        aiModelFastIn.setTextColor(L_INK);
+        aiModelFastIn.setHintTextColor(L_SUB);
+        aiModelFastIn.setSingleLine(true);
+        body.addView(aiModelFastIn);
+        // v614: 模型自动识别（wei 提）——拿地址+Key 拉
+        // /models 列表点选，免手打模型名。
+        LinearLayout aiPickRow = new LinearLayout(this);
+        aiPickRow.setOrientation(LinearLayout.HORIZONTAL);
+        TextView aiPickSummary = buildWhitePillButton(
+                "选摘要模型", L_ACCENT);
+        LinearLayout.LayoutParams aiPickLp1 =
+                new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1);
+        aiPickLp1.setMargins(0, dp(6), dp(4), 0);
+        aiPickRow.addView(aiPickSummary, aiPickLp1);
+        TextView aiPickFast = buildWhitePillButton(
+                "选打标模型", L_ACCENT);
+        LinearLayout.LayoutParams aiPickLp2 =
+                new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1);
+        aiPickLp2.setMargins(dp(4), dp(6), 0, 0);
+        aiPickRow.addView(aiPickFast, aiPickLp2);
+        body.addView(aiPickRow);
+        aiPickSummary.setOnClickListener(
+                new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                fetchAiModels(aiBaseIn.getText().toString(),
+                        aiKeyIn.getText().toString(), false,
+                        aiModelIn);
+            }
+        });
+        aiPickFast.setOnClickListener(
+                new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                fetchAiModels(aiBaseIn.getText().toString(),
+                        aiKeyIn.getText().toString(), true,
+                        aiModelFastIn);
+            }
+        });
+        TextView aiSave = buildWhitePillButton("保存 AI 设置",
+                L_ACCENT);
+        aiSave.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                aiPrefs.edit()
+                        .putString("aiKey", AiKey.encrypt(
+                                aiKeyIn.getText().toString()
+                                        .trim()))
+                        .putString("aiBase", aiBaseIn.getText()
+                                .toString().trim())
+                        .putString("aiModel", aiModelIn.getText()
+                                .toString().trim())
+                        .putString("aiModelFast",
+                                aiModelFastIn.getText()
+                                        .toString().trim())
+                        .apply();
+                android.widget.Toast.makeText(
+                        MainActivity.this, "AI 设置已保存",
+                        android.widget.Toast.LENGTH_SHORT)
+                        .show();
+                // Key 刚填好时若总开关已开，让 SystemUI
+                // 立刻按当前收纳栈请求一次（借总开关广播
+                // 重发一遍当前值）。
+                if (isOn("aiEnabled")) {
+                    setFeatureFlag("aiEnabled", true);
+                }
+            }
+        });
+        body.addView(aiSave);
+        TextView aiNote = new TextView(this);
+        aiNote.setText("API Key 加密储存在本机（系统密钥"
+                + "库托管），不会上传到任何服务器。只在收纳"
+                + "内容变化时异步调用，只发标题与正文；验"
+                + "证码类永不发送。没有 Key 时本卡不工作，"
+                + "模块其余功能不受影响。");
+        aiNote.setTextSize(11.5f);
+        aiNote.setTextColor(L_SUB);
+        aiNote.setPadding(0, dp(4), 0, dp(2));
+        body.addView(aiNote);
+        refreshAiLinkage();
+        return card;
+    }
+
+    /** v614: 拉厂商 /models 列表（OpenAI 兼容，wei 提
+     * 的模型自动识别），回主线程弹自绘列表点选填入目
+     * 标框；适合的模型标推荐并排前面。失败只 Toast，
+     * 不影响手填。 */
+    private void fetchAiModels(String base, final String key,
+            final boolean forFast, final EditText target) {
+        final String b = base == null ? "" : base.trim()
+                .replaceAll("/+$", "");
+        if (b.isEmpty() || key == null
+                || key.trim().isEmpty()) {
+            android.widget.Toast.makeText(this,
+                    "先填接口地址和 Key",
+                    android.widget.Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+        android.widget.Toast.makeText(this,
+                "正在获取模型列表…",
+                android.widget.Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final java.util.List<String> ids =
+                        new java.util.ArrayList<>();
+                String err = null;
+                try {
+                    java.net.HttpURLConnection conn =
+                            (java.net.HttpURLConnection)
+                                    new java.net.URL(b
+                                            + "/models")
+                                            .openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(15000);
+                    conn.setRequestProperty("Authorization",
+                            "Bearer " + key.trim());
+                    int code = conn.getResponseCode();
+                    java.io.BufferedReader br =
+                            new java.io.BufferedReader(
+                                    new java.io.InputStreamReader(
+                                            code >= 200 && code < 300
+                                                    ? conn.getInputStream()
+                                                    : conn.getErrorStream(),
+                                            java.nio.charset
+                                                    .StandardCharsets
+                                                    .UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        sb.append(line);
+                    }
+                    br.close();
+                    if (code < 200 || code >= 300) {
+                        err = "HTTP " + code;
+                    } else {
+                        org.json.JSONArray data =
+                                new org.json.JSONObject(
+                                        sb.toString())
+                                        .getJSONArray("data");
+                        for (int i = 0; i < data.length();
+                                i++) {
+                            String id = data.getJSONObject(i)
+                                    .optString("id", "");
+                            if (!id.isEmpty()) {
+                                ids.add(id);
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    err = t.getMessage();
+                }
+                final String fErr = err;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (ids.isEmpty()) {
+                            android.widget.Toast.makeText(
+                                    MainActivity.this,
+                                    "没拿到模型列表"
+                                            + (fErr == null ? ""
+                                                    : "：" + fErr)
+                                            + "，可以手填",
+                                    android.widget.Toast
+                                            .LENGTH_LONG)
+                                    .show();
+                            return;
+                        }
+                        showAiModelPicker(ids, forFast,
+                                target);
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** v614: 按名字给模型排推荐（只按命名规律猜个八
+     * 九不离十，最终以点选为准）：打标挑小而快，摘
+     * 要挑大而稳。 */
+    private boolean aiModelRecommended(String id,
+            boolean forFast) {
+        String s = id.toLowerCase(java.util.Locale.ROOT);
+        if (forFast) {
+            return s.contains("8b") || s.contains("7b")
+                    || s.contains("9b")
+                    || s.contains("flash")
+                    || s.contains("mini")
+                    || s.contains("lite");
+        }
+        return s.contains("32b") || s.contains("72b")
+                || s.contains("235b") || s.contains("v3")
+                || s.contains("plus") || s.contains("max")
+                || s.contains("pro");
+    }
+
+    private void showAiModelPicker(
+            java.util.List<String> ids,
+            final boolean forFast, final EditText target) {
+        java.util.List<String> sorted =
+                new java.util.ArrayList<>(ids);
+        java.util.Collections.sort(sorted,
+                new java.util.Comparator<String>() {
+            @Override
+            public int compare(String a, String b2) {
+                boolean ra = aiModelRecommended(a, forFast);
+                boolean rb = aiModelRecommended(b2, forFast);
+                if (ra != rb) {
+                    return ra ? -1 : 1;
+                }
+                return a.compareTo(b2);
+            }
+        });
+        final android.app.Dialog dlg =
+                new android.app.Dialog(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(14), dp(16), dp(12));
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable
+                        .GradientDrawable();
+        bg.setColor(android.graphics.Color.WHITE);
+        bg.setCornerRadius(dp(16));
+        box.setBackground(bg);
+        TextView title = new TextView(this);
+        title.setText(forFast ? "选打标模型（小而快）"
+                : "选摘要模型（大而稳）");
+        title.setTextSize(15);
+        title.setTextColor(L_INK);
+        title.setTypeface(null,
+                android.graphics.Typeface.BOLD);
+        box.addView(title);
+        android.widget.ScrollView sc =
+                new android.widget.ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        sc.addView(list);
+        LinearLayout.LayoutParams scLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        dp(320));
+        scLp.setMargins(0, dp(8), 0, dp(4));
+        box.addView(sc, scLp);
+        for (final String id : sorted) {
+            TextView row = new TextView(this);
+            boolean rec = aiModelRecommended(id, forFast);
+            row.setText(id + (rec ? "  · 推荐" : ""));
+            row.setTextSize(13.5f);
+            row.setTextColor(rec ? L_ACCENT : L_INK);
+            row.setPadding(dp(6), dp(10), dp(6), dp(10));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    target.setText(id);
+                    dlg.dismiss();
+                    android.widget.Toast.makeText(
+                            MainActivity.this,
+                            "已填入：" + id + "（记得点保存）",
+                            android.widget.Toast.LENGTH_SHORT)
+                            .show();
+                }
+            });
+            list.addView(row);
+        }
+        dlg.setContentView(box);
+        if (dlg.getWindow() != null) {
+            dlg.getWindow().setBackgroundDrawable(
+                    new android.graphics.drawable
+                            .ColorDrawable(
+                                    android.graphics.Color
+                                            .TRANSPARENT));
+            dlg.getWindow().setLayout(
+                    (int) (getResources().getDisplayMetrics()
+                            .widthPixels * 0.88),
+                    android.view.WindowManager.LayoutParams
+                            .WRAP_CONTENT);
+        }
+        dlg.show();
+    }
+
+    private View buildLightCard() {
+        LinearLayout card = newColorCard(LIGHT_CARD_COLOR);
+        // v595: wei 定——这张卡和安静规则一样是点击展开
+        // 的：卡头带箭头、正文默认收起，点头展开/收起。
+        LinearLayout head = buildColorCardHead(LIGHT_CARD_COLOR,
+                "轻", "轻气泡", "简洁收纳 · 点边缘小签打开面板");
+        card.addView(head);
+        final TextView chev = buildExpandChevron();
+        head.addView(chev);
+        final LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(12), dp(2), dp(12), dp(12));
+        body.setVisibility(View.GONE);
+        card.addView(body);
+        lightBody = body;
+        lightChev = chev;
+        final boolean[] expanded = new boolean[]{false};
+        body.setTag(expanded);
+        head.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expanded[0] = !expanded[0];
+                body.setVisibility(expanded[0]
+                        ? View.VISIBLE : View.GONE);
+                setChevronExpanded(chev, expanded[0]);
+            }
+        });
 
         TextView posLabel = new TextView(this);
         posLabel.setText("小签位置（也可以直接拖小签）");
@@ -2632,6 +3259,48 @@ public class MainActivity extends Activity {
                 "lightDotGlow", "呼吸灯边缘发光",
                 "小签呼吸时，屏幕边缘跟着泛起一圈光晕",
                 "", Color.rgb(59, 130, 246), "光", true,
+                null)));
+
+        // v595: 呼吸灯颜色（wei 点名）——六色点选，点完
+        // 立即生效；呼吸照旧（wei 定：不是常亮），放歌
+        // 时仍按色相流转。
+        TextView colorLabel = new TextView(this);
+        colorLabel.setText("呼吸灯颜色");
+        colorLabel.setTextSize(13);
+        colorLabel.setTextColor(L_INK);
+        colorLabel.setTypeface(colorLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams cllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        cllp.topMargin = dp(14);
+        colorLabel.setLayoutParams(cllp);
+        body.addView(colorLabel);
+        lightColorChips.clear();
+        LinearLayout colorRow = new LinearLayout(this);
+        colorRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams crlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        crlp.topMargin = dp(8);
+        colorRow.setLayoutParams(crlp);
+        colorRow.addView(buildLightColorChip("blue", "蓝"));
+        colorRow.addView(buildLightColorChip("green", "绿"));
+        colorRow.addView(buildLightColorChip("purple", "紫"));
+        colorRow.addView(buildLightColorChip("orange", "橙"));
+        colorRow.addView(buildLightColorChip("pink", "粉"));
+        colorRow.addView(buildLightColorChip("cyan", "青"));
+        body.addView(colorRow);
+        refreshLightColorChips();
+
+        // v596: 呼吸灯常亮开关（wei 点名）——v597 定正：
+        // 常亮 = 一直显示，栈空了也不隐藏，呼吸照旧。
+        body.addView(buildSubSwitch(new Feature(
+                "lightDotSteady", "呼吸灯常亮",
+                "小签一直显示，收纳空了也不隐藏（照常呼吸）",
+                "", Color.rgb(59, 130, 246), "亮", false,
                 null)));
 
         // v572: 打开方式单独设计（预览定稿）——两张示意图
@@ -2702,7 +3371,8 @@ public class MainActivity extends Activity {
                 "", Color.rgb(219, 39, 119), "音", true, null)));
         lightMusicSubViews.clear();
         for (String subKey : new String[]{
-                "musicVideo", "musicLed", "qqFree"}) {
+                "musicVideo", "musicLed", "qqFree",
+                "lyricNet"}) {
             Feature sub = featureFor(subKey);
             if (sub != null) {
                 View w = buildSubSwitch(sub);
@@ -2768,6 +3438,82 @@ public class MainActivity extends Activity {
                 "透明度", 3, 30, 100, "%"));
         body.addView(buildLightStyleSliderRow(
                 "整体比例", 4, 80, 120, "%"));
+
+
+
+        // v601: 信息卡片（wei 定：内置进模块、只在面
+        // 板显示）——收纳到的通知本地识别火车票/机票/
+        // 快递/账单，在面板成票面卡。总开关默认开（本
+        // 地功能）；自动提醒子开关默认开；提前量默认
+        // 60 分钟（NS 排闹钟时读 flymebobo_features 的
+        // infoLeadMin，已排的按旧值走）。
+        TextView infoLabel = new TextView(this);
+        infoLabel.setText("信息卡片（只在面板显示）");
+        infoLabel.setTextSize(13);
+        infoLabel.setTextColor(L_INK);
+        infoLabel.setTypeface(infoLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams illp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        illp.topMargin = dp(14);
+        infoLabel.setLayoutParams(illp);
+        body.addView(infoLabel);
+        body.addView(buildSubSwitch(new Feature(
+                "infoCards", "信息卡片",
+                "火车票 / 机票 / 快递 / 账单在收纳面板里成卡",
+                "", Color.rgb(22, 163, 74), "卡", true,
+                null)));
+        lightInfoSubViews.clear();
+        View infoRemindRow = buildSubSwitch(new Feature(
+                "infoRemind", "票类自动提醒",
+                "认出发车 / 起飞时间后，提前发一条提醒通知",
+                "", Color.rgb(22, 163, 74), "醒", true,
+                null));
+        lightInfoSubViews.put("infoRemind", infoRemindRow);
+        body.addView(infoRemindRow);
+        TextView leadLabel = new TextView(this);
+        leadLabel.setText("提醒提前量");
+        leadLabel.setTextSize(12.5f);
+        leadLabel.setTextColor(L_SUB);
+        LinearLayout.LayoutParams lllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        lllp.topMargin = dp(8);
+        lllp.bottomMargin = dp(6);
+        leadLabel.setLayoutParams(lllp);
+        body.addView(leadLabel);
+        LinearLayout leadRow = new LinearLayout(this);
+        leadRow.setOrientation(LinearLayout.HORIZONTAL);
+        infoLeadChips.clear();
+        for (final int lv : new int[]{30, 60, 120}) {
+            TextView chip = new TextView(this);
+            chip.setText(lv + " 分钟");
+            chip.setTextSize(12.5f);
+            chip.setGravity(android.view.Gravity.CENTER);
+            chip.setPadding(dp(12), dp(6), dp(12), dp(6));
+            LinearLayout.LayoutParams clp =
+                    new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+            clp.rightMargin = dp(8);
+            chip.setLayoutParams(clp);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    prefs.edit().putInt("infoLeadMin", lv)
+                            .apply();
+                    paintInfoLeadChips();
+                }
+            });
+            infoLeadChips.put(lv, chip);
+            leadRow.addView(chip);
+        }
+        body.addView(leadRow);
+        paintInfoLeadChips();
+        refreshInfoLinkage();
 
         TextView info = new TextView(this);
         info.setText("音乐进收纳卡并永远置顶，系统的音乐通知会"
@@ -2915,6 +3661,52 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** v601: 信息卡片提前量 chips 重绘（选中 = 蓝底
+     * 白字，未选 = 浅轨深字）。 */
+    private void paintInfoLeadChips() {
+        int cur = prefs.getInt("infoLeadMin", 60);
+        for (java.util.Map.Entry<Integer, TextView> e
+                : infoLeadChips.entrySet()) {
+            boolean sel = e.getKey() == cur;
+            TextView chip = e.getValue();
+            chip.setTextColor(sel ? Color.WHITE : L_SUB);
+            android.graphics.drawable.GradientDrawable g =
+                    new android.graphics.drawable
+                            .GradientDrawable();
+            g.setColor(sel ? L_ACCENT
+                    : Color.rgb(226, 232, 240));
+            g.setCornerRadius(dp(999));
+            chip.setBackground(g);
+        }
+    }
+
+    /** v601: 信息卡片总开关联动——关时自动提醒行置
+     * 灰不可拨（口径同 refreshAiLinkage）。 */
+    private void refreshInfoLinkage() {
+        boolean master = isOn("infoCards");
+        for (View w : lightInfoSubViews.values()) {
+            if (w == null) {
+                continue;
+            }
+            w.setAlpha(master || lightUi ? 1f : 0.45f);
+            setViewTreeEnabled(w, master);
+        }
+    }
+
+    /** v600: AI 助手总开关联动——关时子开关（摘要/
+     * 打标）置灰不可拨（轻气泡下不做透明置灰，文字正
+     * 常显示、只禁交互，同 v578 口径）。 */
+    private void refreshAiLinkage() {
+        boolean master = isOn("aiEnabled");
+        for (View w : lightAiSubViews.values()) {
+            if (w == null) {
+                continue;
+            }
+            w.setAlpha(master || lightUi ? 1f : 0.45f);
+            setViewTreeEnabled(w, master);
+        }
+    }
+
     private void setViewTreeEnabled(View v, boolean enabled) {
         v.setEnabled(enabled);
         if (v instanceof ViewGroup) {
@@ -2999,6 +3791,59 @@ public class MainActivity extends Activity {
         i.putExtra("pos", pos);
         sendBroadcast(i);
         refreshLightPosChips();
+    }
+
+    /** v595: 呼吸灯颜色色点——药丸底就是那一色、白字，
+     * 选中加深色描边圈出来。 */
+    private TextView buildLightColorChip(final String id,
+            String label) {
+        TextView chip = buildRecallTtlChip(label);
+        lightColorChips.put(id, chip);
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setLightDotColor(id);
+            }
+        });
+        return chip;
+    }
+
+    private void paintLightColorChip(TextView chip, String id,
+            boolean sel) {
+        android.graphics.drawable.GradientDrawable bg =
+                new android.graphics.drawable.GradientDrawable();
+        bg.setColor(FeatureFlags.lightDotColorValue(id));
+        bg.setCornerRadius(dp(999));
+        if (sel) {
+            bg.setStroke(dp(2), L_INK);
+        }
+        chip.setBackground(bg);
+        chip.setTextColor(Color.WHITE);
+    }
+
+    private void refreshLightColorChips() {
+        String cur = FeatureFlags.parseLightDotColor(
+                prefs.getString("lightDotColor", "blue"));
+        for (java.util.Map.Entry<String, TextView> e
+                : lightColorChips.entrySet()) {
+            paintLightColorChip(e.getValue(), e.getKey(),
+                    e.getKey().equals(cur));
+        }
+    }
+
+    /** v595: 呼吸灯颜色落盘：prefs + 备份 + 广播给
+     * SystemUI 立即换色（字符串键走 FEATURE_TOGGLE 的
+     * color extra 通道，同 setLightDotPos 口径）。 */
+    private void setLightDotColor(String id) {
+        prefs.edit().putString("lightDotColor", id).commit();
+        SettingsStore.saveAll(MainActivity.this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "lightDotColor");
+        i.putExtra("enabled", true);
+        i.putExtra("color", id);
+        sendBroadcast(i);
+        refreshLightColorChips();
     }
 
     /** v567: 面板外观落盘：五项打包成 lightPanelStyle
@@ -5937,6 +6782,34 @@ public class MainActivity extends Activity {
             ensureSoundAppsLoaded();
             return;
         }
+        if ("light".equals(key)) {
+            if (lightBody != null
+                    && lightBody.getVisibility() != View.VISIBLE) {
+                lightBody.setVisibility(View.VISIBLE);
+                Object tag = lightBody.getTag();
+                if (tag instanceof boolean[]) {
+                    ((boolean[]) tag)[0] = true;
+                }
+                if (lightChev != null) {
+                    setChevronExpanded(lightChev, true);
+                }
+            }
+            return;
+        }
+        if ("ai".equals(key)) {
+            if (aiBody != null
+                    && aiBody.getVisibility() != View.VISIBLE) {
+                aiBody.setVisibility(View.VISIBLE);
+                Object tag = aiBody.getTag();
+                if (tag instanceof boolean[]) {
+                    ((boolean[]) tag)[0] = true;
+                }
+                if (aiChev != null) {
+                    setChevronExpanded(aiChev, true);
+                }
+            }
+            return;
+        }
         View[] b = cardBodies.get(key);
         boolean[] e = cardExpanded.get(key);
         if (b != null && e != null && !e[0]) {
@@ -5978,7 +6851,28 @@ public class MainActivity extends Activity {
         if (lightCardView != null) {
             addSearch("小签位置", "轻气泡 › 小签位置",
                     "小签 位置 左边 右边 靠上 中间 靠下 拖动",
-                    lightCardView, null);
+                    lightCardView, "light");
+            addSearch("呼吸灯颜色", "轻气泡 › 呼吸灯颜色",
+                    "呼吸灯 颜色 小签颜色 发光 边缘发光 光晕 常亮",
+                    lightCardView, "light");
+        }
+        // v603: AI 助手独立成卡后的搜索条目。
+        if (aiCardView != null) {
+            addSearch("AI 助手", "AI 助手",
+                    "ai 助手 智能 摘要 打标 deepseek key",
+                    aiCardView, "ai");
+            addSearch("收纳摘要", "AI 助手 › 收纳摘要",
+                    "ai 摘要 总结 一句话 概括",
+                    aiCardView, "ai");
+            addSearch("语义打标", "AI 助手 › 语义打标",
+                    "ai 打标 标签 诈骗 促销 重要",
+                    aiCardView, "ai");
+            addSearch("网络歌词兜底", "音乐 › 网络歌词兜底",
+                    "歌词 网络 兜底 lrclib 不送歌词 本地 缓存",
+                    lightUi
+                            ? lightMusicSubViews.get("lyricNet")
+                            : subRowViews.get("lyricNet"),
+                    lightUi ? "light" : "music");
         }
         // 胶囊类型
         addSearch("通知气泡", "胶囊类型", "通知 气泡 胶囊 贴边 总开关",
@@ -6025,16 +6919,16 @@ public class MainActivity extends Activity {
         } else {
             addSearch("音乐卡片", "轻气泡 › 音乐卡片",
                     "音乐 播放器 歌词 歌手 专辑 面板",
-                    lightCardView, null);
+                    lightCardView, "light");
             addSearch("视频App", "轻气泡 › 音乐卡片 › 视频App",
                     "视频 B站 哔哩哔哩 播放",
-                    lightMusicSubViews.get("musicVideo"), null);
+                    lightMusicSubViews.get("musicVideo"), "light");
             addSearch("反方向的钟", "轻气泡 › 音乐卡片 › 反方向的钟",
                     "彩蛋 钟 跑马灯",
-                    lightMusicSubViews.get("musicLed"), null);
+                    lightMusicSubViews.get("musicLed"), "light");
             addSearch("QQ音乐flyme版免费听", "轻气泡 › 音乐卡片 › QQ音乐免费听",
                     "qq 音乐 免费 时长 补时长",
-                    lightMusicSubViews.get("qqFree"), null);
+                    lightMusicSubViews.get("qqFree"), "light");
         }
         // v578: 轻气泡下音乐卡不建，topCardViews 顺移一位
         // （下载=1、验证码=2），下标按模式取。
@@ -6897,6 +7791,15 @@ public class MainActivity extends Activity {
                         // 往下走：now 会算成 true（当前还是关着），开关打开。
                     }
                 }
+                // v612: AI 助手开启前先弹风险告知书
+                // （wei 定：每次打开都要弹、强制阅读
+                // 10 秒、同意才真开）。拦在落盘之前，
+                // 开关保持关着；同意后弹窗里回拨一次。
+                if ("aiEnabled".equals(f.key)
+                        && !isOn(f.key) && !aiRiskAgreed) {
+                    showAiRiskDialog(v);
+                    return;
+                }
                 boolean now = !isOn(f.key);
                 // v343: commit() 同步落盘——apply() 异步，拨完立刻杀进程会丢，
                 // 下次打开开关就回到旧值。
@@ -6950,6 +7853,21 @@ public class MainActivity extends Activity {
                 if ("lightMusicCard".equals(f.key)) {
                     refreshLightMusicLinkage();
                 }
+                // v600: AI 助手总开关——拨它时两个子开关
+                // 行跟着置灰/恢复（联动）。
+                // v603: wei 定——点开启时提示 Key 为本地
+                // 加密储存（AiKey 走系统密钥库，真加密）。
+                if ("aiEnabled".equals(f.key)) {
+                    refreshAiLinkage();
+                    // v612: 开启前的 Toast 已被风险告知
+                    // 书弹窗取代（每次开启必弹、强制阅
+                    // 读 10 秒），这里不再重复提示。
+                }
+                // v601: 信息卡片总开关——拨它时自动提醒
+                // 行跟着置灰/恢复（联动）。
+                if ("infoCards".equals(f.key)) {
+                    refreshInfoLinkage();
+                }
                 // v540: 「验证码与隐私」是自动复制的总开关——
                 // 拨它时同步刷新自动复制行的置灰/可点状态。
                 if ("code".equals(f.key)) {
@@ -7002,6 +7920,12 @@ public class MainActivity extends Activity {
     }
 
     private boolean defaultFor(String key) {
+        // v596: 呼吸灯常亮默认关——它不在 FEATURES 表里，
+        // 不特判的话未知键默认 true，开关初值会反了。
+        if ("lightDotSteady".equals(key)) return false;
+        // v600: AI 助手总开关默认关（同 lightDotSteady
+        // 的特判理由：不在 FEATURES 表里）。
+        if ("aiEnabled".equals(key)) return false;
         for (Feature f : FEATURES) {
             if (f.key.equals(key)) return f.def;
         }

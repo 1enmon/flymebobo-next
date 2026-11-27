@@ -180,6 +180,27 @@ public class FeatureFlags {
     // 起流转颜色。布尔键 "lightDotGlow"，文件镜像同
     // lightMode 口径。
     public static volatile boolean lightDotGlow = true;
+    // v596: 呼吸灯常亮开关（wei 点名）——v597 定正语
+    // 义：常亮 = 一直显示（栈空也不隐藏），不是不呼
+    // 吸；呼吸与发光都照旧。默认关（栈空隐藏，现行口
+    // 径）。布尔键 "lightDotSteady"，文件镜像同
+    // lightDotGlow 口径。
+    public static volatile boolean lightDotSteady = false;
+
+    // v600: 轻气泡 AI 助手（wei 定：收纳摘要 + 语义打
+    // 标进轻气泡，DeepSeek 预设、自带 Key）——总开关
+    // 默认关；摘要/打标子开关默认开（依附总开关）。
+    // Key 只存 App 进程私有 prefs（flymebobo_ai），
+    // 不进本类（SystemUI 不碰 Key）。
+    public static volatile boolean aiEnabled = false;
+    public static volatile boolean aiSummary = true;
+    public static volatile boolean aiTags = true;
+
+    // v601: 信息卡片（本地解析火车票/机票/快递/账单，
+    // 只在轻气泡面板成卡）——本地功能无隐私成本，总
+    // 开关与自动提醒默认都开。
+    public static volatile boolean infoCards = true;
+    public static volatile boolean infoRemind = true;
     // v564: 轻气泡小签位置——与已移除的两点同格式同刻度
     // （字符串 prefs + 文件镜像，fileOrPrefsString）：首字
     // L/R=贴左边/右边，尾数 0/1/2=靠上/中间/靠下，默认
@@ -196,6 +217,52 @@ public class FeatureFlags {
     // style extra 即时同步 SystemUI，下次开面板生效。
     public static volatile String lightPanelStyle =
             "292,5,18,94,100";
+
+    // v595: 呼吸灯颜色（wei 点名）——小签签身底色六色可
+    // 选，默认 "blue"（现行蓝）。字符串键 "lightDotColor"，
+    // 文件镜像同 lightDotPos 口径；设置页色点经
+    // FEATURE_TOGGLE 的 color extra 即时同步。放歌时签
+    // 色仍按色相流转（v564 口径），不受此设置影响。
+    public static volatile String lightDotColor = "blue";
+
+    /** v595: 呼吸灯颜色解析：坏值回默认蓝。 */
+    public static String parseLightDotColor(String raw) {
+        if (raw != null) {
+            String s = raw.trim().toLowerCase(
+                    java.util.Locale.US);
+            if ("blue".equals(s) || "green".equals(s)
+                    || "purple".equals(s) || "orange".equals(s)
+                    || "pink".equals(s) || "cyan".equals(s)) {
+                return s;
+            }
+        }
+        return "blue";
+    }
+
+    /** v595: 颜色 id → 签身底色（App 进程画色点也用）。 */
+    public static int lightDotColorValue(String id) {
+        if ("green".equals(id)) {
+            return android.graphics.Color.rgb(34, 197, 94);
+        }
+        if ("purple".equals(id)) {
+            return android.graphics.Color.rgb(168, 85, 247);
+        }
+        if ("orange".equals(id)) {
+            return android.graphics.Color.rgb(249, 115, 22);
+        }
+        if ("pink".equals(id)) {
+            return android.graphics.Color.rgb(236, 72, 153);
+        }
+        if ("cyan".equals(id)) {
+            return android.graphics.Color.rgb(6, 182, 212);
+        }
+        return android.graphics.Color.rgb(59, 130, 246);
+    }
+
+    /** v595: 当前呼吸灯底色。 */
+    public static int lightDotColorInt() {
+        return lightDotColorValue(lightDotColor);
+    }
 
     /** v567: 面板外观解析+钳位，返回 [宽,可见行数,圆角,
      * 不透明%,比例%]；坏值逐项回默认。纯函数，App 进程
@@ -467,6 +534,30 @@ public class FeatureFlags {
             lightDotGlow = enabled;
             FileLog.i("Light dotGlow -> "
                     + (enabled ? "on" : "off"));
+        } else if ("lightDotSteady".equals(key)) {
+            lightDotSteady = enabled;
+            FileLog.i("Light dotSteady -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("aiEnabled".equals(key)) {
+            aiEnabled = enabled;
+            FileLog.i("Light ai -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("aiSummary".equals(key)) {
+            aiSummary = enabled;
+            FileLog.i("Light aiSummary -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("aiTags".equals(key)) {
+            aiTags = enabled;
+            FileLog.i("Light aiTags -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("infoCards".equals(key)) {
+            infoCards = enabled;
+            FileLog.i("Light infoCards -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("infoRemind".equals(key)) {
+            infoRemind = enabled;
+            FileLog.i("Light infoRemind -> "
+                    + (enabled ? "on" : "off"));
         }
         // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
@@ -549,14 +640,29 @@ public class FeatureFlags {
                     "lightMusicCard", prefs, true);
             lightDotGlow = fileOrPrefsBool(
                     "lightDotGlow", prefs, true);
+            lightDotSteady = fileOrPrefsBool(
+                    "lightDotSteady", prefs, false);
+            aiEnabled = fileOrPrefsBool(
+                    "aiEnabled", prefs, false);
+            aiSummary = fileOrPrefsBool(
+                    "aiSummary", prefs, true);
+            aiTags = fileOrPrefsBool("aiTags", prefs, true);
+            infoCards = fileOrPrefsBool(
+                    "infoCards", prefs, true);
+            infoRemind = fileOrPrefsBool(
+                    "infoRemind", prefs, true);
             lightDotPos = parseLightDotPos(
                     fileOrPrefsString("lightDotPos", prefs, "L1"));
             lightPanelStyle = parseLightPanelStyle(
                     fileOrPrefsString("lightPanelStyle", prefs,
                             "292,5,18,94,100"));
+            lightDotColor = parseLightDotColor(
+                    fileOrPrefsString("lightDotColor", prefs,
+                            "blue"));
             FileLog.i("Light load -> mode=" + lightMode
                     + " pos=" + lightDotPos
-                    + " style=" + lightPanelStyle);
+                    + " style=" + lightPanelStyle
+                    + " dotColor=" + lightDotColor);
             // v534: 当前音效 id（字符串 prefs，默认 "soft" 轻木）。
             // v535: 自定义文件路径/名也是字符串——三个字符串键都
             // 走逐键安全读：某个键万一被旧备份写坏成别的类型，

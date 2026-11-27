@@ -300,7 +300,18 @@ public final class NotifCollectionHook {
         }
         boolean isDownload = false;
         int downloadPct = -1;
-        if (!isMusic && hasProgress) {
+        // v613: 夸克式下载 extras 里没进度（0/0）、没
+        // 有百分号，百分比只在标题的大小对里（「下载
+        // 中 73.92M/318.35M」）——先算出来当进度用，
+        // 否则整条下载识别链（判定/常驻豁免/轻气泡
+        // 藏栏）都够不着它（wei 2026-11-28 实测报）。
+        int textDlPct = -1;
+        if (!isMusic && !hasProgress) {
+            textDlPct = parseTextSizePairPct(
+                    getText(extras, "android.title"),
+                    getText(extras, "android.text"));
+        }
+        if (!isMusic && (hasProgress || textDlPct >= 0)) {
             String channelId = null;
             try {
                 channelId = n.getChannelId();
@@ -325,6 +336,11 @@ public final class NotifCollectionHook {
                     }
                 } catch (Throwable ignored) {
                 }
+            }
+            // v613: extras 没给百分比就用标题大小对的。
+            if (isDownload && downloadPct < 0
+                    && textDlPct >= 0) {
+                downloadPct = textDlPct;
             }
         }
         // v313: Amap navigation starts (user 2026-11-21 "启动了之后就
@@ -384,7 +400,8 @@ public final class NotifCollectionHook {
         // v222: a live activity is ongoing by flags (the timer),
         // but it is not a background-service notification — it must
         // pop, so it is exempt from the ongoing filter.
-        if (ongoing && !hasProgress && !isMusic && !isLive) {
+        if (ongoing && !hasProgress && !isMusic && !isLive
+                && !isDownload) {
             log("HookDrop ongoing-filter pkg=" + pkg
                     + " key=" + sbn.getKey());
             return;
@@ -756,6 +773,10 @@ public final class NotifCollectionHook {
         NotifData data = new NotifData(sbn.getKey(), displayPkg, title, text,
                 sbn.getPostTime(), null, largeIcon, isMusic, lyrics, isDownload);
         data.downloadPct = downloadPct;
+        // v602: 完整正文单独存一份（见 NotifData.bigText
+        // 注释）——上面的 text 链条只有 text 为空时才用
+        // bigText，识别类功能会漏读全文。
+        data.bigText = getText(extras, "android.bigText");
         data.isLive = isLive;
         try {
             data.contentIntent = n.contentIntent;
@@ -1490,10 +1511,15 @@ public final class NotifCollectionHook {
             Bundle extras = n.extras;
             int progressMax = extras != null
                     ? extras.getInt("android.progressMax", 0) : 0;
+            String dlTitle = getText(extras, "android.title");
+            String dlText = getText(extras, "android.text");
             boolean hasProgress = progressMax > 0
                     || (extras != null && extras.getBoolean(
                             "android.progressIndeterminate",
-                            false));
+                            false))
+                    // v613: 夸克式——标题大小对也算进度，
+                    // 否则轻气泡藏通知栏这步够不着它。
+                    || parseTextSizePairPct(dlTitle, dlText) >= 0;
             if (!hasProgress) {
                 return false;
             }
@@ -1503,11 +1529,71 @@ public final class NotifCollectionHook {
             } catch (Throwable ignored) {
             }
             return hasDownloadSignal(sbn.getPackageName(),
-                    channelId, getText(extras, "android.title"),
-                    getText(extras, "android.text"));
+                    channelId, dlTitle, dlText);
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    // v613: 夸克式下载的文字进度——标题/正文里带单位
+    // 的「大小/大小」对（如「下载中 73.92M/318.35M」）
+    // 换算成百分比；找不到返回 -1。两边都必须带单位，
+    // 防日期这类裸数字斜杠（2026/11/28）误报。
+    private static int parseTextSizePairPct(
+            String title, String text) {
+        int pct = sizePairPctIn(title);
+        if (pct < 0) {
+            pct = sizePairPctIn(text);
+        }
+        return pct;
+    }
+
+    private static int sizePairPctIn(String s) {
+        if (s == null) {
+            return -1;
+        }
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("([0-9]+(?:\\.[0-9]+)?)\\s*([KMGT])B?"
+                        + "\\s*/\\s*"
+                        + "([0-9]+(?:\\.[0-9]+)?)\\s*([KMGT])B?",
+                        java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(s);
+        if (!m.find()) {
+            return -1;
+        }
+        try {
+            double dl = Double.parseDouble(m.group(1))
+                    * sizeUnitMult(m.group(2));
+            double total = Double.parseDouble(m.group(3))
+                    * sizeUnitMult(m.group(4));
+            if (dl < 0 || total <= 0) {
+                return -1;
+            }
+            int pct = (int) (dl * 100 / total);
+            return pct > 100 ? 100 : pct;
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static double sizeUnitMult(String unit) {
+        if (unit == null || unit.isEmpty()) {
+            return 1;
+        }
+        char u = Character.toUpperCase(unit.charAt(0));
+        if (u == 'K') {
+            return 1024d;
+        }
+        if (u == 'M') {
+            return 1024d * 1024d;
+        }
+        if (u == 'G') {
+            return 1024d * 1024d * 1024d;
+        }
+        if (u == 'T') {
+            return 1024d * 1024d * 1024d * 1024d;
+        }
+        return 1;
     }
 
     // Dual-condition download signal (v110).
