@@ -1502,7 +1502,7 @@ public class NotificationService extends NotificationListenerService {
 
     private File lyricCacheFile(String str, String str2) {
         try {
-            File file = new File(getFilesDir(), "lyrics");
+            File file = new File(getFilesDir(), "lyrics2");
             if (!file.exists()) {
                 file.mkdirs();
             }
@@ -1610,15 +1610,66 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void fetchNetworkLyrics(String str, String str2, long j) {
-        String readLyricCache = readLyricCache(str, str2);
-        if (readLyricCache != null && !readLyricCache.isEmpty()) {
-            applyCachedLyrics(readLyricCache, str, str2);
-        } else {
-            if (tryLrclib(str, str2, j) || tryNeteaseLyrics(str, str2, j) || tryQqLyrics(str, str2, j)) {
-                return;
+        // v618: 缓存覆盖度校验（wei 实测缓存只有半首）：
+        // 残缓存（最后一行时间戳不足歌长 60%）不算命中，
+        // 先走级联重抓；级联全败才回落残缓存凑合用。
+        String cached = readLyricCache(str, str2);
+        boolean cacheOk = cached != null && !cached.isEmpty();
+        if (cacheOk && j > 0) {
+            long lastTs = lastLrcTimestamp(cached);
+            if (lastTs > 0 && lastTs < (j * 3) / 5) {
+                cacheOk = false;
             }
-            tryAiLyrics(str, str2, j);
         }
+        if (cacheOk) {
+            applyCachedLyrics(cached, str, str2);
+            return;
+        }
+        if (tryLrclib(str, str2, j)
+                || tryNeteaseLyrics(str, str2, j)
+                || tryQqLyrics(str, str2, j)) {
+            return;
+        }
+        if (cached != null && !cached.isEmpty()) {
+            applyCachedLyrics(cached, str, str2);
+            return;
+        }
+        tryAiLyrics(str, str2, j);
+    }
+
+    /** v618: 一份 LRC 里最大的时间戳（毫秒），认不出
+     * 回 0。给缓存/新词的覆盖度校验用。 */
+    private static long lastLrcTimestamp(String lrc) {
+        long max = 0;
+        if (lrc == null) {
+            return 0;
+        }
+        for (String line : lrc.split("\n")) {
+            String trim = line.trim();
+            if (!trim.startsWith("[")) {
+                continue;
+            }
+            int close = trim.indexOf(93);
+            if (close < 0) {
+                continue;
+            }
+            String[] parts = trim.substring(1, close)
+                    .trim().split(":");
+            if (parts.length != 2) {
+                continue;
+            }
+            try {
+                long ts = (long) ((Long.parseLong(parts[0])
+                        * 60000L)
+                        + (Double.parseDouble(parts[1])
+                                * 1000.0d));
+                if (ts > max) {
+                    max = ts;
+                }
+            } catch (Throwable th) {
+            }
+        }
+        return max;
     }
 
     private static String httpGetText(String str, String str2) {
@@ -1705,7 +1756,19 @@ public class NotificationService extends NotificationListenerService {
                 return false;
             }
             if (z) {
-                writeLyricCache(str2, str3, str);
+                // v618: 覆盖度不够的词只显示、不落盘，
+                //免得半首词被存成永久缓存。
+                boolean coverOk = true;
+                if (j2 > 0 && !arrayList.isEmpty()) {
+                    long lastTs = ((Long) arrayList.get(
+                            arrayList.size() - 1)).longValue();
+                    if (lastTs < (j2 * 3) / 5) {
+                        coverOk = false;
+                    }
+                }
+                if (coverOk) {
+                    writeLyricCache(str2, str3, str);
+                }
             }
             long[] jArr = new long[arrayList.size()];
             String[] strArr = new String[arrayList2.size()];
@@ -1913,7 +1976,7 @@ public class NotificationService extends NotificationListenerService {
                 double d = (j5 % 60000) / 1000.0d;
                 sb2.append('[').append(size < 10 ? "0" : "").append(size).append(':').append(d < 10.0d ? "0" : "").append(String.format(Locale.US, "%.2f", Double.valueOf(d))).append(']').append((String) arrayList.get(i)).append('\n');
             }
-            if (applySyncedLrc(sb2.toString(), 0L, str, str2, 0L, true)) {
+            if (applySyncedLrc(sb2.toString(), 0L, str, str2, 0L, false)) {
                 this.netLyricSource = "ai";
                 FileLog.i("Lyric ai fallback song=" + str);
             }
