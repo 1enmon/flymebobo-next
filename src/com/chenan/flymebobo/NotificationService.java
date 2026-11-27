@@ -149,6 +149,8 @@ public class NotificationService extends NotificationListenerService {
     private String[] netLyricTexts;
     private boolean netLyricFetching;
     private String netLyricFetchingFor;
+
+    private String netLyricSource = "";
     private long netLyricStartTime;
     private String downloadKey;
     private String callKey;
@@ -1141,9 +1143,11 @@ public class NotificationService extends NotificationListenerService {
             refreshLyricCandidatesFromActive();
             String lyric = resolveMusicLyric(title, subtitle,
                     artist, albumArtist, notifTitle);
+            String lyricSrc = "player";
             if (lyric == null || lyric.isEmpty()) {
                 lyric = netLyricForCurrentPosition(notifTitle,
                         artist);
+                lyricSrc = "net:" + this.netLyricSource;
                 if ((lyric == null || lyric.isEmpty())
                         && notifTitle != null
                         && !notifTitle.isEmpty()) {
@@ -1160,12 +1164,15 @@ public class NotificationService extends NotificationListenerService {
                             notifTitle + "\u0000" + (artist == null
                                     ? "" : artist))) {
                 lyric = "找不到当前歌词";
+                lyricSrc = "none";
             }
             if (lyric == null || lyric.isEmpty()
                     || lyric.equals(this.lastLyricSent)) {
                 return;
             }
             this.lastLyricSent = lyric;
+            FileLog.i("Lyric line src=" + lyricSrc + " -> "
+                    + lyric);
             Intent intent = new Intent(ACTION_LYRIC);
             intent.putExtra("key", this.musicKey);
             intent.putExtra("lyrics", lyric);
@@ -1590,6 +1597,7 @@ public class NotificationService extends NotificationListenerService {
                 jArr[i] = ((Long) arrayList.get(i)).longValue();
                 strArr[i] = (String) arrayList2.get(i);
             }
+            this.netLyricSource = "cache";
             this.netLyricSong = str2;
             this.netLyricArtist = str3;
             this.netLyricTimes = jArr;
@@ -1727,7 +1735,13 @@ public class NotificationService extends NotificationListenerService {
             if (httpGetText == null || (extractJsonString = extractJsonString(httpGetText, "syncedLyrics")) == null || extractJsonString.isEmpty()) {
                 return false;
             }
-            return applySyncedLrc(extractJsonString, extractJsonDurationMs(httpGetText), str, str2, j, true);
+            boolean okLrc = applySyncedLrc(extractJsonString,
+                    extractJsonDurationMs(httpGetText), str,
+                    str2, j, true);
+            if (okLrc) {
+                this.netLyricSource = "lrclib";
+            }
+            return okLrc;
         } catch (Throwable th) {
             return false;
         }
@@ -1767,7 +1781,12 @@ public class NotificationService extends NotificationListenerService {
             if (optString2.isEmpty() || optString2.contains("纯音乐，请欣赏")) {
                 return false;
             }
-            return applySyncedLrc(optString2, 0L, str, str2, j, true);
+            boolean okNe = applySyncedLrc(optString2, 0L, str,
+                    str2, j, true);
+            if (okNe) {
+                this.netLyricSource = "netease";
+            }
+            return okNe;
         } catch (Throwable th) {
             return false;
         }
@@ -1807,7 +1826,17 @@ public class NotificationService extends NotificationListenerService {
             if (optString2.isEmpty()) {
                 return false;
             }
-            return applySyncedLrc(optString2.replace("&apos;", "'").replace("&quot;", "\"").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">"), 0L, str, str2, j, true);
+            boolean okQq = applySyncedLrc(optString2
+                    .replace("&apos;", "'")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">"), 0L, str, str2, j,
+                    true);
+            if (okQq) {
+                this.netLyricSource = "qq";
+            }
+            return okQq;
         } catch (Throwable th) {
             return false;
         }
@@ -1884,6 +1913,7 @@ public class NotificationService extends NotificationListenerService {
                 sb2.append('[').append(size < 10 ? "0" : "").append(size).append(':').append(d < 10.0d ? "0" : "").append(String.format(Locale.US, "%.2f", Double.valueOf(d))).append(']').append((String) arrayList.get(i)).append('\n');
             }
             if (applySyncedLrc(sb2.toString(), 0L, str, str2, 0L, true)) {
+                this.netLyricSource = "ai";
                 FileLog.i("Lyric ai fallback song=" + str);
             }
         } catch (Throwable th) {
