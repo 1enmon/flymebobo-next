@@ -132,8 +132,8 @@ public class MainActivity extends Activity {
             // 收，音乐/下载/实况/导航/来电不收。重弹照样过
             // 场景/静默的门（排队），不绕过；重弹的再划掉不
             // 再入栈。实现在 BubbleWindow（回看栈 + 把手窗）。
-            new Feature("recallCapsule", "回看胶囊", "划掉的气泡留个边缘入口，可重新弹出",
-                    "默认关，自己开启才生效。\n开着时，手动划掉（左滑消散）的普通气泡会收进屏幕左边缘的回看胶囊：最多留最近 5 条，停留时长没人点就自动清掉（默认 3 分钟，可在下面「回看保留时长」里改）。\n点边缘把手，划掉的气泡逐个原样重新弹出；重弹的气泡再划掉不会再收。\n自动消散、点开、被新气泡顶掉的不收；音乐、下载、实况、导航、来电不收。",
+            new Feature("recallCapsule", "时光机胶囊", "划掉的气泡留个边缘入口，可重新弹出",
+                    "默认关，自己开启才生效。\n开着时，手动划掉（左滑消散）的普通气泡会收进屏幕左边缘的时光机胶囊：最多留最近 5 条，停留时长没人点就自动清掉（默认 3 分钟，可在下面「时光机保留时长」里改）。\n点边缘把手，划掉的气泡逐个原样重新弹出；重弹的气泡再划掉不会再收。\n自动消散、点开、被新气泡顶掉的不收；音乐、下载、实况、导航、来电不收。",
                     Color.rgb(59, 130, 246), "回", false, "notif"),
             // v546: 长按菜单——长按普通胶囊约 0.4 秒出菜单，
             // 核心是快捷回复（通知自带 RemoteInput 才有）；
@@ -142,7 +142,7 @@ public class MainActivity extends Activity {
             // 这三条 Feature 条目，设置里根本没这两行（dex 里
             // 只有搜索字符串）——v549 一并补上，行才真的出来。
             new Feature("longPressMenu", "长按菜单", "长按胶囊出菜单，能直接回复",
-                    "开着（默认）：长按普通胶囊约 0.4 秒弹出菜单。\n通知自带回复动作的（短信、Telegram 等）能直接在菜单里回复；微信/QQ 不支持的，第一项换成「打开应用回复」，不放死按钮。\n固定有：稍后提醒（10 分钟后重弹）、收进回看（回看开着才有）、这个应用不再弹。\n关掉后长按无反应。",
+                    "开着（默认）：长按普通胶囊约 0.4 秒弹出菜单。\n通知自带回复动作的（短信、Telegram 等）能直接在菜单里回复；微信/QQ 不支持的，第一项换成「打开应用回复」，不放死按钮。\n固定有：稍后提醒（10 分钟后重弹）、放入时光机（时光机开着才有）、这个应用不再弹。\n关掉后长按无反应。",
                     Color.rgb(59, 130, 246), "按", true, "notif"),
             // v557: 胶囊长相三行从外观卡迁入「通知气泡」卡
             // （wei 指示：这几个岂不是可以放到气泡通知里面）。
@@ -489,6 +489,38 @@ public class MainActivity extends Activity {
     private View fanAutoDimRow;
     private View fanAutoDimSwitch;
     private View fanAutoDimDesc;
+    // v564: 轻气泡设计模式的 App 侧状态——onCreate 从 prefs
+    // 读一次（注意不能走 isOn：defaultFor 对未知键返回 true，
+    // lightMode 默认必须是关）。主页按它换装。
+    private boolean lightUi;
+    private View modeCardView;
+    private View lightCardView;
+    private final java.util.Map<String, TextView> lightPosChips =
+            new java.util.HashMap<>();
+    // v567: 面板外观五项的当前值 [宽dp,可见行数,圆角dp,
+    // 不透明%,比例%]，buildLightCard 从 prefs 载入，滑条
+    // 改这里、松手打包落盘（saveLightPanelStyle）。
+    private final int[] lightStyleVals = {292, 5, 18, 94, 100};
+    private boolean modeSwitchAnimRunning;
+    // v572: 轻气泡三栏外壳（收纳 / 时光机 / 设置）与镜像
+    // 列表的活引用；打开方式示意图卡两张（[0]=小窗 [1]=全局）。
+    private LinearLayout[] lightOpenTiles;
+    // v578: 轻气泡「音乐卡片」一节里办过来的三个子设置
+    // 行（musicVideo/musicLed/qqFree），供搜索定位与总
+    // 开关联动置灰。
+    private final java.util.HashMap<String, View>
+            lightMusicSubViews = new java.util.HashMap<>();
+    private View[] lightTabPages;
+    private TextView[] lightTabBtns;
+    private LinearLayout lightHomeList;
+    private LinearLayout lightRecallList;
+    private TextView lightHomeMeta;
+    private TextView lightRecallMeta;
+    private android.content.BroadcastReceiver lightMirrorReceiver;
+    private int lightTabIndex;
+    // v572: 切换动画的入场衔接——recreate 后新页先盖一层
+    // 新底色再淡出，落点不断层。
+    private static boolean pendingModeAnimIn;
     // v555: 安静规则三件套（连发突破 / @我突破 / 关键词过滤）
     // 的行与开关——随通知气泡总开关联动置灰
     // （refreshQuietGateLinkage，同 refreshNotifSubLinkage
@@ -635,6 +667,8 @@ public class MainActivity extends Activity {
         // 补状态栏高度，不遮内容。只改 App 自己的页面。
         applyEdgeToEdge();
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        // v564: 当前设计模式（默认关 = 经典）。
+        lightUi = prefs.getBoolean("lightMode", false);
         // v464: 先从本地备份文件把设置恢复进 prefs（卸载重装后
         // prefs 被清了，文件还在）——必须在下面“缺省开关写默认
         // 值”之前，不然恢复的值会被默认值盖掉。
@@ -680,12 +714,16 @@ public class MainActivity extends Activity {
 
         ScrollView scroll = new ScrollView(this);
         scrollView = scroll;
-        scroll.setBackgroundColor(Color.WHITE);
+        // v564: 轻气泡模式下主页底色换浅蓝灰，与经典白底区分
+        // （切换动画的漫开色与这块底色一致，衔接不断层）。
+        scroll.setBackgroundColor(lightUi
+                ? Color.rgb(237, 242, 248) : Color.WHITE);
         scroll.setFillViewport(true);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+        root.setBackgroundColor(lightUi
+                ? Color.rgb(237, 242, 248) : Color.WHITE);
         // v527: 顶部多留状态栏高度（沉浸后内容从状态栏下方开始）。
         root.setPadding(dp(16), dp(16) + statusBarHeight(),
                 dp(16), dp(24));
@@ -824,8 +862,25 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         list.setLayoutParams(llp);
         root.addView(list);
-        list.addView(buildGroupLabel("胶囊类型", true));
+        // v564: 设计模式卡置顶——经典 / 轻气泡两套设计的
+        // 总入口，两种模式下都常驻。
+        list.addView(buildGroupLabel("设计模式", true));
+        modeCardView = buildModeCard();
+        list.addView(modeCardView);
+        list.addView(buildGroupLabel("胶囊类型", false));
         for (int i = 0; i < TOP_FEATURES.length; i++) {
+            // v573: 轻气泡对来电不做要求（wei 定）——来电
+            // 卡在轻气泡下整张移除，经典模式照常。
+            if (lightUi && "live".equals(TOP_FEATURES[i].key)) {
+                continue;
+            }
+            // v579: 轻气泡不用经典「音乐胶囊」卡（wei
+            // 定）——这边叫「音乐卡片」，设置在轻气泡卡
+            // 里。（v578 这处跳过曾被同文件并行编辑冲掉，
+            // 本版补上并核对了循环本体。）
+            if (lightUi && "music".equals(TOP_FEATURES[i].key)) {
+                continue;
+            }
             View c = buildFeatureCard(TOP_FEATURES[i]);
             topCardViews.add(c);
             list.addView(c);
@@ -836,21 +891,36 @@ public class MainActivity extends Activity {
                 list.addView(buildSoundCard());
             }
         }
-        list.addView(buildGroupLabel("呈现与打开", false));
-        list.addView(buildOpenWayCard());
+        // v564: 呈现形式是经典专属，轻气泡下不出现（轻气泡
+        // 不弹窗，没有呈现形式）。v571: 打开方式（小窗/全屏）
+        // 是通用元素（wei 定）。v572: 轻气泡下打开方式改用
+        // 单独设计的示意图卡（在轻气泡卡里），经典这张卡
+        // 轻气泡下不再出现。
+        if (!lightUi) {
+            list.addView(buildGroupLabel("呈现与打开", false));
+            list.addView(buildOpenWayCard());
+        }
         list.addView(buildGroupLabel("安静规则", false));
         list.addView(buildQuietRulesCard());
-        list.addView(buildGroupLabel("外观", false));
-        list.addView(buildAppearanceCard());
-        TextView apHint = new TextView(this);
-        apHint.setText("胶囊跟着扇子一起走，从扇子那里弹出来；改完立即生效，不用重启。点一下卡片可以展开说明。");
-        apHint.setTextSize(11);
-        apHint.setTextColor(Color.rgb(153, 153, 153));
-        LinearLayout.LayoutParams apHlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        apHlp.topMargin = dp(6);
-        apHint.setLayoutParams(apHlp);
-        list.addView(apHint);
+        // v564: 轻气泡专属卡（小签位置等）跟在通用卡后面；
+        // 外观（扇子/胶囊长相）是经典专属，轻气泡下隐藏。
+        if (lightUi) {
+            list.addView(buildGroupLabel("轻气泡", false));
+            lightCardView = buildLightCard();
+            list.addView(lightCardView);
+        } else {
+            list.addView(buildGroupLabel("外观", false));
+            list.addView(buildAppearanceCard());
+            TextView apHint = new TextView(this);
+            apHint.setText("胶囊跟着扇子一起走，从扇子那里弹出来；改完立即生效，不用重启。点一下卡片可以展开说明。");
+            apHint.setTextSize(11);
+            apHint.setTextColor(Color.rgb(153, 153, 153));
+            LinearLayout.LayoutParams apHlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            apHlp.topMargin = dp(6);
+            apHint.setLayoutParams(apHlp);
+            list.addView(apHint);
+        }
 
         // ---- Footer links ----
         TextView log = new TextView(this);
@@ -1026,7 +1096,37 @@ public class MainActivity extends Activity {
         root.addView(guideBtn);
         searchTargets.put("guide", guideBtn);
 
-        setContentView(scroll);
+        // v572: 轻气泡下换三栏外壳（收纳 / 时光机 / 设置），
+        // 设置页就是上面建好的这张滚动页，整体搬进第三栏。
+        if (lightUi) {
+            setContentView(buildLightShell(scroll));
+        } else {
+            setContentView(scroll);
+        }
+        // v572: 切换动画的入场衔接——新页先盖一层新底色，
+        // 380ms 淡出，落点与动画的漫换色不断层。
+        if (pendingModeAnimIn) {
+            pendingModeAnimIn = false;
+            try {
+                final ViewGroup contentRoot = (ViewGroup)
+                        findViewById(android.R.id.content);
+                final View veil = new View(this);
+                veil.setBackgroundColor(lightUi ? LIGHT_BG
+                        : Color.WHITE);
+                veil.setLayoutParams(new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+                contentRoot.addView(veil);
+                veil.animate().alpha(0f).setDuration(380)
+                        .withEndAction(new Runnable() {
+                            @Override
+                            public void run() {
+                                contentRoot.removeView(veil);
+                            }
+                        }).start();
+            } catch (Throwable ignored) {
+            }
+        }
         // v527: 全部视图建完后建搜索索引（索引引用真实视图）。
         buildSearchIndex();
         // v273: first-run feature guide (once). Post it so the
@@ -1290,6 +1390,14 @@ public class MainActivity extends Activity {
         super.onPause();
         stopQuietTicker();
         SettingsStore.saveAll(this);
+        // v572: 镜像广播接收器只在前台挂着。
+        if (lightMirrorReceiver != null) {
+            try {
+                unregisterReceiver(lightMirrorReceiver);
+            } catch (Throwable ignored) {
+            }
+            lightMirrorReceiver = null;
+        }
     }
 
     // v528: 回到主页时把卡内临时静默状态对一遍（可能在外面
@@ -1307,7 +1415,31 @@ public class MainActivity extends Activity {
                 && quietBody.getVisibility() == View.VISIBLE) {
             startQuietTicker();
         }
+        // v572: 轻气泡三栏——回前台先按镜像刷一遍，再挂广播
+        // 收实时变化（SystemUI 每次写镜像都会广播）。
+        if (lightUi) {
+            refreshLightMirrorViews();
+            if (lightMirrorReceiver == null) {
+                lightMirrorReceiver =
+                        new android.content.BroadcastReceiver() {
+                            @Override
+                            public void onReceive(
+                                    android.content.Context c,
+                                    Intent i) {
+                                refreshLightMirrorViews();
+                            }
+                        };
+                try {
+                    registerReceiver(lightMirrorReceiver,
+                            new android.content.IntentFilter(
+                                    BubbleWindow.ACTION_LIGHT_MIRROR),
+                            android.content.Context.RECEIVER_EXPORTED);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
+
 
     // One feature card: coloured bubble header + expandable body.
     // ================= v527 设置页重构 =================
@@ -1392,8 +1524,16 @@ public class MainActivity extends Activity {
             this.sel = selected;
             box = new LinearLayout(MainActivity.this);
             box.setOrientation(LinearLayout.HORIZONTAL);
-            box.setBackground(rounded(
-                    Color.argb(60, 255, 255, 255), dp(999)));
+            // v584: 轻气泡下轨道换深一号的灰——原 L_TRACK
+            // 与子行/应用行的底色同色，轨道糊在行里看不
+            // 见，只剩选中白药丸浮着（wei：「按钮背后的
+            // 背景」）。用 L_LINE 同值的灰作轨道，白药丸
+            // 和未选文字都立得住；落在白卡上（如面板颜色
+            // 段）也看得清。
+            box.setBackground(lightUi
+                    ? rounded(Color.rgb(226, 232, 240), dp(999))
+                    : rounded(Color.argb(60, 255, 255, 255),
+                            dp(999)));
             box.setPadding(dp(3), dp(3), dp(3), dp(3));
             items = new TextView[labels.length];
             for (int i = 0; i < labels.length; i++) {
@@ -1433,7 +1573,8 @@ public class MainActivity extends Activity {
                             android.graphics.Typeface.BOLD);
                 } else {
                     items[i].setBackground(null);
-                    items[i].setTextColor(Color.WHITE);
+                    items[i].setTextColor(lightUi ? L_SUB
+                            : Color.WHITE);
                     items[i].setTypeface(items[i].getTypeface(),
                             android.graphics.Typeface.NORMAL);
                 }
@@ -1457,7 +1598,8 @@ public class MainActivity extends Activity {
         TextView chev = new TextView(this);
         chev.setText("›");
         chev.setTextSize(24);
-        chev.setTextColor(Color.WHITE);
+        chev.setTextColor(lightUi ? Color.rgb(148, 163, 184)
+                : Color.WHITE);
         chev.setRotation(90f);
         LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1492,8 +1634,14 @@ public class MainActivity extends Activity {
             row = new LinearLayout(MainActivity.this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                    dp(16)));
+            // v581: 轻气泡下换浅灰底（与子行同款）——原先
+            // 半透明白底 + 白字是经典色卡的写法，搬到白
+            // 卡上整行只剩开关可见（wei 截图：联动与突破
+            // 两行只剩两个开关浮着）。开关轨道在 paint()
+            // 里早已分支，漏的是底色和文字。
+            row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                    : rounded(Color.argb(60, 255, 255, 255),
+                            dp(16)));
             row.setPadding(dp(12), dp(10), dp(12), dp(10));
             LinearLayout texts = new LinearLayout(MainActivity.this);
             texts.setOrientation(LinearLayout.VERTICAL);
@@ -1502,14 +1650,15 @@ public class MainActivity extends Activity {
             TextView t = new TextView(MainActivity.this);
             t.setText(title);
             t.setTextSize(14);
-            t.setTextColor(Color.WHITE);
+            t.setTextColor(lightUi ? L_INK : Color.WHITE);
             t.setTypeface(t.getTypeface(),
                     android.graphics.Typeface.BOLD);
             texts.addView(t);
             TextView s = new TextView(MainActivity.this);
             s.setText(sub);
             s.setTextSize(11.5f);
-            s.setTextColor(Color.argb(230, 255, 255, 255));
+            s.setTextColor(lightUi ? L_SUB
+                    : Color.argb(230, 255, 255, 255));
             texts.addView(s);
             row.addView(texts);
 
@@ -1540,8 +1689,12 @@ public class MainActivity extends Activity {
         }
 
         private void paint() {
-            track.setBackground(rounded(on ? Color.rgb(22, 163, 74)
-                    : Color.argb(120, 255, 255, 255), dp(999)));
+            track.setBackground(rounded(on
+                    ? (lightUi ? L_ACCENT
+                            : Color.rgb(22, 163, 74))
+                    : (lightUi ? Color.rgb(203, 213, 225)
+                            : Color.argb(120, 255, 255, 255)),
+                    dp(999)));
             FrameLayout.LayoutParams p =
                     (FrameLayout.LayoutParams) dot.getLayoutParams();
             p.gravity = Gravity.CENTER_VERTICAL
@@ -1594,7 +1747,9 @@ public class MainActivity extends Activity {
 
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(rounded(color, dp(22)));
+        // v572: 轻气泡下统一白卡细线。
+        card.setBackground(lightUi ? lightCardBg()
+                : rounded(color, dp(22)));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1609,9 +1764,11 @@ public class MainActivity extends Activity {
         TextView icon = new TextView(this);
         icon.setText("静");
         icon.setTextSize(15);
-        icon.setTextColor(color);
+        icon.setTextColor(lightUi ? L_ACCENT : color);
         icon.setGravity(Gravity.CENTER);
-        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(8))
+                : rounded(Color.WHITE, dp(10)));
         icon.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(36), dp(36)));
         head.addView(icon);
@@ -1624,14 +1781,15 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("安静规则");
         title.setTextSize(15);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(lightUi ? L_INK : Color.WHITE);
         title.setTypeface(title.getTypeface(),
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
         sub.setText("临时静默和应用名单，都在这张卡里");
         sub.setTextSize(12);
-        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        sub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(sub);
         head.addView(texts);
         final TextView chev = buildExpandChevron();
@@ -1675,7 +1833,8 @@ public class MainActivity extends Activity {
                 + "勿扰，算提前取消。"));
 
         quietStatusTitle = new TextView(this);
-        quietStatusTitle.setTextColor(Color.WHITE);
+        quietStatusTitle.setTextColor(lightUi ? L_INK
+                : Color.WHITE);
         quietStatusTitle.setTextSize(15);
         quietStatusTitle.setTypeface(quietStatusTitle.getTypeface(),
                 android.graphics.Typeface.BOLD);
@@ -1684,14 +1843,16 @@ public class MainActivity extends Activity {
         quietStatusTitle.setLayoutParams(stLp);
         body.addView(quietStatusTitle);
         quietCountdown = new TextView(this);
-        quietCountdown.setTextColor(Color.WHITE);
+        quietCountdown.setTextColor(lightUi ? L_INK
+                : Color.WHITE);
         quietCountdown.setTextSize(30);
         quietCountdown.setTypeface(quietCountdown.getTypeface(),
                 android.graphics.Typeface.BOLD);
         quietCountdown.setLayoutParams(quietRowLp());
         body.addView(quietCountdown);
         quietStatusSub = new TextView(this);
-        quietStatusSub.setTextColor(Color.argb(230, 255, 255, 255));
+        quietStatusSub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         quietStatusSub.setTextSize(12);
         quietStatusSub.setLineSpacing(0, 1.5f);
         quietStatusSub.setLayoutParams(quietRowLp());
@@ -1702,7 +1863,12 @@ public class MainActivity extends Activity {
         quietActionBtn.setTextColor(color);
         quietActionBtn.setTypeface(quietActionBtn.getTypeface(),
                 android.graphics.Typeface.BOLD);
-        quietActionBtn.setBackground(rounded(Color.WHITE, dp(12)));
+        // v587: 轻气泡下白药丸在白卡上没底——换浅蓝底
+        // （wei 截图：「这个开启按钮背景」），字色仍是
+        // 卡的靛蓝，经典模式不变。
+        quietActionBtn.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(12))
+                : rounded(Color.WHITE, dp(12)));
         quietActionBtn.setPadding(0, dp(11), 0, dp(11));
         LinearLayout.LayoutParams abLp = quietRowLp();
         abLp.topMargin = dp(12);
@@ -1860,7 +2026,13 @@ public class MainActivity extends Activity {
         quietAppSearch.setTextColor(Color.rgb(17, 24, 39));
         quietAppSearch.setHintTextColor(Color.rgb(156, 163, 175));
         GradientDrawable sb = new GradientDrawable();
-        sb.setColor(Color.WHITE);
+        // v582: 轻气泡白卡上白药丸没边没底、只剩提示字
+        // （wei 指着截图说「这个搜索框」）——轻气泡下换
+        // 浅灰底 + 细线描边，经典色卡上保持白药丸。
+        sb.setColor(lightUi ? L_TRACK : Color.WHITE);
+        if (lightUi) {
+            sb.setStroke(dp(1), L_LINE);
+        }
         sb.setCornerRadius(dp(999));
         quietAppSearch.setBackground(sb);
         quietAppSearch.setPadding(dp(14), dp(9), dp(14), dp(9));
@@ -1896,7 +2068,8 @@ public class MainActivity extends Activity {
 
         quietCountText = new TextView(this);
         quietCountText.setTextSize(12);
-        quietCountText.setTextColor(Color.argb(230, 255, 255, 255));
+        quietCountText.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         LinearLayout.LayoutParams ctLp = quietRowLp();
         ctLp.topMargin = dp(10);
         quietCountText.setLayoutParams(ctLp);
@@ -2022,12 +2195,16 @@ public class MainActivity extends Activity {
         keywordAddInput = new EditText(this);
         keywordAddInput.setSingleLine(true);
         keywordAddInput.setTextSize(14);
-        keywordAddInput.setTextColor(Color.WHITE);
+        keywordAddInput.setTextColor(lightUi ? L_INK
+                : Color.WHITE);
         keywordAddInput.setHint("输入关键词");
-        keywordAddInput.setHintTextColor(
-                Color.argb(160, 255, 255, 255));
-        keywordAddInput.setBackground(rounded(
-                Color.argb(60, 255, 255, 255), dp(10)));
+        keywordAddInput.setHintTextColor(lightUi
+                ? Color.rgb(156, 163, 175)
+                : Color.argb(160, 255, 255, 255));
+        keywordAddInput.setBackground(lightUi
+                ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(10)));
         keywordAddInput.setPadding(dp(10), dp(7), dp(10), dp(7));
         keywordAddInput.setLayoutParams(
                 new LinearLayout.LayoutParams(dp(150),
@@ -2040,7 +2217,9 @@ public class MainActivity extends Activity {
         ok.setTextColor(Color.rgb(59, 130, 246));
         ok.setTypeface(ok.getTypeface(),
                 android.graphics.Typeface.BOLD);
-        ok.setBackground(rounded(Color.WHITE, dp(999)));
+        ok.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(999))
+                : rounded(Color.WHITE, dp(999)));
         ok.setPadding(dp(16), dp(7), dp(16), dp(7));
         LinearLayout.LayoutParams oklp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2179,21 +2358,21 @@ public class MainActivity extends Activity {
         }
         if (burstBreakRow != null) {
             burstBreakRow.setAlpha(master
-                    ? (isOn("burstBreak") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("burstBreak") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         if (mentionBreakSwitch != null) {
             mentionBreakSwitch.setEnabled(master);
         }
         if (mentionBreakRow != null) {
             mentionBreakRow.setAlpha(master
-                    ? (isOn("mentionBreak") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("mentionBreak") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         if (keywordFilterSwitch != null) {
             keywordFilterSwitch.setEnabled(master);
         }
         if (keywordFilterRow != null) {
             keywordFilterRow.setAlpha(master
-                    ? (isOn("keywordFilter") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("keywordFilter") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         refreshKeywordPanel();
     }
@@ -2220,6 +2399,1369 @@ public class MainActivity extends Activity {
      * 钉钉 / TIM / 企业微信）没设按跟随全局解析、直接
      * 列进名单，点成「无」时存显式 none 压住默认。
      */
+    // ================= v564 轻气泡：设计模式 =================
+
+    private static final int MODE_CARD_COLOR = Color.rgb(2, 132, 199);
+    private static final int LIGHT_CARD_COLOR = Color.rgb(59, 130, 246);
+    private static final int LIGHT_BG = Color.rgb(237, 242, 248);
+    // v572: 轻气泡设计语言（预览定稿）——浅底、白卡、1px
+    // 细线、深字、蓝只做点缀，圆角统一 12，不用经典气泡
+    // 式样。以下常量只在 lightUi 时用。
+    private static final int L_INK = Color.rgb(15, 23, 42);
+    private static final int L_BODY = Color.rgb(51, 65, 85);
+    private static final int L_SUB = Color.rgb(100, 116, 139);
+    private static final int L_LINE = Color.rgb(226, 232, 240);
+    private static final int L_ACCENT = Color.rgb(59, 130, 246);
+    private static final int L_ACCENT_BG = Color.rgb(239, 246, 255);
+    private static final int L_TRACK = Color.rgb(241, 245, 249);
+
+    /** v572: 轻气泡白卡底（白 + 12 圆角 + 1px 细线描边）。 */
+    private GradientDrawable lightCardBg() {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(Color.WHITE);
+        g.setCornerRadius(dp(12));
+        g.setStroke(dp(1), L_LINE);
+        return g;
+    }
+
+    /** 卡头（与安静规则卡同款）：白圆盘单字 + 标题 + 副标题。 */
+    private LinearLayout buildColorCardHead(int color, String glyph,
+            String title, String sub) {
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(12), dp(12), dp(12), dp(12));
+        TextView icon = new TextView(this);
+        icon.setText(glyph);
+        icon.setTextSize(15);
+        icon.setTextColor(lightUi ? L_ACCENT : color);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(8))
+                : rounded(Color.WHITE, dp(10)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(36), dp(36)));
+        head.addView(icon);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(15);
+        t.setTextColor(lightUi ? L_INK : Color.WHITE);
+        t.setTypeface(t.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(t);
+        TextView s = new TextView(this);
+        s.setText(sub);
+        s.setTextSize(12);
+        s.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
+        texts.addView(s);
+        head.addView(texts);
+        return head;
+    }
+
+    private LinearLayout newColorCard(int color) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        // v572: 轻气泡下所有卡统一白卡细线（不用经典色块）。
+        card.setBackground(lightUi ? lightCardBg()
+                : rounded(color, dp(22)));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(10);
+        card.setLayoutParams(clp);
+        return card;
+    }
+
+    /** 白药丸按钮（卡内同款）：彩字加粗。v572: 轻气泡下
+     * 换浅蓝底蓝字（白卡上白药丸看不见）。 */
+    private TextView buildWhitePillButton(String text, int color) {
+        TextView b = new TextView(this);
+        b.setText(text);
+        b.setTextSize(13);
+        b.setGravity(Gravity.CENTER);
+        b.setTextColor(lightUi ? L_ACCENT : color);
+        b.setTypeface(b.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        b.setBackground(lightUi ? rounded(L_ACCENT_BG, dp(999))
+                : rounded(Color.WHITE, dp(999)));
+        b.setPadding(dp(16), dp(7), dp(16), dp(7));
+        return b;
+    }
+
+    private TextView modeStateText(String text) {
+        TextView s = new TextView(this);
+        s.setText(text);
+        s.setTextSize(12.5f);
+        s.setTextColor(lightUi ? L_ACCENT
+                : Color.argb(235, 255, 255, 255));
+        s.setTypeface(s.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        if (lightUi) {
+            s.setBackground(rounded(L_ACCENT_BG, dp(999)));
+        }
+        s.setPadding(dp(10), dp(7), dp(10), dp(7));
+        return s;
+    }
+
+    /** 设计模式卡：经典 / 轻气泡两行，当前模式标「使用中」，
+     * 另一行给切换按钮。两种模式下都常驻主页顶部。 */
+    private View buildModeCard() {
+        LinearLayout card = newColorCard(MODE_CARD_COLOR);
+        card.addView(buildColorCardHead(MODE_CARD_COLOR, "模",
+                "设计模式", "整套通知的长相与行为，二选一"));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(12), dp(2), dp(12), dp(12));
+        card.addView(body);
+
+        // ---- 经典行 ----
+        LinearLayout classicRow = new LinearLayout(this);
+        classicRow.setOrientation(LinearLayout.HORIZONTAL);
+        classicRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout cTexts = new LinearLayout(this);
+        cTexts.setOrientation(LinearLayout.VERTICAL);
+        cTexts.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView ct = new TextView(this);
+        ct.setText("经典");
+        ct.setTextSize(14);
+        ct.setTextColor(lightUi ? L_INK : Color.WHITE);
+        ct.setTypeface(ct.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        cTexts.addView(ct);
+        TextView cd = new TextView(this);
+        cd.setText("胶囊弹出 · 扇子收纳 · 一直以来的样子");
+        cd.setTextSize(12);
+        cd.setTextColor(lightUi ? L_SUB
+                : Color.argb(215, 255, 255, 255));
+        cTexts.addView(cd);
+        classicRow.addView(cTexts);
+        if (!lightUi) {
+            classicRow.addView(modeStateText("使用中"));
+        } else {
+            TextView back = buildWhitePillButton("切回经典",
+                    MODE_CARD_COLOR);
+            back.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    playModeSwitchAnimation(false);
+                }
+            });
+            classicRow.addView(back);
+        }
+        body.addView(classicRow);
+
+        // 分隔线
+        View div = new View(this);
+        div.setBackgroundColor(lightUi ? L_LINE
+                : Color.argb(50, 255, 255, 255));
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        dlp.topMargin = dp(10);
+        dlp.bottomMargin = dp(10);
+        div.setLayoutParams(dlp);
+        body.addView(div);
+
+        // ---- 轻气泡行 ----
+        LinearLayout lightRow = new LinearLayout(this);
+        lightRow.setOrientation(LinearLayout.HORIZONTAL);
+        lightRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout lTexts = new LinearLayout(this);
+        lTexts.setOrientation(LinearLayout.VERTICAL);
+        lTexts.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView lt = new TextView(this);
+        lt.setText("轻气泡");
+        lt.setTextSize(14);
+        lt.setTextColor(lightUi ? L_INK : Color.WHITE);
+        lt.setTypeface(lt.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        lTexts.addView(lt);
+        TextView ld = new TextView(this);
+        ld.setText("通知不弹窗，静默收进边缘小签\n"
+                + "音乐进收纳卡，永远置顶\n"
+                + "音乐播放时，呼吸灯变色流转");
+        ld.setTextSize(12);
+        ld.setTextColor(lightUi ? L_SUB
+                : Color.argb(215, 255, 255, 255));
+        ld.setLineSpacing(0, 1.25f);
+        lTexts.addView(ld);
+        lightRow.addView(lTexts);
+        if (lightUi) {
+            lightRow.addView(modeStateText("使用中"));
+        } else {
+            TextView go = buildWhitePillButton("开启轻气泡",
+                    MODE_CARD_COLOR);
+            go.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    playModeSwitchAnimation(true);
+                }
+            });
+            lightRow.addView(go);
+        }
+        body.addView(lightRow);
+        return card;
+    }
+
+    /** 轻气泡专属卡：小签位置（左右 × 上中下药丸）+ 说明 +
+     * 切回经典常驻入口。 */
+    private View buildLightCard() {
+        LinearLayout card = newColorCard(LIGHT_CARD_COLOR);
+        card.addView(buildColorCardHead(LIGHT_CARD_COLOR, "轻",
+                "轻气泡", "简洁收纳 · 点边缘小签打开面板"));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(12), dp(2), dp(12), dp(12));
+        card.addView(body);
+
+        TextView posLabel = new TextView(this);
+        posLabel.setText("小签位置（也可以直接拖小签）");
+        posLabel.setTextSize(13);
+        posLabel.setTextColor(L_INK);
+        posLabel.setTypeface(posLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        body.addView(posLabel);
+
+        lightPosChips.clear();
+        LinearLayout sideRow = new LinearLayout(this);
+        sideRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        srlp.topMargin = dp(8);
+        sideRow.setLayoutParams(srlp);
+        sideRow.addView(buildLightPosChip("sideL", "左边"));
+        sideRow.addView(buildLightPosChip("sideR", "右边"));
+        body.addView(sideRow);
+        LinearLayout bandRow = new LinearLayout(this);
+        bandRow.setOrientation(LinearLayout.HORIZONTAL);
+        bandRow.addView(buildLightPosChip("band0", "靠上"));
+        bandRow.addView(buildLightPosChip("band1", "中间"));
+        bandRow.addView(buildLightPosChip("band2", "靠下"));
+        body.addView(bandRow);
+        refreshLightPosChips();
+
+        // v591: 呼吸灯边缘发光开关（wei 点名小功能，
+        // 默认开）——小签呼吸时边缘泛起同色光晕。
+        body.addView(buildSubSwitch(new Feature(
+                "lightDotGlow", "呼吸灯边缘发光",
+                "小签呼吸时，屏幕边缘跟着泛起一圈光晕",
+                "", Color.rgb(59, 130, 246), "光", true,
+                null)));
+
+        // v572: 打开方式单独设计（预览定稿）——两张示意图
+        // 卡：小窗（浮窗图）/ 全局（全屏图），点选即切换，
+        // 与经典共用 miniwindow 设置（通用元素）。
+        TextView openLabel = new TextView(this);
+        openLabel.setText("打开方式（点面板里的通知时）");
+        openLabel.setTextSize(13);
+        openLabel.setTextColor(L_INK);
+        openLabel.setTypeface(openLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams ollp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        ollp.topMargin = dp(14);
+        openLabel.setLayoutParams(ollp);
+        body.addView(openLabel);
+        LinearLayout openRow = new LinearLayout(this);
+        openRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams orlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        orlp.topMargin = dp(8);
+        openRow.setLayoutParams(orlp);
+        lightOpenTiles = new LinearLayout[2];
+        lightOpenTiles[0] = buildLightOpenTile(true);
+        lightOpenTiles[1] = buildLightOpenTile(false);
+        LinearLayout.LayoutParams t0 =
+                new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        t0.rightMargin = dp(6);
+        lightOpenTiles[0].setLayoutParams(t0);
+        LinearLayout.LayoutParams t1 =
+                new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        t1.leftMargin = dp(6);
+        lightOpenTiles[1].setLayoutParams(t1);
+        openRow.addView(lightOpenTiles[0]);
+        openRow.addView(lightOpenTiles[1]);
+        body.addView(openRow);
+        paintLightOpenTiles();
+
+        // v578: 音乐卡片（wei 定）——轻气泡这边不用经典
+        // 「音乐胶囊」卡，这边就叫「音乐卡片」：总开关
+        // lightMusicCard 默认开，开了音乐显示在收纳面板
+        // 的卡片里，没开不显示（音乐按普通通知收纳）。
+        // 经典音乐卡的子设置除「模拟音乐」外三个都办过
+        // 来（视频App / 反方向的钟 / QQ音乐免费听）——同
+        // 键同值，与经典共用一份设置。
+        TextView musicLabel = new TextView(this);
+        musicLabel.setText("音乐卡片（显示在收纳面板里）");
+        musicLabel.setTextSize(13);
+        musicLabel.setTextColor(L_INK);
+        musicLabel.setTypeface(musicLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams mllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        mllp.topMargin = dp(14);
+        musicLabel.setLayoutParams(mllp);
+        body.addView(musicLabel);
+        body.addView(buildSubSwitch(new Feature(
+                "lightMusicCard", "音乐卡片",
+                "开了就在收纳面板里显示，没开不显示",
+                "", Color.rgb(219, 39, 119), "音", true, null)));
+        lightMusicSubViews.clear();
+        for (String subKey : new String[]{
+                "musicVideo", "musicLed", "qqFree"}) {
+            Feature sub = featureFor(subKey);
+            if (sub != null) {
+                View w = buildSubSwitch(sub);
+                lightMusicSubViews.put(subKey, w);
+                body.addView(w);
+            }
+        }
+        refreshLightMusicLinkage();
+
+        // v567: 面板外观（wei 定：面板要能调整大小）——
+        // 宽/高（行数）/圆角/透明度/比例五条滑杆，松手
+        // 落盘 + 广播，下次打开面板生效。
+        TextView styleLabel = new TextView(this);
+        styleLabel.setText("面板外观（下次打开面板生效）");
+        styleLabel.setTextSize(13);
+        styleLabel.setTextColor(L_INK);
+        styleLabel.setTypeface(styleLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams sllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        sllp.topMargin = dp(14);
+        styleLabel.setLayoutParams(sllp);
+        body.addView(styleLabel);
+        // v572: 黑 / 白双模式（wei 定）——黑色 = 深色面板，
+        // 白色 = 白底 + 黑色描边；小签、面板、音乐卡、
+        // 内嵌菜单整套一起换，立即生效。
+        TextView themeLabel = new TextView(this);
+        themeLabel.setText("面板颜色（立即生效）");
+        themeLabel.setTextSize(13);
+        themeLabel.setTextColor(L_INK);
+        LinearLayout.LayoutParams thlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        thlp.topMargin = dp(10);
+        thlp.bottomMargin = dp(6);
+        themeLabel.setLayoutParams(thlp);
+        body.addView(themeLabel);
+        final SegControl themeSeg = new SegControl(
+                new String[]{"黑色模式", "白色模式"},
+                prefs.getBoolean("lightPanelWhite", false)
+                        ? 1 : 0, L_ACCENT);
+        themeSeg.listener = new SegListener() {
+            @Override
+            public void onSelect(int idx) {
+                setFeatureFlag("lightPanelWhite", idx == 1);
+            }
+        };
+        body.addView(themeSeg.box);
+        int[] sv = FeatureFlags.lightPanelStyleValues(
+                prefs.getString("lightPanelStyle", null));
+        System.arraycopy(sv, 0, lightStyleVals, 0,
+                lightStyleVals.length);
+        body.addView(buildLightStyleSliderRow(
+                "面板宽度", 0, 240, 360, "dp"));
+        body.addView(buildLightStyleSliderRow(
+                "面板高度", 1, 3, 8, " 行"));
+        body.addView(buildLightStyleSliderRow(
+                "圆角", 2, 0, 36, "dp"));
+        body.addView(buildLightStyleSliderRow(
+                "透明度", 3, 30, 100, "%"));
+        body.addView(buildLightStyleSliderRow(
+                "整体比例", 4, 80, 120, "%"));
+
+        TextView info = new TextView(this);
+        info.setText("音乐进收纳卡并永远置顶，系统的音乐通知会"
+                + "被隐藏，只在面板里控制播放。\n"
+                + "收纳里删掉的通知先进「时光机」，保留时长与"
+                + "经典模式的时光机设置一致。");
+        info.setTextSize(12);
+        info.setTextColor(L_SUB);
+        info.setLineSpacing(0, 1.3f);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        ilp.topMargin = dp(4);
+        info.setLayoutParams(ilp);
+        body.addView(info);
+
+        TextView back = buildWhitePillButton("切回经典",
+                LIGHT_CARD_COLOR);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(10);
+        back.setLayoutParams(blp);
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                playModeSwitchAnimation(false);
+            }
+        });
+        body.addView(back);
+        return card;
+    }
+
+    /** v572: 打开方式示意图卡（预览定稿）——手机框示意图：
+     * 小窗 = 当前页上浮着一个小窗；全局 = 应用铺满全屏。
+     * 点选写 miniwindow（与经典共用同一个设置）。 */
+    private LinearLayout buildLightOpenTile(final boolean mini) {
+        LinearLayout tile = new LinearLayout(this);
+        tile.setOrientation(LinearLayout.VERTICAL);
+        tile.setGravity(Gravity.CENTER_HORIZONTAL);
+        tile.setPadding(dp(12), dp(12), dp(12), dp(12));
+        // 示意图：手机外框。
+        FrameLayout frame = new FrameLayout(this);
+        GradientDrawable fb = new GradientDrawable();
+        fb.setColor(Color.rgb(248, 250, 252));
+        fb.setCornerRadius(dp(6));
+        fb.setStroke(dp(1), Color.rgb(148, 163, 184));
+        frame.setBackground(fb);
+        frame.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(44), dp(60)));
+        if (mini) {
+            View win = new View(this);
+            GradientDrawable wb = new GradientDrawable();
+            wb.setColor(L_ACCENT);
+            wb.setCornerRadius(dp(3));
+            win.setBackground(wb);
+            FrameLayout.LayoutParams wlp =
+                    new FrameLayout.LayoutParams(dp(24), dp(18));
+            wlp.gravity = Gravity.BOTTOM | Gravity.END;
+            wlp.rightMargin = dp(4);
+            wlp.bottomMargin = dp(4);
+            win.setLayoutParams(wlp);
+            frame.addView(win);
+        } else {
+            View full = new View(this);
+            GradientDrawable ub = new GradientDrawable();
+            ub.setColor(L_ACCENT_BG);
+            ub.setCornerRadius(dp(3));
+            ub.setStroke(dp(1), L_ACCENT);
+            full.setBackground(ub);
+            FrameLayout.LayoutParams ulp =
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT);
+            ulp.setMargins(dp(4), dp(4), dp(4), dp(4));
+            full.setLayoutParams(ulp);
+            frame.addView(full);
+        }
+        tile.addView(frame);
+        TextView name = new TextView(this);
+        name.setText(mini ? "小窗打开" : "全局打开");
+        name.setTextSize(14);
+        name.setTypeface(name.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        name.setTag("openTileName");
+        LinearLayout.LayoutParams nlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = dp(8);
+        name.setLayoutParams(nlp);
+        tile.addView(name);
+        TextView desc = new TextView(this);
+        desc.setText(mini ? "不离开当前界面" : "全屏直接跳过去");
+        desc.setTextSize(11.5f);
+        desc.setTextColor(L_SUB);
+        tile.addView(desc);
+        tile.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setFeatureFlag("miniwindow", mini);
+                paintLightOpenTiles();
+            }
+        });
+        return tile;
+    }
+
+    /** v572: 打开方式两卡按当前 miniwindow 值涂选中态。 */
+    private void paintLightOpenTiles() {
+        if (lightOpenTiles == null) {
+            return;
+        }
+        boolean mini = isOn("miniwindow");
+        for (int i = 0; i < lightOpenTiles.length; i++) {
+            LinearLayout tile = lightOpenTiles[i];
+            if (tile == null) {
+                continue;
+            }
+            boolean sel = (i == 0) == mini;
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(sel ? L_ACCENT_BG : Color.WHITE);
+            bg.setCornerRadius(dp(12));
+            bg.setStroke(dp(sel ? 2 : 1),
+                    sel ? L_ACCENT : L_LINE);
+            tile.setBackground(bg);
+            View name = tile.findViewWithTag("openTileName");
+            if (name instanceof TextView) {
+                ((TextView) name).setTextColor(
+                        sel ? L_ACCENT : L_INK);
+            }
+        }
+    }
+
+    /** v578: 「音乐卡片」总开关联动——关时三个子设置行
+     * 置灰且整棵不可点，开时恢复（wei 的总开关管子开关
+     * 规矩）。 */
+    private void refreshLightMusicLinkage() {
+        boolean master = isOn("lightMusicCard");
+        for (View w : lightMusicSubViews.values()) {
+            if (w == null) {
+                continue;
+            }
+            w.setAlpha(master ? 1f : 0.45f);
+            setViewTreeEnabled(w, master);
+        }
+    }
+
+    private void setViewTreeEnabled(View v, boolean enabled) {
+        v.setEnabled(enabled);
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                setViewTreeEnabled(g.getChildAt(i), enabled);
+            }
+        }
+    }
+
+    private TextView buildLightPosChip(final String id,
+            String label) {
+        TextView chip = buildRecallTtlChip(label);
+        lightPosChips.put(id, chip);
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String cur = prefs.getString("lightDotPos", "L1");
+                boolean right = cur != null
+                        && cur.startsWith("R");
+                int band = 1;
+                if (cur != null && cur.length() >= 2) {
+                    band = cur.charAt(1) - '0';
+                    if (band < 0 || band > 2) {
+                        band = 1;
+                    }
+                }
+                if ("sideL".equals(id)) {
+                    right = false;
+                } else if ("sideR".equals(id)) {
+                    right = true;
+                } else if ("band0".equals(id)) {
+                    band = 0;
+                } else if ("band1".equals(id)) {
+                    band = 1;
+                } else if ("band2".equals(id)) {
+                    band = 2;
+                }
+                setLightDotPos((right ? "R" : "L") + band);
+            }
+        });
+        return chip;
+    }
+
+    private void refreshLightPosChips() {
+        String cur = prefs.getString("lightDotPos", "L1");
+        boolean right = cur != null && cur.startsWith("R");
+        int band = 1;
+        if (cur != null && cur.length() >= 2) {
+            band = cur.charAt(1) - '0';
+            if (band < 0 || band > 2) {
+                band = 1;
+            }
+        }
+        for (java.util.Map.Entry<String, TextView> e
+                : lightPosChips.entrySet()) {
+            boolean sel;
+            if ("sideL".equals(e.getKey())) {
+                sel = !right;
+            } else if ("sideR".equals(e.getKey())) {
+                sel = right;
+            } else if ("band0".equals(e.getKey())) {
+                sel = band == 0;
+            } else if ("band1".equals(e.getKey())) {
+                sel = band == 1;
+            } else {
+                sel = band == 2;
+            }
+            paintRecallTtlChip(e.getValue(), sel);
+        }
+    }
+
+    /** 小签位置落盘：prefs + 备份 + 广播给 SystemUI 对齐
+     * （字符串键走 FEATURE_TOGGLE 的 pos extra 通道）。 */
+    private void setLightDotPos(String pos) {
+        prefs.edit().putString("lightDotPos", pos).commit();
+        SettingsStore.saveAll(MainActivity.this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "lightDotPos");
+        i.putExtra("enabled", true);
+        i.putExtra("pos", pos);
+        sendBroadcast(i);
+        refreshLightPosChips();
+    }
+
+    /** v567: 面板外观落盘：五项打包成 lightPanelStyle
+     * 字符串——prefs + 备份 + 广播给 SystemUI 对齐（与
+     * setLightDotPos 同通道）。 */
+    private void saveLightPanelStyle() {
+        String packed = FeatureFlags.parseLightPanelStyle(
+                lightStyleVals[0] + "," + lightStyleVals[1]
+                        + "," + lightStyleVals[2] + ","
+                        + lightStyleVals[3] + ","
+                        + lightStyleVals[4]);
+        prefs.edit().putString("lightPanelStyle", packed)
+                .commit();
+        SettingsStore.saveAll(MainActivity.this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "lightPanelStyle");
+        i.putExtra("enabled", true);
+        i.putExtra("style", packed);
+        sendBroadcast(i);
+    }
+
+    /** v567: 面板外观滑条行——样式照外观滑条（透明白底
+     * 圆角 16、白字白滑条，嵌在彩色卡里）。拖动只改本地
+     * 值与数字，松手才落盘广播（面板不在眼前，不做直播
+     * 预览）。idx 对应 lightStyleVals 的下标。 */
+    private View buildLightStyleSliderRow(final String labelText,
+            final int idx, final int min, final int max,
+            final String unit) {
+        final LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        // v572: 浅色行（本构建器只在轻气泡卡里用）。
+        box.setBackground(rounded(L_TRACK, dp(10)));
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(8);
+        box.setLayoutParams(blp);
+
+        LinearLayout labelRow = new LinearLayout(this);
+        labelRow.setOrientation(LinearLayout.HORIZONTAL);
+        labelRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView label = new TextView(this);
+        label.setText(labelText);
+        label.setTextSize(14);
+        label.setTextColor(L_INK);
+        label.setTypeface(label.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        label.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        labelRow.addView(label);
+        final TextView val = new TextView(this);
+        val.setTextSize(13);
+        val.setTextColor(L_ACCENT);
+        val.setTypeface(val.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        val.setText(lightStyleVals[idx] + unit);
+        labelRow.addView(val);
+        box.addView(labelRow);
+
+        final SeekBar seek = new SeekBar(this);
+        seek.setMax(max - min);
+        seek.setProgress(lightStyleVals[idx] - min);
+        try {
+            android.content.res.ColorStateList accent =
+                    android.content.res.ColorStateList.valueOf(
+                            L_ACCENT);
+            seek.setProgressTintList(accent);
+            seek.setThumbTintList(accent);
+            seek.setProgressBackgroundTintList(
+                    android.content.res.ColorStateList.valueOf(
+                            L_LINE));
+        } catch (Throwable ignored) {
+        }
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(6);
+        seek.setLayoutParams(slp);
+        box.addView(seek);
+        seek.setOnSeekBarChangeListener(
+                new SeekBar.OnSeekBarChangeListener() {
+                    @Override
+                    public void onProgressChanged(SeekBar s,
+                            int progress, boolean fromUser) {
+                        lightStyleVals[idx] = progress + min;
+                        val.setText(lightStyleVals[idx] + unit);
+                    }
+
+                    @Override
+                    public void onStartTrackingTouch(SeekBar s) {
+                    }
+
+                    @Override
+                    public void onStopTrackingTouch(SeekBar s) {
+                        saveLightPanelStyle();
+                    }
+                });
+        return box;
+    }
+
+    /** 全屏切换动画（照预览分镜）：胶囊收拢 → 汇入左边缘
+     * 凝成呼吸点 → 浅色漫开 → 新界面升起；切回倒序意象
+     * （点散开成胶囊、白底漫回）。全程约 1.5 秒播完为止、
+     * 不可点穿（覆盖层吃掉触摸）；结束才真正翻开关并
+     * recreate，漫开色与新主页底色一致，衔接不断层。 */
+    // ================= v572 轻气泡三栏外壳 =================
+    // 预览定稿：底部三栏——收纳（音乐置顶卡 + 收纳列表 +
+    // 场景状态）/ 时光机 / 设置。收纳与时光机的数据来自
+    // SystemUI 写的镜像文件（light_mirror.txt），变化时
+    // 有广播催刷新；设置栏就是经典那张设置页（已浅色化）。
+
+    private View buildLightShell(ScrollView settingsScroll) {
+        FrameLayout shell = new FrameLayout(this);
+        shell.setBackgroundColor(LIGHT_BG);
+        FrameLayout content = new FrameLayout(this);
+        final int barH = dp(58);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT);
+        clp.bottomMargin = barH;
+        content.setLayoutParams(clp);
+        shell.addView(content);
+
+        lightTabPages = new View[3];
+        // ---- 收纳页 ----
+        ScrollView homeScroll = new ScrollView(this);
+        homeScroll.setBackgroundColor(LIGHT_BG);
+        homeScroll.setFillViewport(true);
+        LinearLayout homeRoot = new LinearLayout(this);
+        homeRoot.setOrientation(LinearLayout.VERTICAL);
+        homeRoot.setPadding(dp(16), dp(16) + statusBarHeight(),
+                dp(16), dp(24));
+        homeScroll.addView(homeRoot);
+        TextView homeTitle = new TextView(this);
+        homeTitle.setText("收纳");
+        homeTitle.setTextSize(22);
+        homeTitle.setTextColor(L_INK);
+        homeTitle.setTypeface(homeTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        homeRoot.addView(homeTitle);
+        lightHomeMeta = new TextView(this);
+        lightHomeMeta.setTextSize(12.5f);
+        lightHomeMeta.setTextColor(L_SUB);
+        LinearLayout.LayoutParams hmlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        hmlp.topMargin = dp(4);
+        lightHomeMeta.setLayoutParams(hmlp);
+        homeRoot.addView(lightHomeMeta);
+        lightHomeList = new LinearLayout(this);
+        lightHomeList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams hllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        hllp.topMargin = dp(12);
+        lightHomeList.setLayoutParams(hllp);
+        homeRoot.addView(lightHomeList);
+        lightTabPages[0] = homeScroll;
+        // ---- 时光机页 ----
+        ScrollView recallScroll = new ScrollView(this);
+        recallScroll.setBackgroundColor(LIGHT_BG);
+        recallScroll.setFillViewport(true);
+        LinearLayout recallRoot = new LinearLayout(this);
+        recallRoot.setOrientation(LinearLayout.VERTICAL);
+        recallRoot.setPadding(dp(16), dp(16) + statusBarHeight(),
+                dp(16), dp(24));
+        recallScroll.addView(recallRoot);
+        TextView recallTitle = new TextView(this);
+        recallTitle.setText("时光机");
+        recallTitle.setTextSize(22);
+        recallTitle.setTextColor(L_INK);
+        recallTitle.setTypeface(recallTitle.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        recallRoot.addView(recallTitle);
+        lightRecallMeta = new TextView(this);
+        lightRecallMeta.setTextSize(12.5f);
+        lightRecallMeta.setTextColor(L_SUB);
+        LinearLayout.LayoutParams rmlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        rmlp.topMargin = dp(4);
+        lightRecallMeta.setLayoutParams(rmlp);
+        recallRoot.addView(lightRecallMeta);
+        lightRecallList = new LinearLayout(this);
+        lightRecallList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams rllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        rllp.topMargin = dp(12);
+        lightRecallList.setLayoutParams(rllp);
+        recallRoot.addView(lightRecallList);
+        lightTabPages[1] = recallScroll;
+        lightTabPages[2] = settingsScroll;
+        for (View p : lightTabPages) {
+            content.addView(p);
+        }
+        // ---- 底部栏 ----
+        View line = new View(this);
+        line.setBackgroundColor(L_LINE);
+        FrameLayout.LayoutParams lilp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        lilp.gravity = Gravity.BOTTOM;
+        lilp.bottomMargin = barH;
+        line.setLayoutParams(lilp);
+        shell.addView(line);
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackgroundColor(Color.WHITE);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, barH);
+        blp.gravity = Gravity.BOTTOM;
+        bar.setLayoutParams(blp);
+        lightTabBtns = new TextView[3];
+        String[] labels = {"收纳", "时光机", "设置"};
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            TextView btn = new TextView(this);
+            btn.setText(labels[i]);
+            btn.setTextSize(13.5f);
+            btn.setGravity(Gravity.CENTER);
+            btn.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+            btn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    switchLightTab(idx);
+                }
+            });
+            lightTabBtns[i] = btn;
+            bar.addView(btn);
+        }
+        shell.addView(bar);
+        switchLightTab(0);
+        refreshLightMirrorViews();
+        return shell;
+    }
+
+    private void switchLightTab(int idx) {
+        lightTabIndex = idx;
+        if (lightTabPages != null) {
+            for (int i = 0; i < lightTabPages.length; i++) {
+                if (lightTabPages[i] != null) {
+                    lightTabPages[i].setVisibility(
+                            i == idx ? View.VISIBLE : View.GONE);
+                }
+            }
+        }
+        if (lightTabBtns != null) {
+            for (int i = 0; i < lightTabBtns.length; i++) {
+                if (lightTabBtns[i] == null) {
+                    continue;
+                }
+                boolean sel = i == idx;
+                lightTabBtns[i].setTextColor(
+                        sel ? L_ACCENT : L_SUB);
+                lightTabBtns[i].setTypeface(
+                        lightTabBtns[i].getTypeface(),
+                        sel ? android.graphics.Typeface.BOLD
+                                : android.graphics.Typeface.NORMAL);
+            }
+        }
+        if (idx < 2) {
+            refreshLightMirrorViews();
+        }
+    }
+
+    private static String mirrorDecode(String s) {
+        if (s == null) {
+            return "";
+        }
+        try {
+            return java.net.URLDecoder.decode(s, "UTF-8");
+        } catch (Throwable t) {
+            return s;
+        }
+    }
+
+    private String mirrorAppName(String pkg) {
+        try {
+            android.content.pm.ApplicationInfo ai =
+                    getPackageManager().getApplicationInfo(pkg, 0);
+            CharSequence label =
+                    getPackageManager().getApplicationLabel(ai);
+            return label != null ? label.toString() : pkg;
+        } catch (Throwable t) {
+            return pkg;
+        }
+    }
+
+    private String mirrorAgo(long postTime) {
+        long diff = System.currentTimeMillis() - postTime;
+        if (diff < 60_000L) {
+            return "刚刚";
+        }
+        if (diff < 3_600_000L) {
+            return (diff / 60_000L) + " 分钟前";
+        }
+        if (diff < 86_400_000L) {
+            return (diff / 3_600_000L) + " 小时前";
+        }
+        return (diff / 86_400_000L) + " 天前";
+    }
+
+    /** v572: 读镜像文件重画收纳 / 时光机两栏。 */
+    private void refreshLightMirrorViews() {
+        if (lightHomeList == null || lightRecallList == null) {
+            return;
+        }
+        java.util.List<String[]> collect =
+                new java.util.ArrayList<>();
+        java.util.List<String[]> recall =
+                new java.util.ArrayList<>();
+        String[] music = null;
+        boolean scene = false;
+        try {
+            java.io.File f = new java.io.File(
+                    "/sdcard/flymebobo/light_mirror.txt");
+            if (f.exists()) {
+                java.io.FileInputStream fis =
+                        new java.io.FileInputStream(f);
+                byte[] data = new byte[(int) f.length()];
+                int off = 0;
+                int r;
+                while (off < data.length
+                        && (r = fis.read(data, off,
+                                data.length - off)) > 0) {
+                    off += r;
+                }
+                fis.close();
+                String text = new String(data, 0, off, "UTF-8");
+                for (String lineText : text.split("\n")) {
+                    String[] p = lineText.split("\t", -1);
+                    if (p.length == 0) {
+                        continue;
+                    }
+                    if ("S".equals(p[0]) && p.length > 1) {
+                        scene = "1".equals(p[1]);
+                    } else if ("M".equals(p[0]) && p.length > 4) {
+                        music = p;
+                    } else if ("C".equals(p[0]) && p.length > 4) {
+                        collect.add(p);
+                    } else if ("R".equals(p[0]) && p.length > 4) {
+                        recall.add(p);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        lightHomeList.removeAllViews();
+        if (music != null) {
+            lightHomeList.addView(buildLightMirrorMusicCard(music));
+        }
+        if (collect.isEmpty()) {
+            lightHomeList.addView(lightEmptyText(
+                    "收纳箱是空的\n通知来了会被静默收进这里"));
+        } else {
+            for (String[] p : collect) {
+                lightHomeList.addView(buildLightMirrorRow(p));
+            }
+        }
+        if (lightHomeMeta != null) {
+            lightHomeMeta.setText("共 " + collect.size() + " 条"
+                    + (scene ? " · 场景中（面板只看不动）" : ""));
+        }
+        lightRecallList.removeAllViews();
+        if (recall.isEmpty()) {
+            lightRecallList.addView(lightEmptyText(
+                    "时光机是空的\n打开过、删掉的通知会先来这里待一会儿"));
+        } else {
+            for (String[] p : recall) {
+                lightRecallList.addView(buildLightMirrorRow(p));
+            }
+        }
+        if (lightRecallMeta != null) {
+            lightRecallMeta.setText("共 " + recall.size()
+                    + " 条 · 到期自动清除");
+        }
+    }
+
+    private TextView lightEmptyText(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(13);
+        t.setTextColor(L_SUB);
+        t.setGravity(Gravity.CENTER_HORIZONTAL);
+        t.setLineSpacing(0, 1.4f);
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(36);
+        t.setLayoutParams(lp);
+        return t;
+    }
+
+    private View buildLightMirrorMusicCard(String[] p) {
+        // p: M, playing, title, artist, pkg
+        final String pkg = mirrorDecode(p[4]);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(lightCardBg());
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams clp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.bottomMargin = dp(10);
+        card.setLayoutParams(clp);
+        TextView disc = new TextView(this);
+        disc.setText("♪");
+        disc.setTextSize(17);
+        disc.setTextColor(L_ACCENT);
+        disc.setGravity(Gravity.CENTER);
+        disc.setBackground(rounded(L_ACCENT_BG, dp(999)));
+        disc.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(42), dp(42)));
+        card.addView(disc);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp =
+                new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(12);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText(mirrorDecode(p[2]));
+        title.setTextSize(14.5f);
+        title.setTextColor(L_INK);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        title.setSingleLine(true);
+        title.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        texts.addView(title);
+        TextView artist = new TextView(this);
+        artist.setText(mirrorDecode(p[3]));
+        artist.setTextSize(12.5f);
+        artist.setTextColor(L_SUB);
+        artist.setSingleLine(true);
+        artist.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        texts.addView(artist);
+        card.addView(texts);
+        TextView state = new TextView(this);
+        boolean playing = "1".equals(p[1]);
+        state.setText(playing ? "播放中" : "已暂停");
+        state.setTextSize(12);
+        state.setTextColor(playing ? L_ACCENT : L_SUB);
+        card.addView(state);
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openMirrorPkg(pkg);
+            }
+        });
+        return card;
+    }
+
+    private View buildLightMirrorRow(String[] p) {
+        // p: C/R, pkg, title, text, postTime, key(v575 起)
+        final String pkg = mirrorDecode(p[1]);
+        final boolean recallRow = "R".equals(p[0]);
+        final String itemKey = p.length > 5
+                ? mirrorDecode(p[5]) : "";
+        String appName = mirrorAppName(pkg);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(lightCardBg());
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams rlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.bottomMargin = dp(8);
+        row.setLayoutParams(rlp);
+        android.widget.ImageView icon =
+                new android.widget.ImageView(this);
+        icon.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(38), dp(38)));
+        try {
+            icon.setImageDrawable(
+                    getPackageManager().getApplicationIcon(pkg));
+        } catch (Throwable t) {
+            TextView fallback = new TextView(this);
+            fallback.setText(appName.isEmpty() ? "?"
+                    : appName.substring(0, 1));
+            fallback.setTextColor(L_ACCENT);
+            fallback.setTextSize(15);
+            fallback.setGravity(Gravity.CENTER);
+            fallback.setBackground(rounded(L_ACCENT_BG, dp(8)));
+            fallback.setLayoutParams(
+                    new LinearLayout.LayoutParams(dp(38), dp(38)));
+            row.addView(fallback);
+            icon = null;
+        }
+        if (icon != null) {
+            row.addView(icon);
+        }
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp =
+                new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        LinearLayout topRow = new LinearLayout(this);
+        topRow.setOrientation(LinearLayout.HORIZONTAL);
+        TextView name = new TextView(this);
+        name.setText(appName);
+        name.setTextSize(11.5f);
+        name.setTextColor(L_SUB);
+        name.setLayoutParams(new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        topRow.addView(name);
+        TextView ago = new TextView(this);
+        long when = 0;
+        try {
+            when = Long.parseLong(p[4]);
+        } catch (Throwable ignored) {
+        }
+        ago.setText(when > 0 ? mirrorAgo(when) : "");
+        ago.setTextSize(11);
+        ago.setTextColor(Color.rgb(148, 163, 184));
+        topRow.addView(ago);
+        texts.addView(topRow);
+        TextView title = new TextView(this);
+        title.setText(mirrorDecode(p[2]));
+        title.setTextSize(13.5f);
+        title.setTextColor(L_INK);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        title.setSingleLine(true);
+        title.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        texts.addView(title);
+        String bodyText = mirrorDecode(p[3]);
+        if (!bodyText.isEmpty()) {
+            TextView body = new TextView(this);
+            body.setText(bodyText);
+            body.setTextSize(12.5f);
+            body.setTextColor(L_SUB);
+            body.setMaxLines(2);
+            body.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+            texts.addView(body);
+        }
+        row.addView(texts);
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // v575: 有 key 就走面板同款打开流程（广播
+                // 给 SystemUI：出栈、进时光机、停闪、按打
+                // 开方式开）；老镜像没 key 才退回直接启动。
+                if (!itemKey.isEmpty()) {
+                    sendLightOpen(itemKey, recallRow);
+                } else {
+                    openMirrorPkg(pkg);
+                }
+            }
+        });
+        return row;
+    }
+
+    /** v575: 把 App 页里的点开转给 SystemUI 的收纳栈本
+     * 人处理（App 只是镜像，自己启动应用会让栈、时光机
+     * 和边缘药丸全都对不上）。 */
+    private void sendLightOpen(String key, boolean recall) {
+        try {
+            Intent it = new Intent(recall
+                    ? NotificationService.ACTION_LIGHT_RECALL_OPEN
+                    : NotificationService.ACTION_LIGHT_OPEN);
+            it.putExtra("key", key);
+            sendBroadcast(it);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void openMirrorPkg(String pkg) {
+        try {
+            Intent launch = getPackageManager()
+                    .getLaunchIntentForPackage(pkg);
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(launch);
+            } else {
+                android.widget.Toast.makeText(this,
+                        "打不开这个应用",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+        } catch (Throwable t) {
+            android.widget.Toast.makeText(this,
+                    "打不开这个应用",
+                    android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** v572: 切换动画重做（预览定稿）——表达两套设计语言
+     * 之间的转换：去轻气泡时，五条经典彩色胶囊褪色、压扁
+     * 成细线铺平，底色同步漫到浅色；切回经典时，细线立起
+     * 来重新上色、弹回胶囊。约 72%（970ms）处换页，新页
+     * 再盖一层新底色淡出衔接，总时长约 1.35 秒。 */
+    private void playModeSwitchAnimation(final boolean toLight) {
+        if (modeSwitchAnimRunning) {
+            return;
+        }
+        modeSwitchAnimRunning = true;
+        final ViewGroup content = (ViewGroup) findViewById(
+                android.R.id.content);
+        if (content == null || content.getWidth() == 0) {
+            pendingModeAnimIn = true;
+            setFeatureFlag("lightMode", toLight);
+            modeSwitchAnimRunning = false;
+            recreate();
+            return;
+        }
+        final FrameLayout overlay = new FrameLayout(this);
+        overlay.setLayoutParams(new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        overlay.setClickable(true);
+        content.addView(overlay);
+        final int w = content.getWidth();
+        final int h = content.getHeight();
+        // 底色漫换层。
+        final View wash = new View(this);
+        wash.setBackgroundColor(toLight ? Color.WHITE : LIGHT_BG);
+        wash.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        overlay.addView(wash);
+        android.animation.ValueAnimator washAnim =
+                android.animation.ValueAnimator.ofArgb(
+                        toLight ? Color.WHITE : LIGHT_BG,
+                        toLight ? LIGHT_BG : Color.WHITE);
+        washAnim.setDuration(1000);
+        washAnim.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        wash.setBackgroundColor(
+                                (Integer) a.getAnimatedValue());
+                    }
+                });
+        washAnim.start();
+        // 五条胶囊：经典卡的五个代表色。
+        final int[] saturated = new int[]{
+                Color.rgb(59, 130, 246), Color.rgb(16, 185, 129),
+                Color.rgb(245, 158, 11), Color.rgb(139, 92, 246),
+                Color.rgb(20, 184, 166)};
+        final int[] pale = new int[]{
+                Color.rgb(191, 219, 254), Color.rgb(203, 213, 225),
+                Color.rgb(191, 219, 254), Color.rgb(203, 213, 225),
+                Color.rgb(191, 219, 254)};
+        final int[] widths = {150, 190, 120, 170, 140};
+        final int capH = dp(34);
+        final int gap = dp(14);
+        final int totalH = capH * 5 + gap * 4;
+        final int top0 = h / 2 - totalH / 2;
+        final int centerY = h / 2;
+        for (int i = 0; i < 5; i++) {
+            final GradientDrawable gd = new GradientDrawable();
+            gd.setCornerRadius(dp(999));
+            gd.setColor(toLight ? saturated[i] : pale[i]);
+            final View cap = new View(this);
+            cap.setBackground(gd);
+            FrameLayout.LayoutParams clp2 =
+                    new FrameLayout.LayoutParams(
+                            dp(widths[i]), capH);
+            clp2.leftMargin = Math.max(0, w / 2 - dp(widths[i]) / 2);
+            clp2.topMargin = top0 + i * (capH + gap);
+            cap.setLayoutParams(clp2);
+            cap.setPivotY(capH / 2f);
+            overlay.addView(cap);
+            final int capCenterY = top0 + i * (capH + gap) + capH / 2;
+            final int fromCol = toLight ? saturated[i] : pale[i];
+            final int toCol = toLight ? pale[i] : saturated[i];
+            android.animation.ValueAnimator colAnim =
+                    android.animation.ValueAnimator.ofArgb(
+                            fromCol, toCol);
+            colAnim.setDuration(toLight ? 700 : 750);
+            colAnim.setStartDelay(toLight ? 0 : 150);
+            colAnim.addUpdateListener(
+                    new android.animation.ValueAnimator
+                            .AnimatorUpdateListener() {
+                        @Override
+                        public void onAnimationUpdate(
+                                android.animation.ValueAnimator a) {
+                            gd.setColor(
+                                    (Integer) a.getAnimatedValue());
+                        }
+                    });
+            colAnim.start();
+            if (toLight) {
+                // 压扁成线 + 向中心收拢 + 末段淡出铺平。
+                cap.animate().scaleY(0.07f)
+                        .translationY(centerY - capCenterY)
+                        .setDuration(700)
+                        .setInterpolator(
+                                new android.view.animation
+                                        .DecelerateInterpolator())
+                        .start();
+                cap.animate().alpha(0f).setDuration(240)
+                        .setStartDelay(730).start();
+            } else {
+                // 从细线立起、上色、散回原位。
+                cap.setScaleY(0.07f);
+                cap.setTranslationY(centerY - capCenterY);
+                cap.animate().scaleY(1f).translationY(0f)
+                        .setDuration(750).setStartDelay(150)
+                        .setInterpolator(
+                                new android.view.animation
+                                        .DecelerateInterpolator())
+                        .start();
+            }
+        }
+        new Handler(android.os.Looper.getMainLooper())
+                .postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        pendingModeAnimIn = true;
+                        try {
+                            setFeatureFlag("lightMode", toLight);
+                        } catch (Throwable ignored) {
+                        }
+                        modeSwitchAnimRunning = false;
+                        recreate();
+                    }
+                }, 970);
+    }
+
     private View buildSoundCard() {
         final Feature f = featureFor("bubbleSound");
         final int color = f != null ? f.color
@@ -2228,7 +3770,9 @@ public class MainActivity extends Activity {
 
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(rounded(color, dp(22)));
+        // v572: 轻气泡下统一白卡细线。
+        card.setBackground(lightUi ? lightCardBg()
+                : rounded(color, dp(22)));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -2244,9 +3788,11 @@ public class MainActivity extends Activity {
         TextView icon = new TextView(this);
         icon.setText(f != null ? f.icon : "音");
         icon.setTextSize(15);
-        icon.setTextColor(color);
+        icon.setTextColor(lightUi ? L_ACCENT : color);
         icon.setGravity(Gravity.CENTER);
-        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(8))
+                : rounded(Color.WHITE, dp(10)));
         icon.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(36), dp(36)));
         head.addView(icon);
@@ -2259,14 +3805,15 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText("气泡提示音");
         title.setTextSize(15);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(lightUi ? L_INK : Color.WHITE);
         title.setTypeface(title.getTypeface(),
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         bubbleSoundSub = new TextView(this);
         bubbleSoundSub.setText("气泡弹出时轻响一声");
         bubbleSoundSub.setTextSize(12);
-        bubbleSoundSub.setTextColor(Color.argb(230, 255, 255, 255));
+        bubbleSoundSub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(bubbleSoundSub);
         head.addView(texts);
         // v537: 卡头只留展开箭头（wei 定：开关和展开保留
@@ -2333,7 +3880,12 @@ public class MainActivity extends Activity {
         soundAppSearch.setTextColor(Color.rgb(17, 24, 39));
         soundAppSearch.setHintTextColor(Color.rgb(156, 163, 175));
         GradientDrawable sb = new GradientDrawable();
-        sb.setColor(Color.WHITE);
+        // v582: 同安静规则那个搜索框——轻气泡下浅灰底
+        // + 细线描边，白药丸在白卡上看不见框。
+        sb.setColor(lightUi ? L_TRACK : Color.WHITE);
+        if (lightUi) {
+            sb.setStroke(dp(1), L_LINE);
+        }
         sb.setCornerRadius(dp(999));
         soundAppSearch.setBackground(sb);
         soundAppSearch.setPadding(dp(14), dp(9), dp(14), dp(9));
@@ -2363,7 +3915,8 @@ public class MainActivity extends Activity {
         soundAppSection.addView(soundAppListBox);
         soundAppCount = new TextView(this);
         soundAppCount.setTextSize(12);
-        soundAppCount.setTextColor(Color.argb(230, 255, 255, 255));
+        soundAppCount.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         LinearLayout.LayoutParams ctLp = quietRowLp();
         ctLp.topMargin = dp(10);
         soundAppCount.setLayoutParams(ctLp);
@@ -2394,8 +3947,9 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
         row.setLayoutParams(soundRowLp());
         TextView disc = new TextView(this);
@@ -2416,12 +3970,13 @@ public class MainActivity extends Activity {
         TextView nm = new TextView(this);
         nm.setText("提示音");
         nm.setTextSize(14.5f);
-        nm.setTextColor(Color.WHITE);
+        nm.setTextColor(lightUi ? L_INK : Color.WHITE);
         texts.addView(nm);
         TextView ds = new TextView(this);
         ds.setText("气泡弹出时轻响一声");
         ds.setTextSize(11.5f);
-        ds.setTextColor(Color.argb(230, 255, 255, 255));
+        ds.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(ds);
         row.addView(texts);
         if (f != null) {
@@ -2446,8 +4001,9 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
         row.setLayoutParams(soundRowLp());
         TextView play = new TextView(this);
@@ -2476,13 +4032,14 @@ public class MainActivity extends Activity {
         TextView nm = new TextView(this);
         nm.setText(name);
         nm.setTextSize(14.5f);
-        nm.setTextColor(Color.WHITE);
+        nm.setTextColor(lightUi ? L_INK : Color.WHITE);
         texts.addView(nm);
         soundNames.put(id, nm);
         TextView ds = new TextView(this);
         ds.setText(desc);
         ds.setTextSize(11.5f);
-        ds.setTextColor(Color.argb(230, 255, 255, 255));
+        ds.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(ds);
         row.addView(texts);
         row.addView(buildSoundRadio(id));
@@ -2501,8 +4058,9 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
         row.setLayoutParams(soundRowLp());
         LinearLayout texts = new LinearLayout(this);
@@ -2513,19 +4071,22 @@ public class MainActivity extends Activity {
         TextView nm = new TextView(this);
         nm.setText("自定义音效");
         nm.setTextSize(14.5f);
-        nm.setTextColor(Color.WHITE);
+        nm.setTextColor(lightUi ? L_INK : Color.WHITE);
         texts.addView(nm);
         soundNames.put(BubbleSound.CUSTOM_ID, nm);
         soundCustomSub = new TextView(this);
         soundCustomSub.setTextSize(11.5f);
-        soundCustomSub.setTextColor(Color.argb(230, 255, 255, 255));
+        soundCustomSub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(soundCustomSub);
         row.addView(texts);
         TextView pick = new TextView(this);
         pick.setText("选择文件");
         pick.setTextSize(12.5f);
         pick.setTextColor(Color.rgb(59, 130, 246));
-        pick.setBackground(rounded(Color.WHITE, dp(999)));
+        pick.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(999))
+                : rounded(Color.WHITE, dp(999)));
         pick.setPadding(dp(12), dp(6), dp(12), dp(6));
         pick.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -2566,7 +4127,8 @@ public class MainActivity extends Activity {
         ring.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(20), dp(20)));
         View dot = new View(this);
-        dot.setBackground(rounded(Color.WHITE, dp(999)));
+        dot.setBackground(rounded(lightUi ? L_ACCENT
+                : Color.WHITE, dp(999)));
         FrameLayout.LayoutParams dLp = new FrameLayout.LayoutParams(
                 dp(10), dp(10));
         dLp.gravity = Gravity.CENTER;
@@ -2580,8 +4142,10 @@ public class MainActivity extends Activity {
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.OVAL);
         g.setColor(Color.TRANSPARENT);
-        g.setStroke(dp(2), selected ? Color.WHITE
-                : Color.argb(120, 255, 255, 255));
+        g.setStroke(dp(2), selected
+                ? (lightUi ? L_ACCENT : Color.WHITE)
+                : (lightUi ? Color.rgb(203, 213, 225)
+                        : Color.argb(120, 255, 255, 255)));
         return g;
     }
 
@@ -3092,8 +4656,9 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         row.setPadding(dp(12), dp(9), dp(12), dp(9));
         LinearLayout.LayoutParams rlp = quietRowLp();
         rlp.topMargin = dp(10);
@@ -3106,7 +4671,9 @@ public class MainActivity extends Activity {
             row.addView(iv);
         } else {
             View ph = new View(this);
-            ph.setBackground(rounded(Color.WHITE, dp(9)));
+            ph.setBackground(lightUi
+                    ? rounded(L_ACCENT_BG, dp(9))
+                    : rounded(Color.WHITE, dp(9)));
             ph.setLayoutParams(new LinearLayout.LayoutParams(
                     dp(32), dp(32)));
             row.addView(ph);
@@ -3114,7 +4681,7 @@ public class MainActivity extends Activity {
         TextView nm = new TextView(this);
         nm.setText(e.label);
         nm.setTextSize(14.5f);
-        nm.setTextColor(Color.WHITE);
+        nm.setTextColor(lightUi ? L_INK : Color.WHITE);
         nm.setSingleLine(true);
         nm.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams nLp = new LinearLayout.LayoutParams(
@@ -3377,13 +4944,22 @@ public class MainActivity extends Activity {
             chip.setGravity(Gravity.CENTER);
             chip.setTextSize(14);
             boolean sel = min == quietSelectedMinutes;
-            chip.setTextColor(sel ? QUIET_INDIGO : Color.WHITE);
+            // v583: 轻气泡下时长药丸换浅色口径（与时光机
+            // 时长药丸同款）——原先未选 = 白字半透明白底、
+            // 已选 = 白底，在白卡上全隐形、只剩已选的蓝字
+            // （wei 指着截图说「这的」）。
+            chip.setTextColor(lightUi
+                    ? (sel ? Color.WHITE : L_SUB)
+                    : (sel ? QUIET_INDIGO : Color.WHITE));
             if (sel) {
                 chip.setTypeface(chip.getTypeface(),
                         android.graphics.Typeface.BOLD);
             }
-            chip.setBackground(rounded(sel ? Color.WHITE
-                    : Color.argb(60, 255, 255, 255), dp(12)));
+            chip.setBackground(lightUi
+                    ? rounded(sel ? L_ACCENT : L_TRACK, dp(12))
+                    : rounded(sel ? Color.WHITE
+                            : Color.argb(60, 255, 255, 255),
+                            dp(12)));
             chip.setPadding(0, dp(10), 0, dp(10));
             LinearLayout.LayoutParams p =
                     new LinearLayout.LayoutParams(0,
@@ -3674,8 +5250,9 @@ public class MainActivity extends Activity {
     private View buildQuietDefaultRow() {
         final LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        box.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         box.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams blp = quietRowLp();
         blp.topMargin = dp(10);
@@ -3704,7 +5281,7 @@ public class MainActivity extends Activity {
         TextView name = new TextView(this);
         name.setText("全部应用");
         name.setTextSize(14.5f);
-        name.setTextColor(Color.WHITE);
+        name.setTextColor(lightUi ? L_INK : Color.WHITE);
         name.setTypeface(name.getTypeface(),
                 android.graphics.Typeface.BOLD);
         name.setSingleLine(true);
@@ -3712,7 +5289,8 @@ public class MainActivity extends Activity {
         TextView sub = new TextView(this);
         sub.setText("全局默认 · 单独设过的应用不跟这一行");
         sub.setTextSize(10.5f);
-        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        sub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         sub.setSingleLine(true);
         sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
         texts.addView(sub);
@@ -3762,8 +5340,9 @@ public class MainActivity extends Activity {
     private View buildQuietAppRow(final QuietAppEntry e) {
         final LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(rounded(Color.argb(60, 255, 255, 255),
-                dp(16)));
+        box.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(16)));
         box.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams blp = quietRowLp();
         blp.topMargin = dp(10);
@@ -3801,7 +5380,7 @@ public class MainActivity extends Activity {
         TextView name = new TextView(this);
         name.setText(e.label);
         name.setTextSize(14.5f);
-        name.setTextColor(Color.WHITE);
+        name.setTextColor(lightUi ? L_INK : Color.WHITE);
         name.setTypeface(name.getTypeface(),
                 android.graphics.Typeface.BOLD);
         name.setSingleLine(true);
@@ -3810,7 +5389,8 @@ public class MainActivity extends Activity {
         TextView pkg = new TextView(this);
         pkg.setText(e.pkg + (e.system ? " · 系统" : ""));
         pkg.setTextSize(10.5f);
-        pkg.setTextColor(Color.argb(230, 255, 255, 255));
+        pkg.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         pkg.setSingleLine(true);
         pkg.setEllipsize(android.text.TextUtils.TruncateAt.END);
         texts.addView(pkg);
@@ -3897,7 +5477,8 @@ public class MainActivity extends Activity {
         TextView lab = new TextView(this);
         lab.setText(label);
         lab.setTextSize(11.5f);
-        lab.setTextColor(Color.argb(230, 255, 255, 255));
+        lab.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         lab.setLayoutParams(new LinearLayout.LayoutParams(
                 dp(44), ViewGroup.LayoutParams.WRAP_CONTENT));
         row.addView(lab);
@@ -4160,7 +5741,8 @@ public class MainActivity extends Activity {
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
-        sub.setText("通知怎么出现、点开之后怎么打开");
+        sub.setText(lightUi ? "点开通知之后怎么打开"
+                : "通知怎么出现、点开之后怎么打开");
         sub.setTextSize(12);
         sub.setTextColor(Color.argb(230, 255, 255, 255));
         texts.addView(sub);
@@ -4189,35 +5771,41 @@ public class MainActivity extends Activity {
         // 搜索展开钩子：直接改 visibility + 状态。
         body.setTag(expanded);
 
-        // ---- 呈现形式 ----
-        body.addView(cardRowLabel("呈现形式", "通知出现的样子，三选一"));
-        final SegControl presentSeg = new SegControl(
-                new String[]{"胶囊模式", "展开卡片", "大卡片模式"},
-                presentMode(), Color.rgb(51, 51, 51));
-        LinearLayout.LayoutParams psLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        psLp.leftMargin = dp(12);
-        psLp.rightMargin = dp(12);
-        psLp.topMargin = dp(8);
-        presentSeg.box.setLayoutParams(psLp);
-        presentSeg.listener = new SegListener() {
-            @Override
-            public void onSelect(int idx) {
-                setFeatureFlag("card", idx == 1);
-                setFeatureFlag("bigCard", idx == 2);
-            }
-        };
-        body.addView(presentSeg.box);
-        searchTargets.put("present", presentSeg.box);
-        body.addView(cardDesc("胶囊模式：只出胶囊，点胶囊不展开。"
-                + "展开卡片：先出胶囊，点一下展开看全文。"
-                + "大卡片模式：通知一来就是大卡片依次排列。"
-                + "音乐、来电不走这个设置。"));
+        // v571: 呈现形式是经典专属，轻气泡下整段不建。
+        if (!lightUi) {
+            // ---- 呈现形式 ----
+            body.addView(cardRowLabel("呈现形式", "通知出现的样子，三选一"));
+            final SegControl presentSeg = new SegControl(
+                    new String[]{"胶囊模式", "展开卡片", "大卡片模式"},
+                    presentMode(), Color.rgb(51, 51, 51));
+            LinearLayout.LayoutParams psLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            psLp.leftMargin = dp(12);
+            psLp.rightMargin = dp(12);
+            psLp.topMargin = dp(8);
+            presentSeg.box.setLayoutParams(psLp);
+            presentSeg.listener = new SegListener() {
+                @Override
+                public void onSelect(int idx) {
+                    setFeatureFlag("card", idx == 1);
+                    setFeatureFlag("bigCard", idx == 2);
+                }
+            };
+            body.addView(presentSeg.box);
+            searchTargets.put("present", presentSeg.box);
+            body.addView(cardDesc("胶囊模式：只出胶囊，点胶囊不展开。"
+                    + "展开卡片：先出胶囊，点一下展开看全文。"
+                    + "大卡片模式：通知一来就是大卡片依次排列。"
+                    + "音乐、来电不走这个设置。"));
+        }
 
-        // ---- 点卡片打开 App ----
-        body.addView(cardRowLabel("点卡片打开 App",
-                "点展开的卡片时，用哪种方式打开"));
+        // ---- 点卡片打开 App（v571: 通用元素，轻气泡下
+        // 换成面板口径的文案，单选本体共用） ----
+        body.addView(cardRowLabel(
+                lightUi ? "点通知打开 App" : "点卡片打开 App",
+                lightUi ? "点面板里的通知时，用哪种方式打开"
+                        : "点展开的卡片时，用哪种方式打开"));
         final SegControl openSeg = new SegControl(
                 new String[]{"小窗", "全屏"},
                 isOn("miniwindow") ? 0 : 1, Color.rgb(51, 51, 51));
@@ -4238,24 +5826,27 @@ public class MainActivity extends Activity {
         searchTargets.put("openapp", openSeg.box);
         body.addView(cardDesc("小窗不离开当前界面，全屏直接跳过去。"));
 
-        // ---- 自动消散 / 自动销毁 ----
-        Feature dissipate = featureFor("blankDissipate");
-        if (dissipate != null) {
-            View row = buildSubSwitch(dissipate);
-            subRowViews.put(dissipate.key, row);
-            body.addView(row);
+        // v571: 自动消散/自动销毁是胶囊行为，轻气泡下不建。
+        if (!lightUi) {
+            // ---- 自动消散 / 自动销毁 ----
+            Feature dissipate = featureFor("blankDissipate");
+            if (dissipate != null) {
+                View row = buildSubSwitch(dissipate);
+                subRowViews.put(dissipate.key, row);
+                body.addView(row);
+            }
+            body.addView(cardDesc("点一下屏幕空白处，所有没钉住的胶囊"
+                    + "逐条消散。关掉后只能右滑逐个消散、或左滑收纳。"));
+            Feature destroy = featureFor("autoDestroy");
+            if (destroy != null) {
+                View row = buildSubSwitch(destroy);
+                subRowViews.put(destroy.key, row);
+                body.addView(row);
+            }
+            body.addView(cardDesc("开着时消散的通知同时从通知栏消失；"
+                    + "关着（默认）通知还留在通知栏。"
+                    + "音乐通知不撤销，撤销会停掉音乐。"));
         }
-        body.addView(cardDesc("点一下屏幕空白处，所有没钉住的胶囊"
-                + "逐条消散。关掉后只能右滑逐个消散、或左滑收纳。"));
-        Feature destroy = featureFor("autoDestroy");
-        if (destroy != null) {
-            View row = buildSubSwitch(destroy);
-            subRowViews.put(destroy.key, row);
-            body.addView(row);
-        }
-        body.addView(cardDesc("开着时消散的通知同时从通知栏消失；"
-                + "关着（默认）通知还留在通知栏。"
-                + "音乐通知不撤销，撤销会停掉音乐。"));
         refreshDestroyLinkage();
         return card;
     }
@@ -4298,7 +5889,8 @@ public class MainActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(text);
         t.setTextSize(12);
-        t.setTextColor(Color.argb(210, 255, 255, 255));
+        t.setTextColor(lightUi ? L_BODY
+                : Color.argb(210, 255, 255, 255));
         t.setLineSpacing(0, 1.6f);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -4399,17 +5991,29 @@ public class MainActivity extends Activity {
      * （搜「安静」命中临时静默、搜「验证码」命中打码等）。 */
     private void buildSearchIndex() {
         searchIndex.clear();
+        // v564: 设计模式 / 轻气泡
+        addSearch("设计模式", "设计模式",
+                "设计 模式 轻气泡 氢气泡 简洁 切换 经典 主题",
+                modeCardView, null);
+        addSearch("轻气泡", "设计模式 › 轻气泡",
+                "轻气泡 氢气泡 简洁模式 收纳 小签 不弹窗 音乐置顶",
+                modeCardView, null);
+        if (lightCardView != null) {
+            addSearch("小签位置", "轻气泡 › 小签位置",
+                    "小签 位置 左边 右边 靠上 中间 靠下 拖动",
+                    lightCardView, null);
+        }
         // 胶囊类型
         addSearch("通知气泡", "胶囊类型", "通知 气泡 胶囊 贴边 总开关",
                 topCardViews.size() > 0 ? topCardViews.get(0) : null,
                 null);
         // v539: 回看胶囊是通知气泡卡里的子开关。
-        addSearch("回看胶囊", "通知气泡 › 回看胶囊",
-                "回看 错过 历史 找回 划掉 恢复",
+        addSearch("时光机胶囊", "通知气泡 › 时光机胶囊",
+                "时光机 回看 错过 历史 找回 划掉 恢复",
                 subRowViews.get("recallCapsule"), "notif");
         // v543: 回看保留时长是回看胶囊开关行下面的值行。
-        addSearch("回看保留时长", "通知气泡 › 回看保留时长",
-                "时长 时间 保留 几分钟 回看",
+        addSearch("时光机保留时长", "通知气泡 › 时光机保留时长",
+                "时长 时间 保留 几分钟 时光机 回看",
                 recallTtlRow, "notif");
         addSearch("长按菜单", "通知气泡 › 长按菜单",
                 "长按 快捷回复 回复 菜单",
@@ -4419,30 +6023,52 @@ public class MainActivity extends Activity {
         addSearch("气泡提示音", "胶囊类型 › 气泡提示音",
                 "提示音 声音 音效 响 啵 弹出声 自定义 按应用",
                 soundCardView, "sound");
-        addSearch("音乐胶囊", "胶囊类型", "音乐 播放器 歌词 歌手 专辑",
-                topCardViews.size() > 1 ? topCardViews.get(1) : null,
-                null);
-        addSearch("音乐卡片", "音乐胶囊 › 音乐卡片",
-                "音乐 展开 播放器卡片 点音乐",
-                subRowViews.get("musicCard"), "music");
-        addSearch("视频App", "音乐胶囊 › 视频App",
-                "视频 B站 哔哩哔哩 播放",
-                subRowViews.get("musicVideo"), "music");
-        addSearch("模拟音乐", "音乐胶囊 › 模拟音乐",
-                "模拟 假 调试 调大小",
-                subRowViews.get("simMusic"), "music");
-        addSearch("反方向的钟", "音乐胶囊 › 反方向的钟",
-                "彩蛋 钟 跑马灯",
-                subRowViews.get("musicLed"), "music");
-        addSearch("QQ音乐flyme版免费听", "音乐胶囊 › QQ音乐免费听",
-                "qq 音乐 免费 时长 补时长",
-                subRowViews.get("qqFree"), "music");
+        // v578: 轻气泡下没有经典「音乐胶囊」卡——搜索改
+        // 指向轻气泡卡里的「音乐卡片」一节（模拟音乐不
+        // 办过来，不建条目）。
+        if (!lightUi) {
+            addSearch("音乐胶囊", "胶囊类型", "音乐 播放器 歌词 歌手 专辑",
+                    topCardViews.size() > 1 ? topCardViews.get(1) : null,
+                    null);
+            addSearch("音乐卡片", "音乐胶囊 › 音乐卡片",
+                    "音乐 展开 播放器卡片 点音乐",
+                    subRowViews.get("musicCard"), "music");
+            addSearch("视频App", "音乐胶囊 › 视频App",
+                    "视频 B站 哔哩哔哩 播放",
+                    subRowViews.get("musicVideo"), "music");
+            addSearch("模拟音乐", "音乐胶囊 › 模拟音乐",
+                    "模拟 假 调试 调大小",
+                    subRowViews.get("simMusic"), "music");
+            addSearch("反方向的钟", "音乐胶囊 › 反方向的钟",
+                    "彩蛋 钟 跑马灯",
+                    subRowViews.get("musicLed"), "music");
+            addSearch("QQ音乐flyme版免费听", "音乐胶囊 › QQ音乐免费听",
+                    "qq 音乐 免费 时长 补时长",
+                    subRowViews.get("qqFree"), "music");
+        } else {
+            addSearch("音乐卡片", "轻气泡 › 音乐卡片",
+                    "音乐 播放器 歌词 歌手 专辑 面板",
+                    lightCardView, null);
+            addSearch("视频App", "轻气泡 › 音乐卡片 › 视频App",
+                    "视频 B站 哔哩哔哩 播放",
+                    lightMusicSubViews.get("musicVideo"), null);
+            addSearch("反方向的钟", "轻气泡 › 音乐卡片 › 反方向的钟",
+                    "彩蛋 钟 跑马灯",
+                    lightMusicSubViews.get("musicLed"), null);
+            addSearch("QQ音乐flyme版免费听", "轻气泡 › 音乐卡片 › QQ音乐免费听",
+                    "qq 音乐 免费 时长 补时长",
+                    lightMusicSubViews.get("qqFree"), null);
+        }
+        // v578: 轻气泡下音乐卡不建，topCardViews 顺移一位
+        // （下载=1、验证码=2），下标按模式取。
         addSearch("下载与安装", "胶囊类型", "下载 安装 进度 速度",
-                topCardViews.size() > 2 ? topCardViews.get(2) : null,
+                topCardViews.size() > (lightUi ? 1 : 2)
+                        ? topCardViews.get(lightUi ? 1 : 2) : null,
                 null);
         addSearch("验证码与隐私", "胶囊类型",
                 "验证码 取件码 复制 钉住 柜号 快递 短信码 隐私",
-                topCardViews.size() > 3 ? topCardViews.get(3) : null,
+                topCardViews.size() > (lightUi ? 2 : 3)
+                        ? topCardViews.get(lightUi ? 2 : 3) : null,
                 null);
         addSearch("自动复制验证码", "验证码与隐私 › 自动复制验证码",
                 "复制 剪贴板 自动复制 验证码 粘贴",
@@ -4458,13 +6084,19 @@ public class MainActivity extends Activity {
         addSearch("普通应用也打码", "验证码与隐私 › 普通应用也打码",
                 "普通应用 隐藏 内容 打码 微信 消息",
                 subRowViews.get("maskApps"), "code");
-        addSearch("来电", "胶囊类型", "电话 来电 接听 挂断 扬声器",
-                topCardViews.size() > 4 ? topCardViews.get(4) : null,
-                null);
-        addSearch("来电放右边", "来电 › 来电放右边", "右边 位置 右手",
-                subRowViews.get("callRight"), "live");
-        addSearch("模拟来电", "来电 › 模拟来电", "模拟 假 调试 调位置",
-                subRowViews.get("simCall"), "live");
+        // v573: 轻气泡下没有来电卡，搜索条目一并去掉。
+        if (!lightUi) {
+            addSearch("来电", "胶囊类型", "电话 来电 接听 挂断 扬声器",
+                    topCardViews.size() > 4 ? topCardViews.get(4)
+                            : null,
+                    null);
+            addSearch("来电放右边", "来电 › 来电放右边",
+                    "右边 位置 右手",
+                    subRowViews.get("callRight"), "live");
+            addSearch("模拟来电", "来电 › 模拟来电",
+                    "模拟 假 调试 调位置",
+                    subRowViews.get("simCall"), "live");
+        }
         // 呈现与打开
         searchIndex.add(new SearchEntry("打开方式", "呈现与打开",
                 "打开 呈现 大卡片 展开 小窗 全屏",
@@ -4724,12 +6356,14 @@ public class MainActivity extends Activity {
     private View buildFeatureCard(final Feature f) {
         final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(rounded(f.color, dp(22)));
+        // v572: 轻气泡下统一白卡细线（不用经典色块）。
+        card.setBackground(lightUi ? lightCardBg()
+                : rounded(f.color, dp(22)));
         LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         clp.topMargin = dp(10);
         card.setLayoutParams(clp);
-        if (!isOn(f.key)) card.setAlpha(0.45f);
+        if (!isOn(f.key)) card.setAlpha((lightUi ? 1f : 0.45f));
 
         // Header row: icon + titles + switch.
         LinearLayout head = new LinearLayout(this);
@@ -4740,9 +6374,11 @@ public class MainActivity extends Activity {
         TextView icon = new TextView(this);
         icon.setText(f.icon);
         icon.setTextSize(15);
-        icon.setTextColor(f.color);
+        icon.setTextColor(lightUi ? L_ACCENT : f.color);
         icon.setGravity(Gravity.CENTER);
-        icon.setBackground(rounded(Color.WHITE, dp(10)));
+        icon.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(8))
+                : rounded(Color.WHITE, dp(10)));
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(36), dp(36));
         icon.setLayoutParams(ilp);
         head.addView(icon);
@@ -4757,14 +6393,15 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(f.title);
         title.setTextSize(15);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(lightUi ? L_INK : Color.WHITE);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
         texts.addView(title);
 
         TextView sub = new TextView(this);
         sub.setText(f.subtitle);
         sub.setTextSize(12);
-        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        sub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(sub);
         head.addView(texts);
 
@@ -4780,7 +6417,8 @@ public class MainActivity extends Activity {
         final TextView body = new TextView(this);
         body.setText(f.body);
         body.setTextSize(13);
-        body.setTextColor(Color.argb(242, 255, 255, 255));
+        body.setTextColor(lightUi ? L_BODY
+                : Color.argb(242, 255, 255, 255));
         body.setLineSpacing(0, 1.7f);
         body.setPadding(dp(12), 0, dp(12), dp(12));
         body.setVisibility(View.GONE);
@@ -4797,6 +6435,14 @@ public class MainActivity extends Activity {
         // 开关，见 FEATURES）。滑条 onDrag 传 null，只发广播直播。
         for (Feature s : FEATURES) {
             if (f.key.equals(s.parent)) {
+                // v564: 轻气泡下胶囊长相三行不适用（不弹
+                // 胶囊、没有扇子），整行不建（连同下面的
+                // 「胶囊长相」分区标题与行下说明一起跳过）。
+                if (lightUi && ("autoTint".equals(s.key)
+                        || "scroll".equals(s.key)
+                        || "fanAutoDim".equals(s.key))) {
+                    continue;
+                }
                 // v527: 验证码与隐私卡里，打码四开关前加「敏感打码」
                 // 分区标题（码本身 / 打码两区，wei 定）。
                 if ("code".equals(f.key) && "mask".equals(s.key)) {
@@ -4982,7 +6628,8 @@ public class MainActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(text);
         t.setTextSize(12);
-        t.setTextColor(Color.argb(200, 255, 255, 255));
+        t.setTextColor(lightUi ? L_SUB
+                : Color.argb(200, 255, 255, 255));
         t.setTypeface(t.getTypeface(),
                 android.graphics.Typeface.BOLD);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -5009,18 +6656,22 @@ public class MainActivity extends Activity {
         final LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        // v572: 轻气泡下子行换浅灰底（白字行在白卡上看不见）。
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255), dp(16)));
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
         row.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        if (!sub.noSwitch && !isOn(sub.key)) row.setAlpha(0.45f);
+        if (!sub.noSwitch && !isOn(sub.key)) row.setAlpha((lightUi ? 1f : 0.45f));
 
         TextView icon = new TextView(this);
         icon.setText(sub.icon);
         icon.setTextSize(13);
-        icon.setTextColor(sub.color);
+        icon.setTextColor(lightUi ? L_ACCENT : sub.color);
         icon.setGravity(Gravity.CENTER);
-        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        icon.setBackground(lightUi
+                ? rounded(Color.WHITE, dp(8))
+                : rounded(Color.WHITE, dp(8)));
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(30), dp(30));
         icon.setLayoutParams(ilp);
         row.addView(icon);
@@ -5035,7 +6686,7 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(sub.title);
         title.setTextSize(14);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(lightUi ? L_INK : Color.WHITE);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
         texts.addView(title);
         // v480: 反方向的钟——记下标题，开关打开之后标题要变成
@@ -5051,7 +6702,8 @@ public class MainActivity extends Activity {
             TextView sub2 = new TextView(this);
             sub2.setText(sub.subtitle);
             sub2.setTextSize(11);
-            sub2.setTextColor(Color.argb(230, 255, 255, 255));
+            sub2.setTextColor(lightUi ? L_SUB
+                    : Color.argb(230, 255, 255, 255));
             texts.addView(sub2);
         }
         row.addView(texts);
@@ -5061,7 +6713,8 @@ public class MainActivity extends Activity {
             final TextView intro = new TextView(this);
             intro.setText(sub.body);
             intro.setTextSize(12);
-            intro.setTextColor(Color.argb(242, 255, 255, 255));
+            intro.setTextColor(lightUi ? L_BODY
+                    : Color.argb(242, 255, 255, 255));
             intro.setLineSpacing(0, 1.6f);
             intro.setPadding(dp(12), dp(4), dp(12), dp(10));
             intro.setVisibility(View.GONE);
@@ -5086,7 +6739,8 @@ public class MainActivity extends Activity {
         if ("musicLed".equals(sub.key)) {
             musicLedCounter = new TextView(this);
             musicLedCounter.setTextSize(12);
-            musicLedCounter.setTextColor(Color.argb(230, 255, 255, 255));
+            musicLedCounter.setTextColor(lightUi ? L_SUB
+                    : Color.argb(230, 255, 255, 255));
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -5175,7 +6829,10 @@ public class MainActivity extends Activity {
     private View buildSwitch(final Feature f, final LinearLayout card) {
         final FrameLayout sw = new FrameLayout(this);
         final boolean on = isOn(f.key);
-        sw.setBackground(rounded(on ? Color.rgb(22, 163, 74) : Color.argb(120, 255, 255, 255), dp(999)));
+        sw.setBackground(rounded(on
+                ? (lightUi ? L_ACCENT : Color.rgb(22, 163, 74))
+                : (lightUi ? Color.rgb(203, 213, 225)
+                        : Color.argb(120, 255, 255, 255)), dp(999)));
         final View dot = new View(this);
         dot.setBackground(rounded(Color.WHITE, dp(999)));
         FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(22), dp(22));
@@ -5277,14 +6934,18 @@ public class MainActivity extends Activity {
                 i.putExtra("key", f.key);
                 i.putExtra("enabled", now);
                 sendBroadcast(i);
-                sw.setBackground(rounded(now ? Color.rgb(22, 163, 74)
-                        : Color.argb(120, 255, 255, 255), dp(999)));
+                sw.setBackground(rounded(now
+                        ? (lightUi ? L_ACCENT
+                                : Color.rgb(22, 163, 74))
+                        : (lightUi ? Color.rgb(203, 213, 225)
+                                : Color.argb(120, 255, 255, 255)),
+                        dp(999)));
                 FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) dot.getLayoutParams();
                 p.gravity = Gravity.CENTER_VERTICAL | (now ? Gravity.END : Gravity.START);
                 p.leftMargin = now ? 0 : dp(3);
                 p.rightMargin = now ? dp(3) : 0;
                 dot.setLayoutParams(p);
-                card.setAlpha(now ? 1f : 0.45f);
+                card.setAlpha(now ? 1f : (lightUi ? 1f : 0.45f));
                 // v480: 反方向的钟——开关一拨，标题跟着变：开着是
                 // “如果听一万次《反方向的钟》能否回到过去”，
                 // 关着是“反方向的钟”。
@@ -5306,6 +6967,11 @@ public class MainActivity extends Activity {
                 // PrivacyMask 本来就是总开关 AND 子开关）。
                 if ("mask".equals(f.key)) {
                     refreshMaskLinkage();
+                }
+                // v578: 轻气泡「音乐卡片」总开关——拨它时
+                // 三个办过来的子设置行跟着置灰/恢复（联动）。
+                if ("lightMusicCard".equals(f.key)) {
+                    refreshLightMusicLinkage();
                 }
                 // v540: 「验证码与隐私」是自动复制的总开关——
                 // 拨它时同步刷新自动复制行的置灰/可点状态。
@@ -5810,7 +7476,7 @@ public class MainActivity extends Activity {
             View row = maskChildRows.get(k);
             if (row != null) {
                 row.setAlpha(link
-                        ? (isOn(k) ? 1f : 0.45f) : 0.45f);
+                        ? (isOn(k) ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
             }
         }
     }
@@ -5831,7 +7497,7 @@ public class MainActivity extends Activity {
         }
         if (longPressMenuRow != null) {
             longPressMenuRow.setAlpha(master
-                    ? (isOn("longPressMenu") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("longPressMenu") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         // v557: 胶囊长相三行（从外观卡迁入）同理随通知气泡
         // 总开关联动，行下说明跟着一起灰。
@@ -5840,30 +7506,30 @@ public class MainActivity extends Activity {
         }
         if (autoTintRow != null) {
             autoTintRow.setAlpha(master
-                    ? (isOn("autoTint") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("autoTint") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         if (autoTintDesc != null) {
-            autoTintDesc.setAlpha(master ? 1f : 0.45f);
+            autoTintDesc.setAlpha(master ? 1f : (lightUi ? 1f : 0.45f));
         }
         if (scrollSwitch != null) {
             scrollSwitch.setEnabled(master);
         }
         if (scrollRow != null) {
             scrollRow.setAlpha(master
-                    ? (isOn("scroll") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("scroll") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         if (scrollDesc != null) {
-            scrollDesc.setAlpha(master ? 1f : 0.45f);
+            scrollDesc.setAlpha(master ? 1f : (lightUi ? 1f : 0.45f));
         }
         if (fanAutoDimSwitch != null) {
             fanAutoDimSwitch.setEnabled(master);
         }
         if (fanAutoDimRow != null) {
             fanAutoDimRow.setAlpha(master
-                    ? (isOn("fanAutoDim") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("fanAutoDim") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
         if (fanAutoDimDesc != null) {
-            fanAutoDimDesc.setAlpha(master ? 1f : 0.45f);
+            fanAutoDimDesc.setAlpha(master ? 1f : (lightUi ? 1f : 0.45f));
         }
     }
 
@@ -5874,7 +7540,7 @@ public class MainActivity extends Activity {
         }
         if (autoCopyCodeRow != null) {
             autoCopyCodeRow.setAlpha(link
-                    ? (isOn("autoCopyCode") ? 1f : 0.45f) : 0.45f);
+                    ? (isOn("autoCopyCode") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
         }
     }
 
@@ -5930,7 +7596,11 @@ public class MainActivity extends Activity {
         final LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        // v585: 轻气泡下换浅灰底（与子行同款）——原先整
+        // 行经典白字白底，在白卡上只剩蓝色「时」字浮着
+        // （wei：「时光机这个时间显示」）。
+        row.setBackground(lightUi ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255), dp(16)));
         row.setPadding(dp(12), dp(10), dp(12), dp(10));
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -5956,22 +7626,24 @@ public class MainActivity extends Activity {
         tlp.leftMargin = dp(10);
         texts.setLayoutParams(tlp);
         TextView title = new TextView(this);
-        title.setText("回看保留时长");
+        title.setText("时光机保留时长");
         title.setTextSize(14);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(lightUi ? L_INK : Color.WHITE);
         title.setTypeface(title.getTypeface(),
                 android.graphics.Typeface.BOLD);
         texts.addView(title);
         TextView sub = new TextView(this);
         sub.setText("划掉的气泡在边缘留多久");
         sub.setTextSize(11);
-        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        sub.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         texts.addView(sub);
         row.addView(texts);
 
         recallTtlValue = new TextView(this);
         recallTtlValue.setTextSize(13);
-        recallTtlValue.setTextColor(Color.argb(230, 255, 255, 255));
+        recallTtlValue.setTextColor(lightUi ? L_ACCENT
+                : Color.argb(230, 255, 255, 255));
         row.addView(recallTtlValue);
 
         // v544: 行尾统一「›」箭头（同 buildExpandChevron 的
@@ -5980,7 +7652,9 @@ public class MainActivity extends Activity {
         recallTtlChev = new TextView(this);
         recallTtlChev.setText("›");
         recallTtlChev.setTextSize(22);
-        recallTtlChev.setTextColor(Color.argb(230, 255, 255, 255));
+        recallTtlChev.setTextColor(lightUi
+                ? Color.rgb(148, 163, 184)
+                : Color.argb(230, 255, 255, 255));
         recallTtlChev.setGravity(Gravity.CENTER);
         recallTtlChev.setRotation(90f);
         LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
@@ -6084,12 +7758,18 @@ public class MainActivity extends Activity {
                 android.text.InputType.TYPE_CLASS_NUMBER);
         recallTtlCustomInput.setSingleLine(true);
         recallTtlCustomInput.setTextSize(14);
-        recallTtlCustomInput.setTextColor(Color.WHITE);
+        // v585: 自定义输入同行换色——轻气泡下墨字浅灰底，
+        // 原先白字半透明白底在白卡上看不见。
+        recallTtlCustomInput.setTextColor(lightUi ? L_INK
+                : Color.WHITE);
         recallTtlCustomInput.setHint("1–120");
-        recallTtlCustomInput.setHintTextColor(
-                Color.argb(160, 255, 255, 255));
-        recallTtlCustomInput.setBackground(rounded(
-                Color.argb(60, 255, 255, 255), dp(10)));
+        recallTtlCustomInput.setHintTextColor(lightUi
+                ? Color.rgb(156, 163, 175)
+                : Color.argb(160, 255, 255, 255));
+        recallTtlCustomInput.setBackground(lightUi
+                ? rounded(L_TRACK, dp(10))
+                : rounded(Color.argb(60, 255, 255, 255),
+                        dp(10)));
         recallTtlCustomInput.setPadding(dp(10), dp(7), dp(10), dp(7));
         recallTtlCustomInput.setLayoutParams(
                 new LinearLayout.LayoutParams(dp(84),
@@ -6098,7 +7778,8 @@ public class MainActivity extends Activity {
         TextView unit = new TextView(this);
         unit.setText("分钟");
         unit.setTextSize(13);
-        unit.setTextColor(Color.argb(230, 255, 255, 255));
+        unit.setTextColor(lightUi ? L_SUB
+                : Color.argb(230, 255, 255, 255));
         LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -6112,7 +7793,9 @@ public class MainActivity extends Activity {
         ok.setTextColor(Color.rgb(59, 130, 246));
         ok.setTypeface(ok.getTypeface(),
                 android.graphics.Typeface.BOLD);
-        ok.setBackground(rounded(Color.WHITE, dp(999)));
+        ok.setBackground(lightUi
+                ? rounded(L_ACCENT_BG, dp(999))
+                : rounded(Color.WHITE, dp(999)));
         ok.setPadding(dp(16), dp(7), dp(16), dp(7));
         LinearLayout.LayoutParams oklp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -6186,10 +7869,17 @@ public class MainActivity extends Activity {
         d.setCornerRadius(dp(999));
         if (selected) {
             d.setColor(Color.rgb(59, 130, 246));
-            d.setStroke(dp(1), Color.WHITE);
+            d.setStroke(dp(1), lightUi ? L_ACCENT : Color.WHITE);
             chip.setTextColor(Color.WHITE);
             chip.setTypeface(chip.getTypeface(),
                     android.graphics.Typeface.BOLD);
+        } else if (lightUi) {
+            // v572: 轻气泡下未选 chip 换浅灰底深字。
+            d.setColor(L_TRACK);
+            d.setStroke(dp(1), L_LINE);
+            chip.setTextColor(L_SUB);
+            chip.setTypeface(chip.getTypeface(),
+                    android.graphics.Typeface.NORMAL);
         } else {
             d.setColor(Color.argb(40, 255, 255, 255));
             d.setStroke(dp(1), Color.argb(160, 255, 255, 255));
@@ -6233,10 +7923,10 @@ public class MainActivity extends Activity {
         }
         boolean link = isOn("notif") && isOn("recallCapsule");
         recallTtlRow.setEnabled(link);
-        recallTtlRow.setAlpha(link ? 1f : 0.45f);
+        recallTtlRow.setAlpha(link ? 1f : (lightUi ? 1f : 0.45f));
         // v544: 展开区跟着置灰；联动关时直接收起（收起即点不动）。
         if (recallTtlPanel != null) {
-            recallTtlPanel.setAlpha(link ? 1f : 0.45f);
+            recallTtlPanel.setAlpha(link ? 1f : (lightUi ? 1f : 0.45f));
             if (!link) {
                 setRecallTtlExpanded(false);
             }
@@ -6261,7 +7951,7 @@ public class MainActivity extends Activity {
             }
             View row = quietSceneSegRows.get(en.getKey());
             if (row != null) {
-                row.setAlpha(on ? 1f : 0.45f);
+                row.setAlpha(on ? 1f : (lightUi ? 1f : 0.45f));
             }
         }
     }
@@ -6283,7 +7973,7 @@ public class MainActivity extends Activity {
         if (bubbleSoundSwitch != null) {
             bubbleSoundSwitch.setEnabled(link);
         }
-        soundCardView.setAlpha(link ? 1f : 0.45f);
+        soundCardView.setAlpha(link ? 1f : (lightUi ? 1f : 0.45f));
         boolean bodyOn = isOn("bubbleSound");
         if (soundGlobalSection != null) {
             soundGlobalSection.setAlpha(bodyOn ? 1f : 0.38f);
@@ -6324,8 +8014,10 @@ public class MainActivity extends Activity {
         }
         FrameLayout sw = (FrameLayout) bubbleSoundSwitch;
         boolean on = isOn("bubbleSound");
-        sw.setBackground(rounded(on ? Color.rgb(22, 163, 74)
-                : Color.argb(120, 255, 255, 255), dp(999)));
+        sw.setBackground(rounded(on
+                ? (lightUi ? L_ACCENT : Color.rgb(22, 163, 74))
+                : (lightUi ? Color.rgb(203, 213, 225)
+                        : Color.argb(120, 255, 255, 255)), dp(999)));
         if (sw.getChildCount() > 0) {
             View dot = sw.getChildAt(0);
             if (dot.getLayoutParams()
@@ -6353,7 +8045,7 @@ public class MainActivity extends Activity {
         boolean link = isOn("blankDissipate");
         destroySwitchView.setEnabled(link);
         destroyRowView.setAlpha(link
-                ? (isOn("autoDestroy") ? 1f : 0.45f) : 0.45f);
+                ? (isOn("autoDestroy") ? 1f : (lightUi ? 1f : 0.45f)) : (lightUi ? 1f : 0.45f));
     }
 
     private void refreshCallSliderEnabled() {
@@ -6362,7 +8054,7 @@ public class MainActivity extends Activity {
             callHeightSeek.setEnabled(on);
         }
         if (callHeightBox != null) {
-            callHeightBox.setAlpha(on ? 1f : 0.45f);
+            callHeightBox.setAlpha(on ? 1f : (lightUi ? 1f : 0.45f));
         }
     }
     // v442: 外观卡片改风格——跟上面功能卡统一（用户 2026-11-23

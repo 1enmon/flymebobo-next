@@ -91,6 +91,14 @@ public class NotifData {
      * MediaSession lyric listener (v76) updates it in place while
      * the capsule is pinned. */
     public String lyrics;
+    /** v564 (2.5.0): 真实来源应用——经系统「推送服务」通道
+     * 送达的通知，pkg 是推送服务本身，真正的来源应用在
+     * NotifCollectionHook 里尽力还原后填这里（包名 + 应用
+     * 名）。还原不到就都是 null，展示侧回退 pkg 本值。只
+     * 影响轻气泡小签/面板的图标与应用名展示（及打开兜底
+     * 的包名），规则/分组仍按 pkg 走。 */
+    public String srcPkg;
+    public String srcLabel;
 
     public NotifData(String key, String pkg, String title, String text,
                      long postTime, Bitmap icon, Bitmap largeIcon) {

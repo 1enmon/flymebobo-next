@@ -116,6 +116,64 @@ public final class NotifCollectionHook {
                         }
                     } catch (Throwable ignored) {
                     }
+                    // v564: 轻气泡开启时，音乐通知只藏不撤——
+                    // 不 proceed 就不进 SystemUI 集合（通知栏/
+                    // 锁屏都不出现），但 onPosted 照常走，音乐
+                    // 数据进轻气泡面板的置顶音乐卡；NS 监听器
+                    // 是另一条管线，歌词/进度读取不受影响
+                    // （CallNotifSuppress 同款口径）。
+                    try {
+                        if (FeatureFlags.lightMode) {
+                            StatusBarNotification msbn =
+                                    (StatusBarNotification)
+                                            chain.getArg(0);
+                            if (msbn != null
+                                    && msbn.getNotification() != null
+                                    && isMusic(msbn,
+                                            msbn.getNotification())) {
+                                try {
+                                    onPosted(msbn);
+                                } catch (Throwable ignored) {
+                                }
+                                log("Light music hidden from"
+                                        + " collection pkg="
+                                        + msbn.getPackageName());
+                                return null;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    // v587: 下载同音乐口径——轻气泡下只藏不
+                    // 撤：不 proceed 就不进 SystemUI 集合
+                    // （通知栏里不再挂一条下载通知），但
+                    // onPosted 照常走，进度进面板下载卡；
+                    // NS 的下载 tick 是另一条管线，照常读
+                    // 活通知更新进度。开关门对齐面板的接管
+                    // 条件（notif + dl），关着时不藏，免得
+                    // 通知两头不到。
+                    try {
+                        if (FeatureFlags.lightMode
+                                && FeatureFlags.notif
+                                && FeatureFlags.dl) {
+                            StatusBarNotification dsbn =
+                                    (StatusBarNotification)
+                                            chain.getArg(0);
+                            if (dsbn != null
+                                    && dsbn.getNotification() != null
+                                    && isDownloadNotif(dsbn,
+                                            dsbn.getNotification())) {
+                                try {
+                                    onPosted(dsbn);
+                                } catch (Throwable ignored) {
+                                }
+                                log("Light download hidden from"
+                                        + " collection pkg="
+                                        + dsbn.getPackageName());
+                                return null;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
                     Object result = chain.proceed();
                     try {
                         onPosted((StatusBarNotification) chain.getArg(0));
@@ -703,6 +761,15 @@ public final class NotifCollectionHook {
             data.contentIntent = n.contentIntent;
         } catch (Throwable ignored) {
         }
+        // v564: 推送来源还原补强——v328 已用 key 第 2 段把
+        // 真实包名还原进 data.pkg（常态）；若发帖包是推送
+        // 服务、且 data.pkg 仍是推送服务本身（key 没带真实
+        // 包），再扫 extras 找像包名的已安装应用，填
+        // srcPkg/srcLabel 给轻气泡小签/面板展示用；扫不到
+        // 就把 extras 的键名打进日志，供下一轮按真实形状补。
+        if (isPushService(pkg) && pkg.equals(data.pkg)) {
+            resolvePushSourceFallback(sbn, data);
+        }
         BubbleWindow.getInstance().onNotification(data);
         // v425 (diagnostic, user 2026-11-22 "查"): restore the v422
         // hook-side push cancel. Push-service notifications
@@ -742,6 +809,57 @@ public final class NotifCollectionHook {
         } catch (Throwable ignored) {
         }
         return false;
+    }
+
+    // v564: 推送来源还原的兜底——扫通知 extras 里的字符串
+    // 值，找第一个「像包名且是已安装应用」的值作真实来源
+    // （展示用，填进 NotifData.srcPkg/srcLabel）。找到打
+    // Light source 日志；找不到把 extras 键名打出来，供
+    // 下一轮按真实形状补规则。
+    private void resolvePushSourceFallback(
+            StatusBarNotification sbn, NotifData data) {
+        try {
+            Bundle ex = sbn.getNotification() != null
+                    ? sbn.getNotification().extras : null;
+            if (ex == null) {
+                return;
+            }
+            String found = null;
+            StringBuilder keys = new StringBuilder();
+            for (String k : ex.keySet()) {
+                if (keys.length() > 0) {
+                    keys.append(',');
+                }
+                keys.append(k);
+                if (found != null) {
+                    continue;
+                }
+                Object v = null;
+                try {
+                    v = ex.get(k);
+                } catch (Throwable ignored) {
+                }
+                if (v instanceof String) {
+                    String s = ((String) v).trim();
+                    if (s.length() > 3 && s.indexOf('.') > 0
+                            && s.indexOf(' ') < 0
+                            && !s.equals(data.pkg)
+                            && appLabel(s) != null) {
+                        found = s;
+                    }
+                }
+            }
+            if (found != null) {
+                data.srcPkg = found;
+                data.srcLabel = appLabel(found);
+                log("Light source pkg=" + data.pkg
+                        + " real=" + found);
+            } else {
+                log("Light source unresolved pkg=" + data.pkg
+                        + " extrasKeys=" + keys);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     // v422 (restored in v425, diagnostic): cancel the push
@@ -1358,6 +1476,38 @@ public final class NotifCollectionHook {
             }
         }
         return false;
+    }
+
+    // v587: intercept 阶段的下载判定——与 onPosted 里的
+    // 识别同口径（有进度条 + 下载信号），供轻气泡藏通知
+    // 栏用。getText 在本类已有同名工具。
+    private static boolean isDownloadNotif(
+            StatusBarNotification sbn, Notification n) {
+        try {
+            if (isMusic(sbn, n)) {
+                return false;
+            }
+            Bundle extras = n.extras;
+            int progressMax = extras != null
+                    ? extras.getInt("android.progressMax", 0) : 0;
+            boolean hasProgress = progressMax > 0
+                    || (extras != null && extras.getBoolean(
+                            "android.progressIndeterminate",
+                            false));
+            if (!hasProgress) {
+                return false;
+            }
+            String channelId = null;
+            try {
+                channelId = n.getChannelId();
+            } catch (Throwable ignored) {
+            }
+            return hasDownloadSignal(sbn.getPackageName(),
+                    channelId, getText(extras, "android.title"),
+                    getText(extras, "android.text"));
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     // Dual-condition download signal (v110).

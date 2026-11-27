@@ -608,6 +608,13 @@ public class BubbleWindow {
                     }
                 } catch (Throwable ignored) {
                 }
+                // v564: 轻气泡小签/面板跟屏状态走（息屏收、
+                // 亮屏按栈状态重评；锁屏中 refreshLightDot
+                // 内部守卫会继续藏，解锁广播再调一次）。
+                try {
+                    refreshLightDot();
+                } catch (Throwable ignored) {
+                }
             }
         });
     }
@@ -1132,7 +1139,9 @@ public class BubbleWindow {
         if (!data.isCall && FeatureFlags.sceneMode
                 && this.sceneGuard != null
                 && this.sceneGuard.isSuppressed()
-                && !SceneExceptions.isExcepted(data.pkg)) {
+                && !SceneExceptions.isExcepted(data.pkg)
+                && !(FeatureFlags.lightMode
+                        && isOrdinaryForLight(data))) {
             // v555: 命中突破 → 不排队，照常往下走（静默门
             // 同样放行，见 brk 的共用判定）。
             if (brk) {
@@ -1461,6 +1470,4076 @@ public class BubbleWindow {
         });
     }
 
+    // ============================================================
+    // v564 (2.5.0): 轻气泡设计模式（wei 2026-11-27 定稿，预览
+    // 已过：切换页与动画 + 音乐收纳卡片）。开启后（FeatureFlags
+    // .lightMode）普通通知不弹胶囊：静默收进 lightStack，边缘
+    // 小签是试验田「通知收纳」v0.5-v0.7 验证过的简洁模式形态
+    // （栈空全隐藏 / 到达药丸只显示最新一条来源 / 落回呼吸点 /
+    // 位置可拖可设）；音乐不弹胶囊也不进通知栏，只在收纳面板
+    // 里置顶一张音乐卡，播放时呼吸灯变色流转；场景里被压住的
+    // 普通通知并入收纳、面板只读。来电完全不碰。经典路径在
+    // lightMode 关时零改动（所有新分支都先判 lightMode）。
+    // ============================================================
+    private final java.util.ArrayDeque<NotifData> lightStack =
+            new java.util.ArrayDeque<>();
+    private static final int LIGHT_MAX = 20;
+    // 小签窗口（根=FrameLayout，内含横排 body 与角标）。
+    private FrameLayout lightDotRoot;
+    private android.widget.LinearLayout lightDotBody;
+    private View lightDotTab;
+    private android.graphics.drawable.GradientDrawable lightTabBg;
+    private android.widget.LinearLayout lightPill;
+    private android.widget.ImageView lightPillIcon;
+    private android.widget.TextView lightPillLabel;
+    // v569: 副药丸——放歌开词时新通知先在歌词下面闪烁、
+    // 闪完再收纳（wei 定），不抢主药丸的歌词位。副药丸
+    // 挂在主药丸下方的药丸列里，自带闪烁与计时。
+    private android.widget.LinearLayout lightPillCol;
+    private android.widget.LinearLayout lightSubPill;
+    private android.widget.ImageView lightSubPillIcon;
+    private android.widget.TextView lightSubPillLabel;
+    private android.animation.ValueAnimator lightSubBlink;
+    private boolean lightSubShowing;
+    private final Runnable lightSubEndRunnable = new Runnable() {
+        @Override
+        public void run() {
+            dismissLightSubPill();
+            if (!lightPulsing && lightDotTab != null) {
+                lightDotTab.setVisibility(View.VISIBLE);
+            }
+            refreshLightDot();
+        }
+    };
+    private android.widget.TextView lightBadge;
+    private WindowManager.LayoutParams lightDotParams;
+    private boolean lightDotAdded;
+    private android.animation.ValueAnimator lightBreath;
+    private boolean lightPulsing;
+    // v575: 正在闪的到达药丸/副药丸是哪一条——点开它时
+    // 立即停闪（wei：点开后立即收纳、不要再继续闪烁）。
+    private String lightFlashKey;
+    private String lightSubFlashKey;
+    private final Runnable lightPulseEndRunnable = new Runnable() {
+        @Override
+        public void run() {
+            boolean wasArrival = lightFlashKey != null;
+            lightPulsing = false;
+            lightFlashKey = null;
+            if (lightPill != null) {
+                lightPill.setVisibility(View.GONE);
+            }
+            if (lightDotTab != null && !lightSubShowing) {
+                lightDotTab.setVisibility(View.VISIBLE);
+            }
+            refreshLightDot();
+            // v577: 刚才是通知在闪——它闪完收纳了，歌词
+            // 回来把当前行再亮出来，接着跟随（歌词自己的
+            // 闪结束时 wasArrival=false，不会自循环）。
+            if (wasArrival && lightLyricFollow
+                    && lightMusicData != null
+                    && lightMusicLyric != null
+                    && !lightMusicLyric.isEmpty()
+                    && !"找不到当前歌词".equals(lightMusicLyric)) {
+                flashLightLyricPill(lightMusicLyric);
+            }
+        }
+    };
+    // 收纳面板（根=全屏透明层，盒在小签同侧）。
+    private FrameLayout lightPanelRoot;
+    private android.widget.LinearLayout lightPanelBox;
+    private boolean lightPanelAdded;
+    private boolean lightPanelRecallMode;
+    private boolean lightPanelReadOnly;
+    // v570: 面板内嵌长按菜单（展开在被长按行下方、挤开其他
+    // 行）与面板窗口参数（回复框要输入法时临时改可聚焦）。
+    private android.widget.LinearLayout lightInlineMenu;
+    private String lightInlineForKey;
+    private WindowManager.LayoutParams lightPanelLp;
+    // v574: 面板滚动区与行容器的活引用——内嵌菜单展开时
+    // 把面板可视高撑开（applyLightScrollCap）要原地改它。
+    private android.widget.ScrollView lightPanelScroll;
+    private android.widget.LinearLayout lightPanelRows;
+    private android.animation.ValueAnimator lightCapAnim;
+    // 面板音乐卡的活引用（进度 tick 原地刷新，不整表重建）。
+    private android.widget.ProgressBar lightMusicBar;
+    private android.widget.TextView lightMusicTime;
+    private LightMusicBtn lightMusicPlayBtn;
+    private LightMusicBtn lightMusicFavBtn;
+    private LightMusicBtn lightMusicLyricBtn;
+    private android.widget.TextView lightMusicLyricView;
+    private final Runnable lightMusicTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            updateLightMusicProgressViews();
+            if (lightPanelAdded && lightMusicData != null) {
+                handler.postDelayed(this, 1000);
+            }
+        }
+    };
+    // 音乐状态（轻气泡自有，不依赖经典音乐胶囊是否存在）。
+    private NotifData lightMusicData;
+    // v576: 下载状态（轻气泡自有）——经典下载胶囊在轻气
+    // 泡下不弹，下载进面板当卡片（音乐卡之下、收纳列表
+    // 之上），进度原地刷新，完成停留 3 秒自动撤（同经典
+    // 口径）。面板卡的活引用按 key 存，进度广播来了原地
+    // 刷，不整表重建。
+    private final java.util.LinkedHashMap<String, NotifData>
+            lightDownloads = new java.util.LinkedHashMap<>();
+    private final java.util.HashMap<String,
+            android.widget.ProgressBar> lightDlBars =
+                    new java.util.HashMap<>();
+    private final java.util.HashMap<String,
+            android.widget.TextView> lightDlTitles =
+                    new java.util.HashMap<>();
+    private final java.util.HashMap<String,
+            android.widget.TextView> lightDlTexts =
+                    new java.util.HashMap<>();
+    private final java.util.HashMap<String,
+            android.widget.TextView> lightDlPcts =
+                    new java.util.HashMap<>();
+    // v593: 码卡片倒计时（原文写了有效期才有）的活引
+    // 用与到期点，按 key 存，面板开时 1 秒一刷。
+    private final java.util.HashMap<String,
+            android.widget.TextView> lightCdTexts =
+                    new java.util.HashMap<>();
+    private final java.util.HashMap<String, View>
+            lightCdFills = new java.util.HashMap<>();
+    private final java.util.HashMap<String, View>
+            lightCdSpaces = new java.util.HashMap<>();
+    private final java.util.HashMap<String, Long>
+            lightCdDeadline = new java.util.HashMap<>();
+    private final java.util.HashMap<String, Long>
+            lightCdTotal = new java.util.HashMap<>();
+    private final Runnable lightCodeTickRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (!lightPanelAdded
+                            || lightCdDeadline.isEmpty()) {
+                        return;
+                    }
+                    updateLightCountdowns();
+                    handler.postDelayed(this, 1000);
+                }
+            };
+
+    /** v593: 倒计时一刷：文字「还剩 m:ss 过期」/「已
+     * 过期」，细条按剩余比例缩。 */
+    private void updateLightCountdowns() {
+        long now = System.currentTimeMillis();
+        for (java.util.Map.Entry<String, Long> e
+                : lightCdDeadline.entrySet()) {
+            String key = e.getKey();
+            long remain = e.getValue() - now;
+            android.widget.TextView t = lightCdTexts.get(key);
+            if (t != null) {
+                if (remain <= 0) {
+                    t.setText("已过期");
+                    t.setTextColor(Color.rgb(248, 113, 113));
+                } else {
+                    long sec = (remain + 999) / 1000;
+                    t.setText("还剩 " + (sec / 60) + ":"
+                            + String.format(
+                                    java.util.Locale.US, "%02d",
+                                    sec % 60) + " 过期");
+                }
+            }
+            Long total = lightCdTotal.get(key);
+            View fill = lightCdFills.get(key);
+            View space = lightCdSpaces.get(key);
+            if (total != null && total > 0 && fill != null
+                    && space != null) {
+                float frac = remain <= 0 ? 0f
+                        : Math.min(1f, remain / (float) total);
+                setLightWeight(fill, frac);
+                setLightWeight(space, 1f - frac);
+            }
+        }
+    }
+
+    private static void setLightWeight(View v, float w) {
+        android.widget.LinearLayout.LayoutParams lp =
+                (android.widget.LinearLayout.LayoutParams)
+                        v.getLayoutParams();
+        if (lp.weight != w) {
+            lp.weight = w;
+            v.setLayoutParams(lp);
+        }
+    }
+    private String lightMusicTitle;
+    private String lightMusicArtist;
+    private String lightMusicLyric;
+    private android.graphics.Bitmap lightMusicArt;
+    private long lightMusicPosMs;
+    private long lightMusicDurMs;
+    private boolean lightMusicPlaying;
+    // v565: 收藏状态（会话真值优先，hasFavorite=false 时本地
+    // 翻转兜底）与歌词跟随开关、封面取色缓存。
+    private boolean lightMusicFavorite;
+    private boolean lightMusicHasFavorite;
+    private boolean lightLyricFollow;
+    private int lightMusicTint;
+    private android.graphics.Bitmap lightMusicTintSrc;
+    // 应用名/图标缓存（按展示包名，推送还原后按真实包名）。
+    private final java.util.HashMap<String, String> lightLabelCache =
+            new java.util.HashMap<>();
+    private final java.util.HashMap<String,
+            android.graphics.drawable.Drawable> lightIconCache =
+            new java.util.HashMap<>();
+
+    /** v564: 轻气泡眼里的「普通通知」：音乐/下载/实况/导航/
+     * 公交/来电都不是（与已移除收纳点的 isOrdinaryForCollect
+     * 同口径）。 */
+    private static boolean isOrdinaryForLight(NotifData d) {
+        return d != null && d.pkg != null
+                && !d.isMusic && !d.isDownload && !d.isLive
+                && !d.isNavi && !d.isBus && !d.isCall;
+    }
+
+    /** v564: 展示包名——推送服务送达的已还原真实来源时用
+     * 真实包名取图标/名字，还原不到回退 pkg 本值。 */
+    private static String lightDisplayPkg(NotifData d) {
+        if (d != null && d.srcPkg != null && !d.srcPkg.isEmpty()) {
+            return d.srcPkg;
+        }
+        return d == null ? null : d.pkg;
+    }
+
+    private String lightAppLabel(String pkg, NotifData d) {
+        if (d != null && d.srcLabel != null
+                && pkg != null && pkg.equals(d.srcPkg)) {
+            return d.srcLabel;
+        }
+        if (pkg == null) {
+            return "";
+        }
+        String cached = lightLabelCache.get(pkg);
+        if (cached != null) {
+            return cached;
+        }
+        String label = pkg;
+        try {
+            android.content.pm.PackageManager pm =
+                    app.getPackageManager();
+            android.content.pm.ApplicationInfo ai =
+                    pm.getApplicationInfo(pkg, 0);
+            CharSequence cs = pm.getApplicationLabel(ai);
+            if (cs != null && cs.length() > 0) {
+                label = cs.toString();
+            }
+        } catch (Throwable ignored) {
+        }
+        lightLabelCache.put(pkg, label);
+        return label;
+    }
+
+    private android.graphics.drawable.Drawable lightAppIcon(
+            String pkg, NotifData d) {
+        if (pkg != null) {
+            android.graphics.drawable.Drawable cached =
+                    lightIconCache.get(pkg);
+            if (cached != null) {
+                return cached;
+            }
+            try {
+                android.graphics.drawable.Drawable dr =
+                        app.getPackageManager()
+                                .getApplicationIcon(pkg);
+                if (dr != null) {
+                    lightIconCache.put(pkg, dr);
+                    return dr;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        if (d != null && d.icon != null) {
+            return new android.graphics.drawable.BitmapDrawable(
+                    app.getResources(), d.icon);
+        }
+        return null;
+    }
+
+    /** v564: 相对时间（面板行右侧）：刚刚 / N分钟前 / N小时前。 */
+    private static String lightAgoText(long postTime) {
+        long diff = System.currentTimeMillis() - postTime;
+        if (diff < 60_000L) {
+            return "刚刚";
+        }
+        if (diff < 3600_000L) {
+            return (diff / 60_000L) + "分钟前";
+        }
+        if (diff < 86400_000L) {
+            return (diff / 3600_000L) + "小时前";
+        }
+        return (diff / 86400_000L) + "天前";
+    }
+
+    /** v564: 普通通知入轻气泡收纳栈（popCapsule 的轻气泡
+     * 分支调用，已在主线程）。同 key 替换、上限 20、溢出最老
+     * 一条进时光机（回看栈）。 */
+    // v572: 轻气泡 App 三栏（收纳 / 时光机）的镜像通道——
+    // SystemUI 侧每次收纳栈 / 时光机栈 / 音乐变化后，把快照
+    // 写到 /sdcard/flymebobo/light_mirror.txt 并广播，App
+    // 侧两栏读它渲染（试验田 v0.3 同款路子）。格式：每行
+    // 一条、制表符分隔、字段 URL 编码：
+    //   V\t1 / S\t<场景中0/1> / M\t<播放中0/1>\t<歌名>\t<歌手>\t<包名>
+    //   C\t<包名>\t<标题>\t<正文>\t<时间ms>（收纳，新→旧）
+    //   R\t<同上>（时光机，新→旧）
+    // 应用名与图标由 App 侧按包名自己解析，不进镜像。
+    static final String ACTION_LIGHT_MIRROR =
+            "com.chenan.flymebobo.LIGHT_MIRROR";
+    private static final String LIGHT_MIRROR_PATH =
+            "/sdcard/flymebobo/light_mirror.txt";
+
+    private static String mirrorField(String s) {
+        if (s == null) {
+            return "";
+        }
+        try {
+            return java.net.URLEncoder.encode(s, "UTF-8");
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private void writeLightMirror() {
+        if (!FeatureFlags.lightMode) {
+            return;
+        }
+        try {
+            StringBuilder sb = new StringBuilder();
+            sb.append("V\t1\n");
+            sb.append("S\t").append(sceneGuard != null
+                    && sceneGuard.isSuppressed() ? 1 : 0)
+                    .append('\n');
+            if (lightMusicData != null) {
+                sb.append("M\t")
+                        .append(lightMusicPlaying ? 1 : 0)
+                        .append('\t')
+                        .append(mirrorField(lightMusicData.title))
+                        .append('\t')
+                        .append(mirrorField(lightMusicData.text))
+                        .append('\t')
+                        .append(mirrorField(lightMusicData.pkg))
+                        .append('\n');
+            }
+            for (NotifData d : lightStack) {
+                sb.append("C\t")
+                        .append(mirrorField(lightDisplayPkg(d)))
+                        .append('\t')
+                        .append(mirrorField(d.title)).append('\t')
+                        .append(mirrorField(d.text)).append('\t')
+                        .append(d.postTime).append('\t')
+                        .append(mirrorField(d.key)).append('\n');
+            }
+            for (NotifData d : recallStack) {
+                sb.append("R\t")
+                        .append(mirrorField(lightDisplayPkg(d)))
+                        .append('\t')
+                        .append(mirrorField(d.title)).append('\t')
+                        .append(mirrorField(d.text)).append('\t')
+                        .append(d.postTime).append('\t')
+                        .append(mirrorField(d.key)).append('\n');
+            }
+            java.io.File dir = new java.io.File("/sdcard/flymebobo");
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            java.io.FileOutputStream fos =
+                    new java.io.FileOutputStream(LIGHT_MIRROR_PATH);
+            fos.write(sb.toString().getBytes("UTF-8"));
+            fos.close();
+            android.content.Intent mi =
+                    new android.content.Intent(ACTION_LIGHT_MIRROR);
+            mi.setPackage("com.chenan.flymebobo");
+            app.sendBroadcast(mi);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void lightCollect(final NotifData d) {
+        if (d == null || !FeatureFlags.lightMode
+                || !isOrdinaryForLight(d)) {
+            return;
+        }
+        if (d.key != null) {
+            java.util.Iterator<NotifData> it =
+                    lightStack.iterator();
+            while (it.hasNext()) {
+                NotifData o = it.next();
+                if (o != null && d.key.equals(o.key)) {
+                    it.remove();
+                }
+            }
+        }
+        lightStack.addFirst(d);
+        while (lightStack.size() > LIGHT_MAX) {
+            NotifData old = lightStack.removeLast();
+            if (old != null && old != d) {
+                lightPushRecall(old);
+            }
+        }
+        FileLog.i("Light collect pkg=" + d.pkg
+                + " n=" + lightStack.size());
+        refreshLightDot();
+        flashLightPill(d);
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        }
+        writeLightMirror();
+    }
+
+    /** v578: 「音乐卡片」关时的音乐落点——按普通通知
+     * 收纳，但音乐通知会同 key 反复重投（切歌/进度），
+     * 已在栈的只原地更新内容、不重复闪药丸；新 key 入
+     * 栈才闪一次（新会话到达）。 */
+    private void lightCollectMusicOff(NotifData d) {
+        if (d == null || d.key == null) {
+            return;
+        }
+        for (NotifData o : lightStack) {
+            if (o != null && d.key.equals(o.key)) {
+                o.title = d.title;
+                o.text = d.text;
+                if (lightPanelAdded && !lightPanelRecallMode) {
+                    rebuildLightPanelRows();
+                }
+                writeLightMirror();
+                return;
+            }
+        }
+        lightStack.addFirst(d);
+        while (lightStack.size() > LIGHT_MAX) {
+            NotifData old = lightStack.removeLast();
+            if (old != null && old != d) {
+                lightPushRecall(old);
+            }
+        }
+        FileLog.i("Light collect(music as notif) pkg="
+                + d.pkg + " n=" + lightStack.size());
+        refreshLightDot();
+        flashLightPill(d);
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        }
+        writeLightMirror();
+    }
+
+    /** v578: 「音乐卡片」开关翻动（XposedEntry 转发）——
+     * 关：立即清音乐状态（面板音乐卡、歌词跟随、变色呼
+     * 吸都收），之后的音乐走普通收纳；开：不预置状态，
+     * 下一次音乐通知进来自然点亮卡片。 */
+    public void onLightMusicCardChanged(final boolean on) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                FileLog.i("Light musicCard changed -> " + on);
+                if (!on) {
+                    String goneKey = lightMusicData != null
+                            ? lightMusicData.key : null;
+                    lightMusicData = null;
+                    lightMusicArt = null;
+                    lightMusicPlaying = false;
+                    lightMusicFavorite = false;
+                    lightMusicHasFavorite = false;
+                    if (lightLyricFollow) {
+                        lightLyricFollow = false;
+                        FileLog.i("Light lyric off");
+                        sendLightLyricListen(false, goneKey);
+                    }
+                    dismissLightSubPill();
+                }
+                refreshLightDot();
+                if (lightPanelAdded && !lightPanelRecallMode) {
+                    rebuildLightPanelRows();
+                }
+                writeLightMirror();
+            }
+        });
+    }
+
+    /** v576: 下载进轻气泡——不弹经典胶囊，存进下载表，
+     * 面板里当卡片显示（见 buildLightDownloadCard）；进
+     * 度细更新走 updateDownloadProgress 的广播，这里只
+     * 管到达与整表刷新口径。新 key 才重建面板，已有 key
+     * 原地刷卡片视图。 */
+    private void lightDownloadIn(NotifData d) {
+        if (d == null || d.key == null) {
+            return;
+        }
+        boolean isNew = !lightDownloads.containsKey(d.key);
+        if (isNew) {
+            lightDownloads.put(d.key, d);
+            FileLog.i("Light download in pkg=" + d.pkg);
+        } else {
+            NotifData old = lightDownloads.get(d.key);
+            if (old != null && old != d) {
+                old.title = d.title;
+                old.text = d.text;
+                if (d.downloadPct >= 0) {
+                    old.downloadPct = d.downloadPct;
+                }
+            }
+        }
+        refreshLightDot();
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            if (isNew) {
+                rebuildLightPanelRows();
+            } else {
+                updateLightDownloadViews(d.key);
+            }
+        }
+    }
+
+    /** v576: 进度广播（NS 的下载 tick）在轻气泡下的落
+     * 点：更新下载表 + 面板卡原地刷新；完成时先把完成文
+     * 案亮出来，3 秒后撤卡（同经典 v242 口径）。 */
+    private void lightDownloadProgress(String key, String title,
+            String text, int pct, boolean completed) {
+        NotifData d = lightDownloads.get(key);
+        if (d == null) {
+            return;
+        }
+        if (title != null) {
+            d.title = title;
+        }
+        if (text != null) {
+            d.text = text;
+        }
+        if (pct >= 0) {
+            d.downloadPct = pct;
+        }
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            updateLightDownloadViews(key);
+        }
+        if (completed) {
+            final String ckey = key;
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (lightDownloads.remove(ckey) != null) {
+                        FileLog.i("Light download done remove");
+                        refreshLightDot();
+                        if (lightPanelAdded
+                                && !lightPanelRecallMode) {
+                            rebuildLightPanelRows();
+                        }
+                    }
+                }
+            }, 3000);
+        }
+    }
+
+    /** v576: 面板下载卡原地刷新（标题/状态/进度条/百分比）。
+     * v590: 全部字段先比对再写——tick 每 500ms 一发，值
+     * 没变也 setText 会让文字重绘一遍，录屏里就是闪。 */
+    private void updateLightDownloadViews(String key) {
+        NotifData d = lightDownloads.get(key);
+        if (d == null) {
+            return;
+        }
+        android.widget.TextView t = lightDlTitles.get(key);
+        if (t != null) {
+            String nt = d.title != null ? d.title : "";
+            if (!nt.contentEquals(t.getText())) {
+                t.setText(nt);
+            }
+        }
+        android.widget.TextView x = lightDlTexts.get(key);
+        if (x != null) {
+            String nx = d.text != null ? d.text : "";
+            if (!nx.contentEquals(x.getText())) {
+                x.setText(nx);
+            }
+        }
+        android.widget.ProgressBar b = lightDlBars.get(key);
+        if (b != null && d.downloadPct >= 0
+                && b.getProgress() != d.downloadPct) {
+            b.setProgress(d.downloadPct);
+        }
+        android.widget.TextView p = lightDlPcts.get(key);
+        if (p != null) {
+            String np = d.downloadPct >= 0
+                    ? d.downloadPct + "%" : "";
+            if (!np.contentEquals(p.getText())) {
+                p.setText(np);
+            }
+        }
+    }
+
+    /** v576: 面板下载卡——图标（通知大图优先）+ 标题 +
+     * 状态行 + 细进度条 + 百分比，摆法跟音乐卡一族；点
+     * 卡片走这条下载自己的打开通道（下载页/安装页）。 */
+    private View buildLightDownloadCard(final NotifData d) {
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        if (lpWhite()) {
+            bg.setColor(Color.argb(248, 248, 250, 252));
+            bg.setStroke(dp(1), Color.rgb(226, 232, 240));
+        } else {
+            bg.setColor(Color.argb(242, 30, 36, 52));
+        }
+        bg.setCornerRadius(dp(14));
+        card.setBackground(bg);
+        card.setPadding(dp(10), dp(10), dp(10), dp(8));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        android.widget.LinearLayout top =
+                new android.widget.LinearLayout(app);
+        top.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView icon =
+                new android.widget.ImageView(app);
+        if (d.largeIcon != null) {
+            icon.setImageBitmap(d.largeIcon);
+            icon.setScaleType(
+                    android.widget.ImageView.ScaleType
+                            .CENTER_CROP);
+        } else {
+            android.graphics.drawable.Drawable dr =
+                    lightAppIcon(lightDisplayPkg(d), d);
+            if (dr != null) {
+                icon.setImageDrawable(dr);
+            }
+        }
+        icon.setLayoutParams(
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(38), dp(38)));
+        top.addView(icon);
+        android.widget.LinearLayout mid =
+                new android.widget.LinearLayout(app);
+        mid.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.LinearLayout.LayoutParams midLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        midLp.leftMargin = dp(10);
+        mid.setLayoutParams(midLp);
+        android.widget.TextView title =
+                new android.widget.TextView(app);
+        title.setText(d.title != null ? d.title : "");
+        title.setTextSize(13.5f);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        title.setTextColor(lpTitleC());
+        title.setSingleLine(true);
+        // v590: 下载卡不走跑马灯——进度文字一滚动起来
+        // 眼睛就追着字跑，录屏里像一直在闪（wei 第二
+        // 条录屏定位：闪的是下载卡不是呼吸灯）。稳稳
+        // 定住，超长尾部省略。
+        title.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        mid.addView(title, new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        android.widget.TextView text =
+                new android.widget.TextView(app);
+        text.setText(d.text != null ? d.text : "");
+        text.setTextSize(11.5f);
+        text.setTextColor(lpTextC());
+        text.setSingleLine(true);
+        // v590: 状态行同标题——定住不滚（见上）。
+        text.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        mid.addView(text, new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        top.addView(mid);
+        android.widget.TextView pct =
+                new android.widget.TextView(app);
+        pct.setText(d.downloadPct >= 0
+                ? d.downloadPct + "%" : "");
+        pct.setTextSize(11.5f);
+        pct.setTextColor(lpTextC());
+        top.addView(pct);
+        card.addView(top);
+        android.widget.ProgressBar bar =
+                new android.widget.ProgressBar(app, null,
+                        android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(Math.max(d.downloadPct, 0));
+        android.widget.LinearLayout.LayoutParams barLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT, dp(3));
+        barLp.topMargin = dp(7);
+        bar.setLayoutParams(barLp);
+        card.addView(bar);
+        if (d.key != null) {
+            lightDlBars.put(d.key, bar);
+            lightDlTitles.put(d.key, title);
+            lightDlTexts.put(d.key, text);
+            lightDlPcts.put(d.key, pct);
+        }
+        card.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dismissLightPanel();
+                lightFireOpen(d);
+            }
+        });
+        return card;
+    }
+
+    // v591: 出示页（取件/取餐码全屏大码）的窗口引用。
+    private android.widget.FrameLayout lightStageRoot;
+
+    /** v591: 码的种类色——验证码蓝、取件绿、取餐橙
+     * （预览定稿）。 */
+    private static int lightCodeAccent(NotifData d) {
+        if (d != null && d.isPickupCode) {
+            if ("取餐码".equals(d.codeLabel)) {
+                return Color.rgb(234, 88, 12);
+            }
+            return Color.rgb(22, 163, 74);
+        }
+        return Color.rgb(59, 130, 246);
+    }
+
+    private static String lightCodeKind(NotifData d) {
+        if (d != null && d.codeLabel != null
+                && !d.codeLabel.isEmpty()) {
+            return d.codeLabel;
+        }
+        return d != null && d.isPickupCode ? "取件码" : "验证码";
+    }
+
+    /** v591: 打码时码的展示形：等长圆点。 */
+    private static String lightCodeMasked(String code) {
+        if (code == null || code.isEmpty()) {
+            return "••••••";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < code.length(); i++) {
+            if (i > 0) {
+                sb.append(' ');
+            }
+            sb.append('•');
+        }
+        return sb.toString();
+    }
+
+    /** v591: 手动复制（卡上按钮/出示页）——显式动作，
+     * 不过自动复制开关；打码时 Toast 不露码，剪贴板
+     * 里永远是真码（经典同口径）。 */
+    private void copyCodeManual(String code) {
+        if (code == null || app == null) {
+            return;
+        }
+        try {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager)
+                    app.getSystemService(
+                            android.content.Context.CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText(
+                                "验证码", code));
+                android.widget.Toast.makeText(app,
+                        PrivacyMask.shouldMask(app)
+                                ? "已复制" : "验证码 " + code
+                                        + " 已复制",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** v591: 码卡片——音乐卡之下、普通行之上的置顶卡。
+     * v592: 按预览定稿重排（wei 对照截图指出不一样）：
+     * 卡面带种类色描边、头部「应用名 · 种类」+ 右侧
+     * 时间、绿色状态药丸一行、码居中特大、原文一行、
+     * 底部双大按钮（主按钮实心种类色 + 看原文描边）。
+     * 点卡身同点行（打开并进时光机）；长按出内嵌菜
+     * 单；场景只读时动作全灭、只看。v593 起带倒计
+     * 时：原文写明有效期（parseCodeValidityMs）才显
+     * 示，按到达时间 + 有效期真走秒，认不出不显示。 */
+    private View buildLightCodeCard(final NotifData d) {
+        final boolean masked = PrivacyMask.shouldMask(app);
+        final int accent = lightCodeAccent(d);
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        if (lpWhite()) {
+            bg.setColor(Color.rgb(248, 250, 252));
+        } else {
+            bg.setColor(Color.argb(242,
+                    Color.red(accent) / 6 + 22,
+                    Color.green(accent) / 6 + 26,
+                    Color.blue(accent) / 6 + 40));
+        }
+        bg.setStroke(dp(1), Color.argb(190,
+                Color.red(accent), Color.green(accent),
+                Color.blue(accent)));
+        bg.setCornerRadius(dp(14));
+        card.setBackground(bg);
+        card.setPadding(dp(14), dp(11), dp(14), dp(12));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        // 头部：图标 + 「应用名 · 种类」+ 右侧时间。
+        android.widget.LinearLayout head =
+                new android.widget.LinearLayout(app);
+        head.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView icon =
+                new android.widget.ImageView(app);
+        String dpkg = lightDisplayPkg(d);
+        if (d.largeIcon != null) {
+            icon.setImageBitmap(d.largeIcon);
+            icon.setScaleType(
+                    android.widget.ImageView.ScaleType
+                            .CENTER_CROP);
+        } else {
+            android.graphics.drawable.Drawable dr =
+                    lightAppIcon(dpkg, d);
+            if (dr != null) {
+                icon.setImageDrawable(dr);
+            }
+        }
+        icon.setLayoutParams(
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(28), dp(28)));
+        head.addView(icon);
+        android.widget.TextView who =
+                new android.widget.TextView(app);
+        who.setText(lightAppLabel(dpkg, d) + " · "
+                + lightCodeKind(d));
+        who.setTextSize(13);
+        who.setTextColor(lpTitleC());
+        who.setSingleLine(true);
+        who.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        android.widget.LinearLayout.LayoutParams whoLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        whoLp.leftMargin = dp(9);
+        who.setLayoutParams(whoLp);
+        head.addView(who);
+        android.widget.TextView ago =
+                new android.widget.TextView(app);
+        ago.setText(lightAgoText(d.postTime));
+        ago.setTextSize(11);
+        ago.setTextColor(lpAgoC());
+        head.addView(ago);
+        card.addView(head);
+        // 状态药丸：验证码已自动复制 / 取件带柜号。
+        String pillText = null;
+        if (!d.isPickupCode && FeatureFlags.autoCopyCode) {
+            pillText = "✓ 已自动复制，去粘贴就行";
+        } else if (d.isPickupCode && d.cabinet != null
+                && !d.cabinet.isEmpty()) {
+            pillText = "柜号 · " + d.cabinet;
+        }
+        if (pillText != null) {
+            android.widget.LinearLayout pillRow =
+                    new android.widget.LinearLayout(app);
+            android.widget.LinearLayout.LayoutParams prLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            prLp.topMargin = dp(9);
+            pillRow.setLayoutParams(prLp);
+            android.widget.TextView pill =
+                    new android.widget.TextView(app);
+            pill.setText(pillText);
+            pill.setTextSize(11.5f);
+            pill.setTextColor(Color.rgb(34, 197, 94));
+            GradientDrawable pillBg = new GradientDrawable();
+            pillBg.setColor(Color.argb(38, 34, 197, 94));
+            pillBg.setCornerRadius(dp(999));
+            pill.setBackground(pillBg);
+            pill.setPadding(dp(10), dp(4), dp(10), dp(4));
+            pillRow.addView(pill);
+            card.addView(pillRow);
+        }
+        // 码：居中特大（预览的视觉主角）。
+        android.widget.TextView code =
+                new android.widget.TextView(app);
+        code.setText(masked ? lightCodeMasked(d.code) : d.code);
+        code.setTextSize(40);
+        code.setTypeface(code.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        code.setLetterSpacing(0.2f);
+        code.setTextColor(lpTitleC());
+        code.setGravity(Gravity.CENTER);
+        code.setSingleLine(true);
+        android.widget.LinearLayout.LayoutParams cdLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cdLp.topMargin = dp(10);
+        code.setLayoutParams(cdLp);
+        card.addView(code);
+        // 原文一行（真实通知正文，居中、超长省略）。
+        if (d.text != null && !d.text.isEmpty()) {
+            android.widget.TextView ctx =
+                    new android.widget.TextView(app);
+            ctx.setText(d.text);
+            ctx.setTextSize(11.5f);
+            ctx.setTextColor(lpTextC());
+            ctx.setGravity(Gravity.CENTER);
+            ctx.setSingleLine(true);
+            ctx.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+            android.widget.LinearLayout.LayoutParams cxLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            cxLp.topMargin = dp(6);
+            ctx.setLayoutParams(cxLp);
+            card.addView(ctx);
+        }
+        // v593: 倒计时（原文写明有效期才有）——「还剩
+        // m:ss 过期」+ 一条细进度条，面板开时每秒刷。
+        long validityMs = parseCodeValidityMs(d.title, d.text);
+        if (validityMs > 0 && d.key != null) {
+            android.widget.TextView cd =
+                    new android.widget.TextView(app);
+            cd.setTextSize(11.5f);
+            cd.setTextColor(lpTextC());
+            cd.setGravity(Gravity.CENTER);
+            android.widget.LinearLayout.LayoutParams cdLp2 =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            cdLp2.topMargin = dp(6);
+            cd.setLayoutParams(cdLp2);
+            card.addView(cd);
+            android.widget.LinearLayout track =
+                    new android.widget.LinearLayout(app);
+            track.setOrientation(
+                    android.widget.LinearLayout.HORIZONTAL);
+            GradientDrawable trackBg = new GradientDrawable();
+            trackBg.setColor(lpWhite()
+                    ? Color.rgb(226, 232, 240)
+                    : Color.argb(50, 255, 255, 255));
+            trackBg.setCornerRadius(dp(999));
+            track.setBackground(trackBg);
+            android.widget.LinearLayout.LayoutParams trLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT, dp(3));
+            trLp.topMargin = dp(5);
+            track.setLayoutParams(trLp);
+            View fill = new View(app);
+            GradientDrawable fillBg = new GradientDrawable();
+            fillBg.setColor(accent);
+            fillBg.setCornerRadius(dp(999));
+            fill.setBackground(fillBg);
+            track.addView(fill, new android.widget.LinearLayout
+                    .LayoutParams(0,
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT, 1f));
+            View space = new View(app);
+            track.addView(space, new android.widget.LinearLayout
+                    .LayoutParams(0,
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT, 0f));
+            card.addView(track);
+            lightCdTexts.put(d.key, cd);
+            lightCdFills.put(d.key, fill);
+            lightCdSpaces.put(d.key, space);
+            lightCdDeadline.put(d.key,
+                    d.postTime + validityMs);
+            lightCdTotal.put(d.key, validityMs);
+        }
+        // 双大按钮：主按钮实心种类色，次按钮描边。
+        android.widget.LinearLayout btns =
+                new android.widget.LinearLayout(app);
+        btns.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams btLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        btLp.topMargin = dp(12);
+        btns.setLayoutParams(btLp);
+        android.widget.TextView main =
+                new android.widget.TextView(app);
+        main.setText(d.isPickupCode ? "出示大码"
+                : "复制" + lightCodeKind(d));
+        main.setTextSize(14);
+        main.setTextColor(Color.WHITE);
+        main.setTypeface(main.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        main.setGravity(Gravity.CENTER);
+        GradientDrawable mainBg = new GradientDrawable();
+        mainBg.setColor(accent);
+        mainBg.setCornerRadius(dp(10));
+        main.setBackground(mainBg);
+        main.setPadding(dp(10), dp(11), dp(10), dp(11));
+        btns.addView(main, new android.widget.LinearLayout
+                .LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f));
+        android.widget.TextView orig =
+                new android.widget.TextView(app);
+        orig.setText("看原文");
+        orig.setTextSize(14);
+        orig.setTextColor(lpTitleC());
+        orig.setGravity(Gravity.CENTER);
+        GradientDrawable origBg = new GradientDrawable();
+        origBg.setColor(Color.TRANSPARENT);
+        origBg.setStroke(dp(1), lpWhite()
+                ? Color.rgb(203, 213, 225)
+                : Color.argb(120, 255, 255, 255));
+        origBg.setCornerRadius(dp(10));
+        orig.setBackground(origBg);
+        orig.setPadding(dp(10), dp(11), dp(10), dp(11));
+        android.widget.LinearLayout.LayoutParams orLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        orLp.leftMargin = dp(10);
+        orig.setLayoutParams(orLp);
+        btns.addView(orig);
+        card.addView(btns);
+        if (!lightPanelReadOnly) {
+            main.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (d.isPickupCode) {
+                        showLightCodeStage(d);
+                    } else {
+                        copyCodeManual(d.code);
+                    }
+                }
+            });
+            orig.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    lightOpenItem(d);
+                }
+            });
+            card.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    lightOpenItem(d);
+                }
+            });
+            card.setOnLongClickListener(
+                    new View.OnLongClickListener() {
+                        @Override
+                        public boolean onLongClick(View v) {
+                            toggleLightInlineMenu(card, d);
+                            return true;
+                        }
+                    });
+        }
+        FileLog.i("Light code card pkg=" + d.pkg
+                + " kind=" + lightCodeKind(d)
+                + " masked=" + masked);
+        return card;
+    }
+
+    /** v591: 出示页——全屏白页、大码居中、窗口亮度拉
+     * 满，给柜机/店员看；点任意处关闭。打码时只显示
+     * 圆点（复制键仍复制真码）。不画假条码：柜机真要
+     * 扫码的场景，码本身是给人读的数字/字母。 */
+    private void showLightCodeStage(final NotifData d) {
+        if (app == null || wm == null || d == null
+                || d.code == null) {
+            return;
+        }
+        dismissLightCodeStage();
+        final boolean masked = PrivacyMask.shouldMask(app);
+        final int accent = lightCodeAccent(d);
+        lightStageRoot = new android.widget.FrameLayout(app);
+        lightStageRoot.setBackgroundColor(Color.WHITE);
+        android.widget.LinearLayout col =
+                new android.widget.LinearLayout(app);
+        col.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        col.setGravity(Gravity.CENTER_HORIZONTAL);
+        android.widget.FrameLayout.LayoutParams colLp =
+                new android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams
+                                .WRAP_CONTENT);
+        colLp.gravity = Gravity.CENTER;
+        colLp.leftMargin = dp(28);
+        colLp.rightMargin = dp(28);
+        col.setLayoutParams(colLp);
+        android.widget.TextView who =
+                new android.widget.TextView(app);
+        who.setText(lightAppLabel(lightDisplayPkg(d), d)
+                + " · " + lightCodeKind(d));
+        who.setTextSize(15);
+        who.setTextColor(Color.rgb(100, 116, 139));
+        who.setGravity(Gravity.CENTER);
+        col.addView(who);
+        android.widget.TextView big =
+                new android.widget.TextView(app);
+        big.setText(masked ? lightCodeMasked(d.code) : d.code);
+        big.setTextSize(52);
+        big.setTypeface(android.graphics.Typeface.MONOSPACE,
+                android.graphics.Typeface.BOLD);
+        big.setLetterSpacing(0.08f);
+        big.setTextColor(Color.rgb(15, 23, 42));
+        big.setGravity(Gravity.CENTER);
+        android.widget.LinearLayout.LayoutParams bigLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        bigLp.topMargin = dp(18);
+        big.setLayoutParams(bigLp);
+        col.addView(big);
+        if (d.cabinet != null && !d.cabinet.isEmpty()) {
+            android.widget.TextView cab =
+                    new android.widget.TextView(app);
+            cab.setText("柜号 · " + d.cabinet);
+            cab.setTextSize(17);
+            cab.setTextColor(Color.rgb(51, 65, 85));
+            cab.setGravity(Gravity.CENTER);
+            android.widget.LinearLayout.LayoutParams cbLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            cbLp.topMargin = dp(10);
+            cab.setLayoutParams(cbLp);
+            col.addView(cab);
+        }
+        if (masked) {
+            android.widget.TextView mh =
+                    new android.widget.TextView(app);
+            mh.setText("按隐私设置已打码 · 复制按钮仍可复制真码");
+            mh.setTextSize(12);
+            mh.setTextColor(Color.rgb(148, 163, 184));
+            mh.setGravity(Gravity.CENTER);
+            android.widget.LinearLayout.LayoutParams mhLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            mhLp.topMargin = dp(12);
+            mh.setLayoutParams(mhLp);
+            col.addView(mh);
+        }
+        android.widget.LinearLayout btns =
+                new android.widget.LinearLayout(app);
+        btns.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        btns.setGravity(Gravity.CENTER);
+        android.widget.LinearLayout.LayoutParams btLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        btLp.topMargin = dp(30);
+        btns.setLayoutParams(btLp);
+        android.widget.TextView copy =
+                new android.widget.TextView(app);
+        copy.setText("复制");
+        copy.setTextSize(14);
+        copy.setTextColor(Color.WHITE);
+        copy.setTypeface(copy.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        copy.setGravity(Gravity.CENTER);
+        GradientDrawable copyBg = new GradientDrawable();
+        copyBg.setColor(accent);
+        copyBg.setCornerRadius(dp(999));
+        copy.setBackground(copyBg);
+        copy.setPadding(dp(26), dp(10), dp(26), dp(10));
+        copy.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                copyCodeManual(d.code);
+            }
+        });
+        btns.addView(copy);
+        android.widget.TextView close =
+                new android.widget.TextView(app);
+        close.setText("关闭");
+        close.setTextSize(14);
+        close.setTextColor(Color.rgb(51, 65, 85));
+        close.setGravity(Gravity.CENTER);
+        GradientDrawable closeBg = new GradientDrawable();
+        closeBg.setColor(Color.rgb(241, 245, 249));
+        closeBg.setCornerRadius(dp(999));
+        close.setBackground(closeBg);
+        close.setPadding(dp(26), dp(10), dp(26), dp(10));
+        android.widget.LinearLayout.LayoutParams clLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        clLp.leftMargin = dp(14);
+        close.setLayoutParams(clLp);
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dismissLightCodeStage();
+            }
+        });
+        btns.addView(close);
+        col.addView(btns);
+        lightStageRoot.addView(col);
+        lightStageRoot.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        dismissLightCodeStage();
+                    }
+                });
+        WindowManager.LayoutParams lp = new WindowManager
+                .LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                        WindowManager.LayoutParams
+                                .FLAG_LAYOUT_IN_SCREEN
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT);
+        lp.setTitle("flymebobo-lightstage");
+        lp.screenBrightness = 1f;
+        try {
+            wm.addView(lightStageRoot, lp);
+        } catch (Throwable t) {
+            lightStageRoot = null;
+            return;
+        }
+        FileLog.i("Light code stage pkg=" + d.pkg
+                + " masked=" + masked);
+    }
+
+    private void dismissLightCodeStage() {
+        if (lightStageRoot != null && wm != null) {
+            try {
+                wm.removeViewImmediate(lightStageRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        lightStageRoot = null;
+    }
+
+    /** v564: 从收纳栈摘一条（引用或同 key）。摘到才刷新。 */
+    private boolean lightRemove(NotifData d) {
+        if (d == null) {
+            return false;
+        }
+        boolean removed = false;
+        java.util.Iterator<NotifData> it = lightStack.iterator();
+        while (it.hasNext()) {
+            NotifData o = it.next();
+            if (o == d || (o != null && d.key != null
+                    && d.key.equals(o.key))) {
+                it.remove();
+                removed = true;
+                break;
+            }
+        }
+        if (removed) {
+            FileLog.i("Light remove pkg=" + d.pkg
+                    + " n=" + lightStack.size());
+            refreshLightDot();
+            if (lightPanelAdded && !lightPanelRecallMode) {
+                rebuildLightPanelRows();
+            }
+            writeLightMirror();
+        }
+        return removed;
+    }
+
+    /** v564: 轻气泡版入回看——与经典 pushRecall 同栈同口径
+     * （同 key 去重、上限 RECALL_MAX、armRecallTimer 统一
+     * 过期），只是闸门换成 lightMode（经典回看胶囊开关关着
+     * 时轻气泡的「时光机」照样工作，面板里读的是同一个
+     * recallStack）。排除类型与 pushRecall 一致。 */
+    private void lightPushRecall(NotifData d) {
+        if (d == null || !FeatureFlags.lightMode || d.recalled) {
+            return;
+        }
+        if (d.isMusic || d.isDownload || d.isLive || d.isNavi
+                || d.isBus || d.isCall) {
+            return;
+        }
+        if (d.key != null) {
+            java.util.Iterator<NotifData> it =
+                    recallStack.iterator();
+            while (it.hasNext()) {
+                NotifData o = it.next();
+                if (o != null && d.key.equals(o.key)) {
+                    it.remove();
+                }
+            }
+        }
+        recallStack.addFirst(d);
+        while (recallStack.size() > RECALL_MAX) {
+            recallStack.removeLast();
+        }
+        FileLog.i("Light recall push pkg=" + d.pkg
+                + " n=" + recallStack.size());
+        armRecallTimer();
+        refreshRecallHandle();
+        if (lightPanelAdded && lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        }
+        writeLightMirror();
+    }
+
+    /** v564: 点行打开应用——先试通知自带的 contentIntent
+     * （通知已被系统侧撤除时它会被回收、send 抛异常），
+     * 失效就拉起该应用主界面兜底（试验田 v0.2 定版口径）。
+     * v571: 打开方式是通用元素（wei 定）——不再裸 send /
+     * 裸 startActivity，改走经典同款打开通道（openPending
+     * Intent / openIntent），小窗还是全屏看通用设置
+     * miniwindow（默认小窗）。 */
+    private void lightFireOpen(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        if (d.contentIntent != null) {
+            boolean ok = false;
+            try {
+                ok = openPendingIntent(d.contentIntent, d.pkg,
+                        FeatureFlags.miniwindow);
+            } catch (Throwable ignored) {
+            }
+            if (ok) {
+                FileLog.i("Light open pkg=" + d.pkg
+                        + " via=pi mini="
+                        + FeatureFlags.miniwindow);
+                return;
+            }
+            FileLog.i("Light open FAIL pkg=" + d.pkg + " pi");
+        }
+        String pkg = lightDisplayPkg(d);
+        try {
+            android.content.Intent launch =
+                    app.getPackageManager()
+                            .getLaunchIntentForPackage(pkg);
+            if (launch != null
+                    && openIntent(launch,
+                            FeatureFlags.miniwindow)) {
+                FileLog.i("Light open pkg=" + d.pkg
+                        + " via=launch mini="
+                        + FeatureFlags.miniwindow);
+                return;
+            }
+            FileLog.i("Light open FAIL pkg=" + d.pkg
+                    + " launch");
+        } catch (Throwable t) {
+            FileLog.i("Light open FAIL pkg=" + d.pkg
+                    + " launch: " + t);
+        }
+    }
+
+    /** v575: 点开的就是正在闪的那条 → 立即停闪收回
+     * （wei：新通知点开后立即收纳、不要再继续闪烁）。
+     * 主药丸走 pulse 收尾，副药丸走 sub 收尾，各自会把
+     * 小签/呼吸点按当前栈状态摆正。 */
+    private void stopLightFlashFor(NotifData d) {
+        if (d == null || d.key == null) {
+            return;
+        }
+        if (d.key.equals(lightFlashKey)) {
+            handler.removeCallbacks(lightPulseEndRunnable);
+            lightPulseEndRunnable.run();
+            FileLog.i("Light flash stop on open pkg=" + d.pkg);
+        }
+        if (d.key.equals(lightSubFlashKey)) {
+            lightSubEndRunnable.run();
+            FileLog.i("Light subflash stop on open pkg="
+                    + d.pkg);
+        }
+    }
+
+    /** v564: 面板点行（收纳视图）：出栈 → 进时光机 → 开应用。 */
+    private void lightOpenItem(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        stopLightFlashFor(d);
+        lightRemove(d);
+        lightPushRecall(d);
+        dismissLightPanel();
+        lightFireOpen(d);
+    }
+
+    /** v575: App 收纳页点行（广播按 key 转入）——与面板
+     * 点行完全同路：出栈、进时光机、停闪、按打开方式开。 */
+    public void lightOpenByKey(final String key) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (key == null) {
+                    return;
+                }
+                for (NotifData d : lightStack) {
+                    if (key.equals(d.key)) {
+                        lightOpenItem(d);
+                        return;
+                    }
+                }
+                FileLog.i("Light openByKey miss");
+            }
+        });
+    }
+
+    /** v575: App 时光机页点行（广播按 key 转入）。 */
+    public void lightRecallOpenByKey(final String key) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (key == null) {
+                    return;
+                }
+                for (NotifData d : recallStack) {
+                    if (key.equals(d.key)) {
+                        lightRecallOpen(d);
+                        return;
+                    }
+                }
+                FileLog.i("Light recallOpenByKey miss");
+            }
+        });
+    }
+
+    /** v564: 时光机点行：出回看栈 → 开应用（不再二次入栈）。 */
+    private void lightRecallOpen(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        recallStack.remove(d);
+        FileLog.i("Light recall pop pkg=" + d.pkg
+                + " left=" + recallStack.size());
+        armRecallTimer();
+        refreshRecallHandle();
+        writeLightMirror();
+        dismissLightPanel();
+        lightFireOpen(d);
+    }
+
+    /** v564: 时光机左滑：彻底删除，不再回来。 */
+    private void lightRecallDrop(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        if (recallStack.remove(d)) {
+            FileLog.i("Light recall drop pkg=" + d.pkg
+                    + " left=" + recallStack.size());
+            armRecallTimer();
+            refreshRecallHandle();
+            if (lightPanelAdded) {
+                if (recallStack.isEmpty()
+                        && lightPanelRecallMode) {
+                    lightPanelRecallMode = false;
+                }
+                rebuildLightPanelRows();
+            }
+            writeLightMirror();
+        }
+    }
+
+    /** v564: 全部清除——逐条进时光机（栈序），再清栈。 */
+    private void lightClearAll() {
+        if (lightStack.isEmpty()) {
+            return;
+        }
+        java.util.ArrayList<NotifData> copy =
+                new java.util.ArrayList<>(lightStack);
+        lightStack.clear();
+        for (NotifData d : copy) {
+            lightPushRecall(d);
+        }
+        FileLog.i("Light clearAll -> recall n="
+                + recallStack.size());
+        refreshLightDot();
+        if (lightPanelAdded) {
+            rebuildLightPanelRows();
+        }
+        writeLightMirror();
+    }
+
+    /** v564: 模式开关翻动（XposedEntry 转发）——开：小签按
+     * 当前栈/音乐状态刷新；在屏的经典胶囊不强拆（几秒内
+     * 自然消散，新通知从此走收纳）。关：面板与小签立即收，
+     * 音乐状态清掉（音乐通知回到经典路径）；收纳栈保留，
+     * 下次开启接着用。 */
+    public void onLightModeChanged(final boolean on) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                FileLog.i("Light mode changed -> " + on);
+                if (on) {
+                    refreshLightDot();
+                    // v565: 开轻气泡的瞬间，经典回看边缘
+                    // 签若正挂着要立即摘掉。
+                    refreshRecallHandle();
+                    // v572: 刚开轻气泡先把镜像刷一份，
+                    // App 三栏打开就有现成内容。
+                    writeLightMirror();
+                } else {
+                    dismissLightPanel();
+                    hideLightDot();
+                    String lightGoneKey = lightMusicData != null
+                            ? lightMusicData.key : null;
+                    lightMusicData = null;
+                    // v576: 下载表也清掉，切回轻气泡不复活
+                    // 旧下载卡（进行中的下载会重新到达）。
+                    lightDownloads.clear();
+                    lightMusicArt = null;
+                    lightMusicPlaying = false;
+                    lightMusicFavorite = false;
+                    lightMusicHasFavorite = false;
+                    if (lightLyricFollow) {
+                        lightLyricFollow = false;
+                        FileLog.i("Light lyric off");
+                        sendLightLyricListen(false,
+                                lightGoneKey);
+                    }
+                }
+            }
+        });
+    }
+    /** v564: 小签显隐总闸（试验田定版口径）：轻气泡关 /
+     * 栈空且无音乐 → 全隐藏；灭屏 → 隐藏；其余出签并
+     * 呼吸。v565: 锁屏不再挡——小签与面板窗口都是
+     * TYPE_SYSTEM_ERROR，与经典胶囊同在锁屏之上，锁屏上
+     * 也要能显示/打开（音乐卡控制、面板查看都可用；点行
+     * 打开应用在锁屏上按系统规矩走解锁流程）。屏状态
+     * 变化由 setScreenOn / 解锁广播顺带调。 */
+    public void refreshLightDot() {
+        if (app == null || wm == null) {
+            return;
+        }
+        if (!FeatureFlags.lightMode) {
+            hideLightDot();
+            if (lightPanelAdded) {
+                dismissLightPanel();
+            }
+            return;
+        }
+        if (lightStack.isEmpty() && lightMusicData == null
+                && lightDownloads.isEmpty()) {
+            hideLightDot();
+            if (lightPanelAdded) {
+                dismissLightPanel();
+            }
+            return;
+        }
+        if (!isScreenInteractive()) {
+            hideLightDot();
+            if (lightPanelAdded) {
+                dismissLightPanel();
+            }
+            return;
+        }
+        ensureLightDot();
+        if (!lightDotAdded && lightDotRoot != null) {
+            try {
+                wm.addView(lightDotRoot, lightDotParams);
+                lightDotAdded = true;
+            } catch (Throwable ignored) {
+            }
+        }
+        applyLightDotPos();
+        updateLightBadge();
+        startLightBreathing();
+        syncLightGlow();
+    }
+
+    // v591: 呼吸灯边缘发光——独立小窗（不触摸、只发
+    // 光）：径向渐变光晕贴在小签所在的屏幕边缘，透明
+    // 度跟呼吸动画同拍，放歌时颜色跟签一起流转。
+    private View lightGlowRoot;
+    private GradientDrawable lightGlowBg;
+    private WindowManager.LayoutParams lightGlowParams;
+    private boolean lightGlowAdded;
+
+    private void ensureLightGlow() {
+        if (lightGlowRoot != null) {
+            return;
+        }
+        lightGlowBg = new GradientDrawable();
+        lightGlowBg.setGradientType(
+                GradientDrawable.RADIAL_GRADIENT);
+        lightGlowBg.setGradientRadius(dp(80));
+        lightGlowBg.setColors(new int[]{
+                Color.argb(165, 59, 130, 246),
+                Color.argb(0, 59, 130, 246)});
+        lightGlowRoot = new View(app);
+        lightGlowRoot.setBackground(lightGlowBg);
+        lightGlowParams = new WindowManager.LayoutParams(
+                dp(84), dp(170),
+                WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams
+                                .FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams
+                                .FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        lightGlowParams.setTitle("flymebobo-lightglow");
+    }
+
+    private void applyLightGlowPos() {
+        if (lightGlowRoot == null || lightGlowParams == null
+                || lightDotParams == null) {
+            return;
+        }
+        boolean right = FeatureFlags.lightDotRight();
+        lightGlowParams.gravity = (right ? Gravity.END
+                : Gravity.START) | Gravity.TOP;
+        lightGlowParams.y = lightDotParams.y + dp(19) - dp(85);
+        lightGlowBg.setGradientCenter(right ? 1f : 0f, 0.5f);
+        if (!lightMusicPlaying) {
+            lightGlowBg.setColors(new int[]{
+                    Color.argb(165, 59, 130, 246),
+                    Color.argb(0, 59, 130, 246)});
+        }
+        if (lightGlowAdded && wm != null) {
+            try {
+                wm.updateViewLayout(lightGlowRoot,
+                        lightGlowParams);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void syncLightGlow() {
+        if (!FeatureFlags.lightDotGlow || !lightDotAdded
+                || app == null || wm == null) {
+            removeLightGlow();
+            return;
+        }
+        ensureLightGlow();
+        applyLightGlowPos();
+        if (!lightGlowAdded && lightGlowRoot != null) {
+            try {
+                wm.addView(lightGlowRoot, lightGlowParams);
+                lightGlowAdded = true;
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void removeLightGlow() {
+        if (lightGlowAdded && lightGlowRoot != null
+                && wm != null) {
+            try {
+                wm.removeViewImmediate(lightGlowRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        lightGlowAdded = false;
+    }
+
+    private void hideLightDot() {
+        removeLightGlow();
+        handler.removeCallbacks(lightPulseEndRunnable);
+        dismissLightSubPill();
+        lightPulsing = false;
+        lightFlashKey = null;
+        if (lightBreath != null) {
+            try {
+                lightBreath.cancel();
+            } catch (Throwable ignored) {
+            }
+            lightBreath = null;
+        }
+        if (lightDotAdded && lightDotRoot != null && wm != null) {
+            try {
+                wm.removeViewImmediate(lightDotRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        lightDotAdded = false;
+    }
+
+    /** v564: 建小签窗口：贴边竖签（13×38dp）+ 到达药丸
+     * （图标+应用名）+ 红角标，窗口参数与已移除的收纳点
+     * 同款（TYPE_SYSTEM_ERROR、不可聚焦）。 */
+    private void ensureLightDot() {
+        if (lightDotRoot != null) {
+            return;
+        }
+        lightDotRoot = new FrameLayout(app);
+        lightDotBody = new android.widget.LinearLayout(app);
+        lightDotBody.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        lightDotBody.setGravity(Gravity.CENTER_VERTICAL);
+        lightDotRoot.addView(lightDotBody, new FrameLayout
+                .LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT));
+        // 竖签。
+        lightTabBg = new GradientDrawable();
+        lightTabBg.setColor(Color.rgb(59, 130, 246));
+        lightDotTab = new View(app);
+        lightDotTab.setBackground(lightTabBg);
+        android.widget.LinearLayout.LayoutParams tabLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(13), dp(38));
+        lightDotTab.setLayoutParams(tabLp);
+        lightDotBody.addView(lightDotTab);
+        // 到达药丸：深底圆角，应用图标 18dp + 应用名。
+        lightPill = new android.widget.LinearLayout(app);
+        lightPill.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        lightPill.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable pillBg = new GradientDrawable();
+        // v572: 白色模式白底 + 黑色描边。
+        if (lpWhite()) {
+            pillBg.setColor(Color.argb(245, 255, 255, 255));
+            pillBg.setStroke(dp(1), Color.BLACK);
+        } else {
+            pillBg.setColor(Color.argb(240, 20, 24, 38));
+        }
+        pillBg.setCornerRadius(dp(999));
+        lightPill.setBackground(pillBg);
+        lightPill.setPadding(dp(8), dp(5), dp(10), dp(5));
+        lightPill.setVisibility(View.GONE);
+        lightPillIcon = new android.widget.ImageView(app);
+        android.widget.LinearLayout.LayoutParams icLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(18), dp(18));
+        lightPillIcon.setLayoutParams(icLp);
+        lightPill.addView(lightPillIcon);
+        lightPillLabel = new android.widget.TextView(app);
+        lightPillLabel.setTextColor(lpWhite()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
+        lightPillLabel.setTextSize(11);
+        lightPillLabel.setSingleLine(true);
+        lightPillLabel.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        lightPillLabel.setMaxWidth(dp(110));
+        android.widget.LinearLayout.LayoutParams lbLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        lbLp.leftMargin = dp(5);
+        lightPillLabel.setLayoutParams(lbLp);
+        lightPill.addView(lightPillLabel);
+        // v569: 药丸列（竖排）：主药丸在上（歌词/普通到达），
+        // 副药丸在下——放歌开词时新通知在歌词下面闪。
+        lightPillCol = new android.widget.LinearLayout(app);
+        lightPillCol.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        lightPillCol.addView(lightPill);
+        lightSubPill = new android.widget.LinearLayout(app);
+        lightSubPill.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        lightSubPill.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable subBg = new GradientDrawable();
+        if (lpWhite()) {
+            subBg.setColor(Color.argb(245, 255, 255, 255));
+            subBg.setStroke(dp(1), Color.BLACK);
+        } else {
+            subBg.setColor(Color.argb(240, 20, 24, 38));
+        }
+        subBg.setCornerRadius(dp(999));
+        lightSubPill.setBackground(subBg);
+        lightSubPill.setPadding(dp(8), dp(5), dp(10), dp(5));
+        lightSubPill.setVisibility(View.GONE);
+        android.widget.LinearLayout.LayoutParams subLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        subLp.topMargin = dp(6);
+        lightSubPill.setLayoutParams(subLp);
+        lightSubPillIcon = new android.widget.ImageView(app);
+        lightSubPillIcon.setLayoutParams(
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(18), dp(18)));
+        lightSubPill.addView(lightSubPillIcon);
+        lightSubPillLabel = new android.widget.TextView(app);
+        lightSubPillLabel.setTextColor(lpWhite()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
+        lightSubPillLabel.setTextSize(11);
+        lightSubPillLabel.setSingleLine(true);
+        lightSubPillLabel.setEllipsize(
+                android.text.TextUtils.TruncateAt.END);
+        lightSubPillLabel.setMaxWidth(dp(110));
+        android.widget.LinearLayout.LayoutParams subLbLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        subLbLp.leftMargin = dp(5);
+        lightSubPillLabel.setLayoutParams(subLbLp);
+        lightSubPill.addView(lightSubPillLabel);
+        lightPillCol.addView(lightSubPill);
+        lightDotBody.addView(lightPillCol);
+        // 角标：恒红，白字加粗（与收纳点同款）。
+        lightBadge = new android.widget.TextView(app);
+        GradientDrawable badgeBg = new GradientDrawable();
+        badgeBg.setColor(Color.rgb(239, 68, 68));
+        badgeBg.setCornerRadius(dp(999));
+        lightBadge.setBackground(badgeBg);
+        lightBadge.setTextColor(Color.WHITE);
+        lightBadge.setTextSize(9);
+        lightBadge.setTypeface(android.graphics.Typeface
+                .DEFAULT_BOLD);
+        lightBadge.setGravity(Gravity.CENTER);
+        lightBadge.setMinWidth(dp(15));
+        lightBadge.setPadding(dp(3), 0, dp(3), 0);
+        FrameLayout.LayoutParams badgeLp = new FrameLayout
+                .LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        dp(15));
+        lightBadge.setLayoutParams(badgeLp);
+        lightBadge.setVisibility(View.GONE);
+        lightDotRoot.addView(lightBadge);
+        // 触摸：轻点开面板、按住竖拖改档位（95b7303 两点同款）。
+        lightDotRoot.setOnTouchListener(
+                new View.OnTouchListener() {
+                    private float downRawY;
+                    private float downRawX;
+                    private int startY;
+                    private long downAt;
+                    private boolean dragging;
+
+                    @Override
+                    public boolean onTouch(View v,
+                            android.view.MotionEvent e) {
+                        if (lightDotParams == null) {
+                            return false;
+                        }
+                        switch (e.getAction()) {
+                            case android.view.MotionEvent
+                                    .ACTION_DOWN:
+                                downRawY = e.getRawY();
+                                downRawX = e.getRawX();
+                                startY = lightDotParams.y;
+                                downAt = System.currentTimeMillis();
+                                dragging = false;
+                                return true;
+                            case android.view.MotionEvent
+                                    .ACTION_MOVE: {
+                                float dy = e.getRawY() - downRawY;
+                                if (!dragging
+                                        && Math.abs(dy) > dp(8)) {
+                                    dragging = true;
+                                    handler.removeCallbacks(
+                                            lightPulseEndRunnable);
+                                    lightPulsing = false;
+                                    dismissLightSubPill();
+                                    if (lightPill != null) {
+                                        lightPill.setVisibility(
+                                                View.GONE);
+                                    }
+                                    if (lightDotTab != null) {
+                                        lightDotTab.setVisibility(
+                                                View.VISIBLE);
+                                    }
+                                    if (lightPanelAdded) {
+                                        dismissLightPanel();
+                                    }
+                                }
+                                if (dragging) {
+                                    int h = app.getResources()
+                                            .getDisplayMetrics()
+                                            .heightPixels;
+                                    int ny = startY
+                                            + Math.round(dy);
+                                    if (ny < 0) {
+                                        ny = 0;
+                                    }
+                                    if (ny > h - dp(38)) {
+                                        ny = h - dp(38);
+                                    }
+                                    lightDotParams.y = ny;
+                                    if (lightDotAdded) {
+                                        try {
+                                            wm.updateViewLayout(
+                                                    lightDotRoot,
+                                                    lightDotParams);
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                }
+                                return true;
+                            }
+                            case android.view.MotionEvent
+                                    .ACTION_UP:
+                            case android.view.MotionEvent
+                                    .ACTION_CANCEL: {
+                                boolean wasDrag = dragging;
+                                dragging = false;
+                                if (wasDrag) {
+                                    persistLightPosFromDrag();
+                                } else if (e.getAction()
+                                        == android.view.MotionEvent
+                                                .ACTION_UP
+                                        && System.currentTimeMillis()
+                                                - downAt < 400
+                                        && Math.abs(e.getRawY()
+                                                - downRawY) < dp(10)
+                                        && Math.abs(e.getRawX()
+                                                - downRawX) < dp(10)) {
+                                    if (lightPanelAdded) {
+                                        dismissLightPanel();
+                                    } else {
+                                        showLightPanel();
+                                    }
+                                }
+                                return true;
+                            }
+                            default:
+                                return true;
+                        }
+                    }
+                });
+        lightDotParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT, dp(38),
+                WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams
+                                .FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        lightDotParams.setTitle("flymebobo-lightdot");
+        applyLightDotPos();
+    }
+
+    /** v564: 按 FeatureFlags.lightDotPos 落小签位置：贴边
+     * 方向、档位高度、签的圆角朝向、药丸/角标的左右顺序。 */
+    private void applyLightDotPos() {
+        if (lightDotRoot == null || lightDotParams == null) {
+            return;
+        }
+        boolean right = FeatureFlags.lightDotRight();
+        int h = app.getResources().getDisplayMetrics()
+                .heightPixels;
+        lightDotParams.gravity = (right ? Gravity.END
+                : Gravity.START) | Gravity.TOP;
+        // v588: body 与角标在根里的水平贴边方向跟随左右
+        // ——根宽由最宽子view 定：药丸藏着时角标（约
+        // 21dp）比竖签（13dp）宽，body 默认靠左停放，
+        // 右侧模式下竖签就被顶得离右边缘约 8dp（wei：
+        // 「选右边的时候好像没有贴边」）。两侧都把
+        // body/角标钉到外侧，竖签才真正贴边。
+        if (lightDotBody != null) {
+            android.widget.FrameLayout.LayoutParams blp =
+                    (android.widget.FrameLayout.LayoutParams)
+                            lightDotBody.getLayoutParams();
+            if (blp != null) {
+                blp.gravity = Gravity.TOP
+                        | (right ? Gravity.END : Gravity.START);
+                lightDotBody.setLayoutParams(blp);
+            }
+        }
+        if (lightBadge != null) {
+            android.widget.FrameLayout.LayoutParams glp =
+                    (android.widget.FrameLayout.LayoutParams)
+                            lightBadge.getLayoutParams();
+            if (glp != null) {
+                glp.gravity = Gravity.TOP
+                        | (right ? Gravity.END : Gravity.START);
+                lightBadge.setLayoutParams(glp);
+            }
+        }
+        lightDotParams.y = Math.round(
+                h * FeatureFlags.lightDotYFrac());
+        // body 子顺序：贴左=[签,药丸列]，贴右=[药丸列,签]。
+        if (lightPillCol != null) {
+            lightPillCol.setGravity(
+                    right ? Gravity.END : Gravity.START);
+        }
+        if (lightDotBody != null && lightDotTab != null
+                && lightPillCol != null) {
+            int tabIdx = lightDotBody.indexOfChild(lightDotTab);
+            int pillIdx = lightDotBody.indexOfChild(lightPillCol);
+            if ((!right && tabIdx > pillIdx)
+                    || (right && tabIdx < pillIdx)) {
+                lightDotBody.removeView(lightDotTab);
+                lightDotBody.removeView(lightPillCol);
+                if (right) {
+                    lightDotBody.addView(lightPillCol);
+                    lightDotBody.addView(lightDotTab);
+                } else {
+                    lightDotBody.addView(lightDotTab);
+                    lightDotBody.addView(lightPillCol);
+                }
+            }
+        }
+        // 签只圆内侧两角。
+        if (lightTabBg != null) {
+            float r = dp(9);
+            if (right) {
+                lightTabBg.setCornerRadii(new float[]{
+                        r, r, 0, 0, 0, 0, r, r});
+            } else {
+                lightTabBg.setCornerRadii(new float[]{
+                        0, 0, r, r, r, r, 0, 0});
+            }
+            if (!lightMusicPlaying) {
+                lightTabBg.setColor(Color.rgb(59, 130, 246));
+            }
+        }
+        // 角标贴签的外上角。
+        if (lightBadge != null) {
+            FrameLayout.LayoutParams blp = (FrameLayout
+                    .LayoutParams) lightBadge.getLayoutParams();
+            blp.gravity = Gravity.TOP
+                    | (right ? Gravity.END : Gravity.START);
+            if (right) {
+                blp.rightMargin = dp(5);
+                blp.leftMargin = 0;
+            } else {
+                blp.leftMargin = dp(5);
+                blp.rightMargin = 0;
+            }
+            blp.topMargin = 0;
+            lightBadge.setLayoutParams(blp);
+        }
+        if (lightDotAdded) {
+            try {
+                wm.updateViewLayout(lightDotRoot, lightDotParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        // v591: 光晕跟着小签走（拖动/换边/换档位）。
+        if (lightGlowAdded) {
+            applyLightGlowPos();
+        }
+    }
+
+    /** v564: 拖动松手吸附最近档（只改档位不改边，同两点
+     * 口径）→ 本地先改 FeatureFlags，再发广播让 App 进程
+     * 落盘并回推（ACTION_SET_LIGHT_DOT_POS）。 */
+    private void persistLightPosFromDrag() {
+        if (lightDotParams == null) {
+            return;
+        }
+        int h = app.getResources().getDisplayMetrics()
+                .heightPixels;
+        float centerFrac = h > 0
+                ? (lightDotParams.y + dp(19)) / (float) h : 0.46f;
+        int band = centerFrac < 0.31f ? 0
+                : (centerFrac < 0.59f ? 1 : 2);
+        String pos = (FeatureFlags.lightDotRight() ? "R" : "L")
+                + band;
+        FeatureFlags.lightDotPos = pos;
+        FileLog.i("Light pos drag -> " + pos);
+        applyLightDotPos();
+        try {
+            Intent intent = new Intent(
+                    NotificationService.ACTION_SET_LIGHT_DOT_POS);
+            intent.setPackage("com.chenan.flymebobo");
+            intent.putExtra("pos", pos);
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void updateLightBadge() {
+        if (lightBadge == null) {
+            return;
+        }
+        int n = lightStack.size();
+        if (n <= 0) {
+            lightBadge.setVisibility(View.GONE);
+            return;
+        }
+        lightBadge.setText(n > 9 ? "9+" : String.valueOf(n));
+        lightBadge.setVisibility(View.VISIBLE);
+    }
+
+    /** v564: 呼吸（约 3.2 秒一周期）；音乐播放时签底色随
+     * 色相流转（约 9 秒一圈，试验田 v0.7 口径），与呼吸
+     * 同拍。 */
+    private void startLightBreathing() {
+        if (lightDotBody == null) {
+            return;
+        }
+        if (lightBreath != null && lightBreath.isRunning()) {
+            return;
+        }
+        lightBreath = android.animation.ValueAnimator.ofFloat(
+                0.25f, 1f);
+        lightBreath.setDuration(1600);
+        lightBreath.setRepeatCount(
+                android.animation.ValueAnimator.INFINITE);
+        lightBreath.setRepeatMode(
+                android.animation.ValueAnimator.REVERSE);
+        lightBreath.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        if (lightDotBody != null) {
+                            lightDotBody.setAlpha(
+                                    (Float) a.getAnimatedValue());
+                        }
+                        // v591: 光晕同拍——透明度跟签身，
+                        // 放歌时颜色跟签一起流转。
+                        if (lightGlowRoot != null
+                                && lightGlowAdded) {
+                            lightGlowRoot.setAlpha(
+                                    (Float) a.getAnimatedValue());
+                        }
+                        if (lightMusicPlaying
+                                && lightTabBg != null) {
+                            float hue = (System
+                                    .currentTimeMillis() % 9000L)
+                                    / 9000f * 360f;
+                            int hc = Color.HSVToColor(
+                                    new float[]{hue, 0.55f,
+                                            0.95f});
+                            lightTabBg.setColor(hc);
+                            if (lightGlowBg != null
+                                    && lightGlowAdded) {
+                                lightGlowBg.setColors(new int[]{
+                                        Color.argb(165,
+                                                Color.red(hc),
+                                                Color.green(hc),
+                                                Color.blue(hc)),
+                                        Color.argb(0,
+                                                Color.red(hc),
+                                                Color.green(hc),
+                                                Color.blue(hc))});
+                            }
+                        }
+                    }
+                });
+        lightBreath.start();
+    }
+
+    /** v564: 到达药丸——展开成最新一条来源的「真实图标+
+     * 应用名」，跟着呼吸闪约 3.5 个周期（11200ms）后落回
+     * 小点；新到达直接换脸并重置计时（永远只显示最新）。 */
+    private void flashLightPill(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        // v577: wei 改规矩——不再歌词/通知同时显示（原
+        // v569 副药丸方案作废）：新通知直接上主药丸闪，
+        // 歌词给通知让路，通知闪完收纳后歌词再回来（见
+        // lightPulseEndRunnable 的续显）。
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null) {
+            return;
+        }
+        String dpkg = lightDisplayPkg(d);
+        android.graphics.drawable.Drawable icon =
+                lightAppIcon(dpkg, d);
+        if (icon != null) {
+            lightPillIcon.setImageDrawable(icon);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightPillIcon.setVisibility(View.GONE);
+        }
+        setLightPillLyricMode(false);
+        // v591: 带码通知的药丸直接闪码（预览口径）——
+        // 「验证码 834201」一眼看到；打码状态下只闪来
+        // 源应用，码不外露（PrivacyMask 同口径）。
+        if (d.code != null && !PrivacyMask.shouldMask(app)) {
+            lightPillLabel.setText((d.codeLabel != null
+                    ? d.codeLabel : "验证码") + " " + d.code);
+        } else {
+            lightPillLabel.setText(lightAppLabel(dpkg, d));
+        }
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightPulsing = true;
+        lightFlashKey = d.key;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+        FileLog.i("Light pill pkg=" + d.pkg
+                + (d.srcPkg != null ? " src=" + d.srcPkg : ""));
+    }
+
+    /** v569: 副药丸闪新通知——放歌开词时用：歌词留在主
+     * 药丸不被打断，新通知在它下面闪（图标+应用名，
+     * 透明度一明一暗地闪烁），约 3.5 个呼吸周期后收回
+     * =收纳完成（通知本体到达时已入栈、角标已计数）。
+     * 再来一条直接换脸并重置计时（永远只显示最新）。
+     * v577 起 wei 改规矩（歌词给通知让路、不同时显示），
+     * 到达不再走副药丸——本方法保留但已无调用方。 */
+    private void flashLightSubPill(NotifData d) {
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightSubPill == null || lightDotTab == null
+                || !lightDotAdded) {
+            return;
+        }
+        String dpkg = lightDisplayPkg(d);
+        android.graphics.drawable.Drawable icon =
+                lightAppIcon(dpkg, d);
+        if (icon != null) {
+            lightSubPillIcon.setImageDrawable(icon);
+            lightSubPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightSubPillIcon.setVisibility(View.GONE);
+        }
+        lightSubPillLabel.setText(lightAppLabel(dpkg, d));
+        lightSubPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightSubShowing = true;
+        lightSubFlashKey = d.key;
+        startLightSubBlink();
+        handler.removeCallbacks(lightSubEndRunnable);
+        handler.postDelayed(lightSubEndRunnable, 11200);
+        FileLog.i("Light subpill pkg=" + d.pkg
+                + (d.srcPkg != null ? " src=" + d.srcPkg : ""));
+    }
+
+    private void startLightSubBlink() {
+        stopLightSubBlink();
+        if (lightSubPill == null) {
+            return;
+        }
+        lightSubBlink = android.animation.ValueAnimator
+                .ofFloat(1f, 0.3f);
+        lightSubBlink.setDuration(800);
+        lightSubBlink.setRepeatCount(
+                android.animation.ValueAnimator.INFINITE);
+        lightSubBlink.setRepeatMode(
+                android.animation.ValueAnimator.REVERSE);
+        lightSubBlink.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        if (lightSubPill != null) {
+                            lightSubPill.setAlpha(
+                                    (Float) a.getAnimatedValue());
+                        }
+                    }
+                });
+        lightSubBlink.start();
+    }
+
+    private void stopLightSubBlink() {
+        if (lightSubBlink != null) {
+            try {
+                lightSubBlink.cancel();
+            } catch (Throwable ignored) {
+            }
+            lightSubBlink = null;
+        }
+        if (lightSubPill != null) {
+            lightSubPill.setAlpha(1f);
+        }
+    }
+
+    /** v569: 收起副药丸（闪完/拖动/关模式共用）。 */
+    private void dismissLightSubPill() {
+        handler.removeCallbacks(lightSubEndRunnable);
+        stopLightSubBlink();
+        lightSubShowing = false;
+        lightSubFlashKey = null;
+        if (lightSubPill != null) {
+            lightSubPill.setVisibility(View.GONE);
+        }
+    }
+    /** v564: 点小签开收纳面板（全局单浮层口径：先 closeOverlays
+     * 收掉菜单等）。场景中打开 = 只读（行点不动，防跳出游戏/
+     * 视频，wei 定）。 */
+    private void showLightPanel() {
+        if (app == null || wm == null
+                || !FeatureFlags.lightMode) {
+            return;
+        }
+        if (lightStack.isEmpty() && lightMusicData == null
+                && lightDownloads.isEmpty()) {
+            return;
+        }
+        // v589: 先抢下小签此刻的真实窗口 y——下面
+        // dismissLightPanel 带的 refresh 会把小签 y 按
+        // 档位重算，抢晚了面板又锚回档位位置。
+        final int dotLiveY = (lightDotParams != null
+                && lightDotAdded) ? lightDotParams.y : -1;
+        closeOverlays();
+        dismissLightPanel();
+        lightPanelRecallMode = false;
+        lightPanelReadOnly = sceneGuard != null
+                && sceneGuard.isSuppressed();
+        FileLog.i("Light panel open n=" + lightStack.size()
+                + " music=" + (lightMusicData != null)
+                + " readOnly=" + lightPanelReadOnly);
+        lightPanelRoot = new FrameLayout(app);
+        lightPanelBox = new android.widget.LinearLayout(app);
+        lightPanelBox.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable boxBg = new GradientDrawable();
+        // v567: 面板透明度/圆角走外观设置（lightPanelStyle）。
+        // v572: 白色模式白底 + 黑色描边（wei 定）。
+        int panelAlpha = Math.round(255f
+                * FeatureFlags.lightPanelAlphaPct() / 100f);
+        if (lpWhite()) {
+            boxBg.setColor(Color.argb(panelAlpha,
+                    255, 255, 255));
+            boxBg.setStroke(dp(2), Color.BLACK);
+        } else {
+            boxBg.setColor(Color.argb(panelAlpha, 20, 24, 38));
+        }
+        boxBg.setCornerRadius(
+                dp(FeatureFlags.lightPanelRadiusDp()));
+        lightPanelBox.setBackground(boxBg);
+        lightPanelBox.setPadding(dp(10), dp(10), dp(10),
+                dp(10));
+        boolean right = FeatureFlags.lightDotRight();
+        FrameLayout.LayoutParams boxLp = new FrameLayout
+                .LayoutParams(dp(FeatureFlags.lightPanelWidthDp()),
+                        FrameLayout.LayoutParams.WRAP_CONTENT);
+        boxLp.gravity = Gravity.TOP
+                | (right ? Gravity.END : Gravity.START);
+        // v589: 面板顶端锚小签的真实窗口 y（拖动后的实
+        // 际位置），不再按档位比例重算——两者不一致时
+        // 面板离小签老远（wei：「离呼吸灯也远」）。小
+        // 签不在时才回落到档位比例。
+        int anchorY = dotLiveY >= 0 ? dotLiveY
+                : Math.round(app.getResources()
+                        .getDisplayMetrics().heightPixels
+                        * FeatureFlags.lightDotYFrac());
+        boxLp.topMargin = Math.max(dp(24), anchorY - dp(30));
+        if (right) {
+            boxLp.rightMargin = dp(14);
+        } else {
+            boxLp.leftMargin = dp(14);
+        }
+        lightPanelBox.setLayoutParams(boxLp);
+        lightPanelRoot.addView(lightPanelBox);
+        // 点盒外关闭（根点击 + DOWN 落在盒外，v557 同款防漏关）。
+        lightPanelRoot.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dismissLightPanel();
+            }
+        });
+        lightPanelRoot.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v,
+                    android.view.MotionEvent e) {
+                if (e.getAction()
+                        == android.view.MotionEvent.ACTION_DOWN
+                        && lightPanelBox != null) {
+                    int[] loc = new int[2];
+                    lightPanelBox.getLocationOnScreen(loc);
+                    float x = e.getRawX();
+                    float y = e.getRawY();
+                    if (x < loc[0] || x > loc[0]
+                            + lightPanelBox.getWidth()
+                            || y < loc[1] || y > loc[1]
+                            + lightPanelBox.getHeight()) {
+                        dismissLightPanel();
+                        return true;
+                    }
+                }
+                return false;
+            }
+        });
+        WindowManager.LayoutParams lp = new WindowManager
+                .LayoutParams(
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.MATCH_PARENT,
+                        WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_IN_SCREEN
+                                | WindowManager.LayoutParams
+                                        .FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT);
+        lp.setTitle("flymebobo-lightpanel");
+        lightPanelLp = lp;
+        try {
+            wm.addView(lightPanelRoot, lp);
+            lightPanelAdded = true;
+        } catch (Throwable t) {
+            lightPanelRoot = null;
+            lightPanelBox = null;
+            lightPanelLp = null;
+            return;
+        }
+        rebuildLightPanelRows();
+        // 入场：从小签侧轻轻长出来（收纳面板同款）。
+        // v567: 终点缩放 = 外观设置的整体比例（默认 100%），
+        // 支点在小签侧上角，面板从小签那角长出来。
+        float styleScale = FeatureFlags.lightPanelScalePct()
+                / 100f;
+        lightPanelBox.setAlpha(0f);
+        lightPanelBox.setScaleX(0.96f * styleScale);
+        lightPanelBox.setScaleY(0.96f * styleScale);
+        // v589: 支点别读 getWidth()——刚 addView 还没布
+        // 局，读到的是 0，右侧模式支点落到左边缘，比例
+        // 一缩放面板整体往左漂、离小签更远。直接用
+        // LayoutParams 里写死的盒宽。
+        lightPanelBox.setPivotX(right ? boxLp.width : 0);
+        lightPanelBox.setPivotY(0);
+        lightPanelBox.animate().alpha(1f)
+                .scaleX(styleScale).scaleY(styleScale)
+                .setDuration(180)
+                .setInterpolator(
+                        new android.view.animation
+                                .DecelerateInterpolator())
+                .start();
+    }
+
+    /** v570: 轻气泡面板内嵌长按菜单（wei 定）——长按行后
+     * 菜单直接在面板里、被长按行下方展开，其他行被自然
+     * 挤开，不再走全屏浮层。再长按同一行收起；点任意条目
+     * 走 dismissMenu() 一并收起。条目与经典菜单共用
+     * buildMenuItems（轻气泡下自动少「这个应用以后收纳」、
+     * 「放入时光机」恒有）。 */
+    private void toggleLightInlineMenu(View row, final NotifData d) {
+        if (row == null || d == null
+                || !(row.getParent() instanceof android.view.ViewGroup)) {
+            return;
+        }
+        boolean same = lightInlineMenu != null && d.key != null
+                && d.key.equals(lightInlineForKey);
+        dismissMenu();
+        if (same) {
+            return;
+        }
+        try {
+            android.widget.LinearLayout menu =
+                    new android.widget.LinearLayout(app);
+            menu.setOrientation(
+                    android.widget.LinearLayout.VERTICAL);
+            menu.setPadding(dp(8), dp(8), dp(8), dp(8));
+            GradientDrawable mbg = new GradientDrawable();
+            // v572: 白色模式下内嵌菜单换浅底（在白面板里）。
+            if (lpWhite()) {
+                mbg.setColor(Color.argb(248, 248, 250, 252));
+                mbg.setStroke(dp(1), Color.rgb(226, 232, 240));
+            } else {
+                mbg.setColor(Color.argb(245, 24, 28, 40));
+            }
+            mbg.setCornerRadius(dp(16));
+            menu.setBackground(mbg);
+            android.widget.LinearLayout.LayoutParams mlp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            mlp.leftMargin = dp(2);
+            mlp.rightMargin = dp(2);
+            mlp.topMargin = dp(4);
+            mlp.bottomMargin = dp(6);
+            menu.setLayoutParams(mlp);
+            menuForLightPanel = true;
+            buildMenuItems(menu, d, actionsFor(d.key));
+            android.view.ViewGroup rows = (android.view.ViewGroup) row.getParent();
+            int idx = rows.indexOfChild(row);
+            if (idx < 0) {
+                return;
+            }
+            rows.addView(menu, idx + 1);
+            lightInlineMenu = menu;
+            lightInlineForKey = d.key;
+            // v574: 空间不够时面板自动拓展开，把菜单全露
+            // 出来（高度动画在 applyLightScrollCap 里）。
+            applyLightScrollCap();
+            FileLog.i("Light inline menu pkg=" + d.pkg);
+            menu.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (lightInlineMenu != null) {
+                        lightInlineMenu.requestRectangleOnScreen(
+                                new android.graphics.Rect(0, 0,
+                                        lightInlineMenu.getWidth(),
+                                        lightInlineMenu.getHeight()),
+                                false);
+                    }
+                }
+            });
+        } catch (Throwable t) {
+            FileLog.i("Light inline menu fail err=" + t);
+            lightInlineMenu = null;
+            lightInlineForKey = null;
+        }
+    }
+
+    /** v570: 收起内嵌菜单（摘视图 + 清回复框引用 + 面板
+     * 窗口恢复不可聚焦）。行数据的刷新由各动作自己的路径
+     * 负责（menuConsume → lightRemove 会重建面板行）。 */
+    private void collapseLightInlineMenu() {
+        if (lightInlineMenu == null) {
+            return;
+        }
+        android.view.ViewParent parent = lightInlineMenu.getParent();
+        if (parent instanceof android.view.ViewGroup) {
+            ((android.view.ViewGroup) parent).removeView(lightInlineMenu);
+        }
+        lightInlineMenu = null;
+        lightInlineForKey = null;
+        menuReplyBox = null;
+        menuReplyInput = null;
+        menuReplyError = null;
+        setLightPanelFocusable(false);
+        // v574: 菜单收起，面板高度缩回 N 行。
+        applyLightScrollCap();
+    }
+
+    /** v570: 面板窗口聚焦开关——平时不可聚焦（不抢输入
+     * 法），内嵌菜单的回复框展开时临时可聚焦，收起恢复。 */
+    private void setLightPanelFocusable(boolean focusable) {
+        if (!lightPanelAdded || lightPanelRoot == null
+                || lightPanelLp == null || wm == null) {
+            return;
+        }
+        int want = focusable
+                ? (lightPanelLp.flags
+                        & ~WindowManager.LayoutParams
+                                .FLAG_NOT_FOCUSABLE)
+                : (lightPanelLp.flags
+                        | WindowManager.LayoutParams
+                                .FLAG_NOT_FOCUSABLE);
+        if (lightPanelLp.flags == want) {
+            return;
+        }
+        lightPanelLp.flags = want;
+        try {
+            wm.updateViewLayout(lightPanelRoot, lightPanelLp);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void dismissLightPanel() {
+        dismissLightCodeStage();
+        handler.removeCallbacks(lightMusicTickRunnable);
+        handler.removeCallbacks(lightCodeTickRunnable);
+        lightInlineMenu = null;
+        lightInlineForKey = null;
+        lightPanelScroll = null;
+        lightPanelRows = null;
+        if (lightCapAnim != null) {
+            lightCapAnim.cancel();
+            lightCapAnim = null;
+        }
+        if (!lightPanelAdded || lightPanelRoot == null) {
+            lightPanelRoot = null;
+            lightPanelBox = null;
+            lightPanelLp = null;
+            lightPanelAdded = false;
+            return;
+        }
+        if (removeOverlayView(lightPanelRoot, "lightpanel")) {
+            lightPanelAdded = false;
+            lightPanelRoot = null;
+            lightPanelBox = null;
+            lightPanelLp = null;
+            lightMusicBar = null;
+            lightMusicTime = null;
+            lightMusicPlayBtn = null;
+            lightMusicFavBtn = null;
+            lightMusicLyricBtn = null;
+            lightMusicLyricView = null;
+        }
+    }
+
+    /** v564: 面板内容重建——音乐卡永远置顶（收纳视图），
+     * 其下头部计数 + 可滑列表（可视 5 条高）；底部时光机
+     * 入口。时光机视图是同一个盒换内容。 */
+    private void rebuildLightPanelRows() {
+        if (lightPanelBox == null || !lightPanelAdded) {
+            return;
+        }
+        // v570: 整表重建会丢弃内嵌菜单视图，引用先清掉。
+        lightInlineMenu = null;
+        lightInlineForKey = null;
+        lightPanelScroll = null;
+        lightPanelRows = null;
+        if (lightCapAnim != null) {
+            lightCapAnim.cancel();
+            lightCapAnim = null;
+        }
+        lightDlBars.clear();
+        lightDlTitles.clear();
+        lightDlTexts.clear();
+        lightDlPcts.clear();
+        lightCdTexts.clear();
+        lightCdFills.clear();
+        lightCdSpaces.clear();
+        lightCdDeadline.clear();
+        lightCdTotal.clear();
+        lightMusicBar = null;
+        lightMusicTime = null;
+        lightMusicPlayBtn = null;
+        lightMusicFavBtn = null;
+        lightMusicLyricBtn = null;
+        lightMusicLyricView = null;
+        lightPanelBox.removeAllViews();
+        if (lightPanelRecallMode) {
+            if (recallStack.isEmpty()) {
+                lightPanelRecallMode = false;
+            } else {
+                buildLightPanelHeader("时光机 "
+                        + recallStack.size() + " 条", "‹ 收纳",
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                lightPanelRecallMode = false;
+                                rebuildLightPanelRows();
+                            }
+                        });
+                android.widget.LinearLayout rows =
+                        new android.widget.LinearLayout(app);
+                rows.setOrientation(
+                        android.widget.LinearLayout.VERTICAL);
+                for (NotifData d : recallStack) {
+                    rows.addView(buildLightRow(d, true));
+                }
+                android.widget.ScrollView scroll =
+                        new android.widget.ScrollView(app);
+                scroll.addView(rows);
+                lightPanelScroll = scroll;
+                lightPanelRows = rows;
+                lightPanelBox.addView(scroll);
+                capLightScrollHeight(scroll, rows);
+                return;
+            }
+        }
+        if (lightStack.isEmpty() && lightMusicData == null
+                && lightDownloads.isEmpty()) {
+            dismissLightPanel();
+            hideLightDot();
+            return;
+        }
+        // 音乐卡永远置顶。
+        if (lightMusicData != null) {
+            lightPanelBox.addView(buildLightMusicCard());
+        }
+        // v591: 码卡片紧随音乐卡——带码的收纳条目（验
+        // 证码/取件码/取餐码）不再混在普通行里，在这
+        // 里成卡（大字码 + 复制/出示），下面的行列表
+        // 跳过它们。wei 预览点头后落地。
+        for (NotifData cd : lightStack) {
+            if (cd.code != null) {
+                lightPanelBox.addView(buildLightCodeCard(cd));
+            }
+        }
+        // v576: 下载卡在音乐卡之下、收纳列表之上。
+        for (NotifData dd : lightDownloads.values()) {
+            lightPanelBox.addView(buildLightDownloadCard(dd));
+        }
+        buildLightPanelHeader("收纳 " + lightStack.size() + " 条",
+                lightStack.isEmpty() ? null : "全部清除",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        lightClearAll();
+                    }
+                });
+        if (lightPanelReadOnly) {
+            android.widget.TextView hint =
+                    new android.widget.TextView(app);
+            hint.setText("场景中只能查看");
+            hint.setTextSize(11);
+            hint.setTextColor(lpFaintC());
+            hint.setPadding(dp(6), 0, dp(6), dp(4));
+            lightPanelBox.addView(hint);
+        }
+        android.widget.LinearLayout rows =
+                new android.widget.LinearLayout(app);
+        rows.setOrientation(android.widget.LinearLayout.VERTICAL);
+        for (NotifData d : lightStack) {
+            // v591: 带码的已在上面成卡，行里跳过。
+            if (d.code != null) {
+                continue;
+            }
+            rows.addView(buildLightRow(d, false));
+        }
+        android.widget.ScrollView scroll =
+                new android.widget.ScrollView(app);
+        scroll.addView(rows);
+        lightPanelScroll = scroll;
+        lightPanelRows = rows;
+        lightPanelBox.addView(scroll);
+        capLightScrollHeight(scroll, rows);
+        // 底部：时光机入口（回看在轻气泡里叫时光机）。
+        if (!recallStack.isEmpty()) {
+            android.widget.TextView entry =
+                    new android.widget.TextView(app);
+            entry.setText("时光机 " + recallStack.size()
+                    + " 条  ›");
+            entry.setTextSize(12);
+            entry.setTextColor(lpLinkC());
+            entry.setPadding(dp(6), dp(8), dp(6), dp(2));
+            entry.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    lightPanelRecallMode = true;
+                    rebuildLightPanelRows();
+                }
+            });
+            lightPanelBox.addView(entry);
+        }
+        if (lightMusicData != null) {
+            handler.removeCallbacks(lightMusicTickRunnable);
+            handler.postDelayed(lightMusicTickRunnable, 1000);
+        }
+        // v593: 有倒计时的码卡先刷一帧，再起每秒 tick。
+        if (!lightCdDeadline.isEmpty()) {
+            updateLightCountdowns();
+            handler.removeCallbacks(lightCodeTickRunnable);
+            handler.postDelayed(lightCodeTickRunnable, 1000);
+        }
+    }
+
+    private void buildLightPanelHeader(String left, String right,
+            View.OnClickListener rightClick) {
+        android.widget.LinearLayout head =
+                new android.widget.LinearLayout(app);
+        head.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(6), dp(2), dp(6), dp(6));
+        android.widget.TextView l =
+                new android.widget.TextView(app);
+        l.setText(left);
+        l.setTextSize(12);
+        l.setTextColor(lpFaintC());
+        head.addView(l, new android.widget.LinearLayout
+                .LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f));
+        if (right != null) {
+            android.widget.TextView r =
+                    new android.widget.TextView(app);
+            r.setText(right);
+            r.setTextSize(12.5f);
+            r.setTextColor("全部清除".equals(right)
+                    ? Color.rgb(248, 113, 113)
+                    : lpLinkC());
+            if (rightClick != null) {
+                r.setOnClickListener(rightClick);
+            }
+            head.addView(r);
+        }
+        lightPanelBox.addView(head);
+    }
+
+    /** v564: 列表可视高度封顶 5 条（试验田 v0.5 定版：拿
+     * 真实行高求和，不用估高；量不到延迟重试）。 */
+    private void capLightScrollHeight(
+            final android.widget.ScrollView scroll,
+            final android.widget.LinearLayout rows) {
+        scroll.post(new Runnable() {
+            private int tries;
+
+            @Override
+            public void run() {
+                // v570: 内嵌菜单不是通知行，量高时跳过它。
+                int totalRows = 0;
+                for (int i = 0; i < rows.getChildCount(); i++) {
+                    if (rows.getChildAt(i) != lightInlineMenu) {
+                        totalRows++;
+                    }
+                }
+                int n = Math.min(FeatureFlags.lightPanelRows(),
+                        totalRows);
+                if (n <= 0) {
+                    return;
+                }
+                int h = 0;
+                int counted = 0;
+                for (int i = 0; i < rows.getChildCount()
+                        && counted < n; i++) {
+                    View child = rows.getChildAt(i);
+                    if (child == lightInlineMenu) {
+                        continue;
+                    }
+                    h += child.getHeight();
+                    counted++;
+                }
+                if (h <= 0) {
+                    if (++tries <= 5) {
+                        scroll.postDelayed(this, 50);
+                    }
+                    return;
+                }
+                int total = rows.getHeight();
+                if (rows.getChildCount() > n && total > 0
+                        && h >= total) {
+                    h = total * n / rows.getChildCount();
+                }
+                android.view.ViewGroup.LayoutParams lp =
+                        scroll.getLayoutParams();
+                lp.height = h;
+                scroll.setLayoutParams(lp);
+            }
+        });
+    }
+
+    /** v574: 内嵌菜单展开/收起、回复框展开时重算滚动区
+     * 高度。菜单在场：可视高撑到「N 行 + 菜单整高」，菜单
+     * 一次全露出来，不用在小面板里再滑（wei 实测：只有
+     * 一条通知时长按，菜单被一行高的小面板裁得只剩第
+     * 一项）；上限屏高 72%，超了才滚。菜单不在场回到
+     * N 行高。高度变化带 180ms 动画，像被菜单撑开。 */
+    private void applyLightScrollCap() {
+        final android.widget.ScrollView scroll = lightPanelScroll;
+        final android.widget.LinearLayout rows = lightPanelRows;
+        if (scroll == null || rows == null || !lightPanelAdded) {
+            return;
+        }
+        scroll.post(new Runnable() {
+            private int tries;
+
+            @Override
+            public void run() {
+                if (lightPanelScroll != scroll) {
+                    return;
+                }
+                int n = FeatureFlags.lightPanelRows();
+                int h = 0;
+                int counted = 0;
+                for (int i = 0; i < rows.getChildCount()
+                        && counted < n; i++) {
+                    View child = rows.getChildAt(i);
+                    if (child == lightInlineMenu) {
+                        continue;
+                    }
+                    h += child.getHeight();
+                    counted++;
+                }
+                if (h <= 0) {
+                    if (++tries <= 5) {
+                        scroll.postDelayed(this, 50);
+                    }
+                    return;
+                }
+                int target = h;
+                if (lightInlineMenu != null) {
+                    int mh = lightInlineMenu.getHeight();
+                    if (mh <= 0) {
+                        if (++tries <= 5) {
+                            scroll.postDelayed(this, 50);
+                        }
+                        return;
+                    }
+                    android.view.ViewGroup.LayoutParams mlp =
+                            lightInlineMenu.getLayoutParams();
+                    if (mlp instanceof android.view.ViewGroup
+                            .MarginLayoutParams) {
+                        android.view.ViewGroup.MarginLayoutParams
+                                m2 = (android.view.ViewGroup
+                                        .MarginLayoutParams) mlp;
+                        mh += m2.topMargin + m2.bottomMargin;
+                    }
+                    target = h + mh;
+                }
+                int maxH = (int) (app.getResources()
+                        .getDisplayMetrics().heightPixels * 0.72f);
+                if (target > maxH) {
+                    target = maxH;
+                }
+                final android.view.ViewGroup.LayoutParams lp =
+                        scroll.getLayoutParams();
+                final int from = lp.height;
+                if (from == target) {
+                    return;
+                }
+                if (from <= 0) {
+                    lp.height = target;
+                    scroll.setLayoutParams(lp);
+                    return;
+                }
+                if (lightCapAnim != null) {
+                    lightCapAnim.cancel();
+                }
+                final int to = target;
+                lightCapAnim = android.animation.ValueAnimator
+                        .ofInt(from, to);
+                lightCapAnim.setDuration(180);
+                lightCapAnim.addUpdateListener(
+                        new android.animation.ValueAnimator
+                                .AnimatorUpdateListener() {
+                            @Override
+                            public void onAnimationUpdate(
+                                    android.animation.ValueAnimator a) {
+                                if (lightPanelScroll != scroll) {
+                                    a.cancel();
+                                    return;
+                                }
+                                lp.height = (Integer) a
+                                        .getAnimatedValue();
+                                scroll.setLayoutParams(lp);
+                            }
+                        });
+                lightCapAnim.start();
+                FileLog.i("Light panel grow -> " + to);
+            }
+        });
+    }
+
+    /** v564: 面板行——图标（真实来源）+ 标题 + 摘要 + 时间。
+     * 手势是试验田 v0.5/v0.7 的方向判定状态机：竖滑让列表
+     * 滚动（拦截不生效时手动兜底）、横滑过阈值删除（收纳行
+     * 进时光机、时光机行彻底删）、小位移抬手=点开、长按
+     * 500ms 出胶囊同款菜单（仅收纳行）。只读（场景中）时
+     * 全部手势不接。 */
+    /** v568: 内容滚动是通用元素（wei 定）——轻气泡与经典
+     * 共用同一个 scroll 开关、同款做法（同 CapsuleView
+     * .applyScrollFlag）：ellipsize 恒设 MARQUEE，开关只
+     * 切换 selected——选中时长内容滚动，不选时显示省略
+     * 号。面板行与音乐卡的标题/正文都走这里。 */
+    private void applyLightScroll(android.widget.TextView tv) {
+        tv.setEllipsize(
+                android.text.TextUtils.TruncateAt.MARQUEE);
+        tv.setSelected(FeatureFlags.scroll);
+    }
+
+    // v572: 轻气泡黑 / 白双模式（wei 定）——白色模式的
+    // 浮层一律白底 + 黑色描边、文字转深色系；黑色模式 =
+    // 现行深色长相。以下色板助手供面板 / 药丸 / 音乐卡 /
+    // 内嵌菜单共用。
+    private boolean menuForLightPanel;
+    static boolean lpWhite() {
+        return FeatureFlags.lightPanelWhite;
+    }
+    private static int lpTitleC() {
+        return lpWhite() ? Color.rgb(15, 23, 42)
+                : Color.argb(224, 255, 255, 255);
+    }
+    private static int lpTextC() {
+        return lpWhite() ? Color.rgb(71, 85, 105)
+                : Color.argb(150, 255, 255, 255);
+    }
+    private static int lpFaintC() {
+        return lpWhite() ? Color.rgb(100, 116, 139)
+                : Color.argb(140, 255, 255, 255);
+    }
+    private static int lpAgoC() {
+        return lpWhite() ? Color.rgb(148, 163, 184)
+                : Color.argb(102, 255, 255, 255);
+    }
+    private static int lpLinkC() {
+        return lpWhite() ? Color.rgb(37, 99, 235)
+                : Color.rgb(147, 197, 253);
+    }
+    /** v572: 当前要建的是轻气泡内嵌菜单（白色模式）——
+     * 菜单行/回复框据此换深字。经典全屏菜单永假。 */
+    private boolean lpMenuLight() {
+        return FeatureFlags.lightMode && lpWhite()
+                && menuForLightPanel;
+    }
+
+    /** v572: 黑/白模式翻动（XposedEntry 转发）——小签拆掉
+     * 按新皮重建，面板开着就关掉重开（整套颜色在构建时
+     * 定死，重建最稳）。 */
+    public void onLightPanelThemeChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                FileLog.i("Light theme -> "
+                        + (lpWhite() ? "white" : "black"));
+                boolean wasPanel = lightPanelAdded;
+                if (lightPanelAdded) {
+                    dismissLightPanel();
+                }
+                if (lightDotRoot != null && lightDotAdded) {
+                    try {
+                        wm.removeView(lightDotRoot);
+                    } catch (Throwable ignored) {
+                    }
+                    lightDotAdded = false;
+                    lightDotRoot = null;
+                }
+                refreshLightDot();
+                if (wasPanel) {
+                    showLightPanel();
+                }
+            }
+        });
+    }
+
+    private View buildLightRow(final NotifData d,
+            final boolean recall) {
+        final android.widget.LinearLayout row =
+                new android.widget.LinearLayout(app);
+        row.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(6), dp(7), dp(6), dp(7));
+        row.setClickable(true);
+        String dpkg = lightDisplayPkg(d);
+        android.widget.ImageView icon =
+                new android.widget.ImageView(app);
+        android.graphics.drawable.Drawable dr =
+                lightAppIcon(dpkg, d);
+        if (dr != null) {
+            icon.setImageDrawable(dr);
+        }
+        android.widget.LinearLayout.LayoutParams icLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(28), dp(28));
+        icon.setLayoutParams(icLp);
+        row.addView(icon);
+        android.widget.LinearLayout mid =
+                new android.widget.LinearLayout(app);
+        mid.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.LinearLayout.LayoutParams midLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        midLp.leftMargin = dp(8);
+        mid.setLayoutParams(midLp);
+        android.widget.TextView title =
+                new android.widget.TextView(app);
+        String label = lightAppLabel(dpkg, d);
+        title.setText(d.title != null && !d.title.isEmpty()
+                ? d.title : label);
+        title.setTextSize(13);
+        title.setTextColor(lpTitleC());
+        title.setSingleLine(true);
+        applyLightScroll(title);
+        // 定宽 MATCH_PARENT，长标题才滚得起来（经典 v355
+        // 教训：WRAP_CONTENT 量宽超父容器会被直接裁掉）。
+        mid.addView(title, new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        if (d.text != null && !d.text.isEmpty()
+                && !d.text.equals(d.title)) {
+            android.widget.TextView text =
+                    new android.widget.TextView(app);
+            text.setText(d.text);
+            text.setTextSize(11.5f);
+            text.setTextColor(lpTextC());
+            text.setSingleLine(true);
+            applyLightScroll(text);
+            mid.addView(text, new android.widget.LinearLayout
+                    .LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT));
+        }
+        row.addView(mid);
+        android.widget.TextView ago =
+                new android.widget.TextView(app);
+        ago.setText(lightAgoText(d.postTime));
+        ago.setTextSize(11);
+        ago.setTextColor(lpAgoC());
+        row.addView(ago);
+        if (lightPanelReadOnly) {
+            return row;
+        }
+        final int[] state = new int[]{0}; // 0 none 1 horz 2 vert 3 vert-manual
+        final float[] down = new float[2];
+        final float[] last = new float[1];
+        final boolean[] longFired = new boolean[]{false};
+        final Runnable[] lpRunnable = new Runnable[1];
+        lpRunnable[0] = new Runnable() {
+            @Override
+            public void run() {
+                if (state[0] != 0 || recall
+                        || !FeatureFlags.longPressMenu) {
+                    return;
+                }
+                longFired[0] = true;
+                FileLog.i("Light longmenu pkg=" + d.pkg);
+                // v570: 菜单在面板里内嵌展开（wei 定），不走
+                // 全屏浮层。
+                toggleLightInlineMenu(row, d);
+            }
+        };
+        row.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v,
+                    android.view.MotionEvent e) {
+                switch (e.getAction()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        down[0] = e.getRawX();
+                        down[1] = e.getRawY();
+                        last[0] = e.getRawY();
+                        state[0] = 0;
+                        longFired[0] = false;
+                        if (!recall) {
+                            handler.postDelayed(lpRunnable[0],
+                                    500);
+                        }
+                        return false;
+                    case android.view.MotionEvent.ACTION_MOVE: {
+                        float dx = e.getRawX() - down[0];
+                        float dy = e.getRawY() - down[1];
+                        if (state[0] == 0) {
+                            if (dx < -dp(10)
+                                    && Math.abs(dx) > Math.abs(dy)) {
+                                state[0] = 1;
+                                handler.removeCallbacks(
+                                        lpRunnable[0]);
+                                v.getParent()
+                                        .requestDisallowInterceptTouchEvent(
+                                                true);
+                            } else if (Math.abs(dy) > dp(10)
+                                    && Math.abs(dy) >= Math.abs(dx)) {
+                                state[0] = 2;
+                                handler.removeCallbacks(
+                                        lpRunnable[0]);
+                            }
+                        }
+                        if (state[0] == 1) {
+                            v.setTranslationX(Math.min(0, dx));
+                        } else if (state[0] == 2
+                                && Math.abs(dy) > dp(28)) {
+                            // ScrollView 拦截没生效 → 手动兜底滚。
+                            state[0] = 3;
+                        } else if (state[0] == 3) {
+                            android.widget.ScrollView sv =
+                                    findLightScrollAncestor(v);
+                            if (sv != null) {
+                                sv.scrollBy(0,
+                                        Math.round(last[0]
+                                                - e.getRawY()));
+                            }
+                        }
+                        last[0] = e.getRawY();
+                        return state[0] == 1 || state[0] == 3;
+                    }
+                    case android.view.MotionEvent.ACTION_UP: {
+                        handler.removeCallbacks(lpRunnable[0]);
+                        float dx = e.getRawX() - down[0];
+                        if (longFired[0]) {
+                            longFired[0] = false;
+                            return true;
+                        }
+                        if (state[0] == 1) {
+                            if (dx < -dp(56)) {
+                                if (recall) {
+                                    lightRecallDrop(d);
+                                } else {
+                                    lightRemove(d);
+                                    lightPushRecall(d);
+                                }
+                            } else {
+                                v.animate().translationX(0)
+                                        .setDuration(150).start();
+                            }
+                            state[0] = 0;
+                            return true;
+                        }
+                        if (state[0] == 0) {
+                            if (recall) {
+                                lightRecallOpen(d);
+                            } else {
+                                lightOpenItem(d);
+                            }
+                            return true;
+                        }
+                        state[0] = 0;
+                        return true;
+                    }
+                    case android.view.MotionEvent.ACTION_CANCEL:
+                        handler.removeCallbacks(lpRunnable[0]);
+                        state[0] = 0;
+                        if (v.getTranslationX() != 0) {
+                            v.animate().translationX(0)
+                                    .setDuration(120).start();
+                        }
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+        });
+        return row;
+    }
+
+    private android.widget.ScrollView findLightScrollAncestor(
+            View v) {
+        android.view.ViewParent p = v.getParent();
+        while (p instanceof View) {
+            if (p instanceof android.widget.ScrollView) {
+                return (android.widget.ScrollView) p;
+            }
+            p = ((View) p).getParent();
+        }
+        return null;
+    }
+
+    /** v564: 面板音乐卡（预览 A 完整卡）：封面 + 歌名/歌手
+     * + 歌词行 + 进度 + 上一首/播放暂停/下一首。数据来自
+     * 轻气泡自有音乐状态（通知本体 + 会话广播喂），控制走
+     * 经典 sendMusicControl 同一条广播通道。 */
+    /** v565: 封面主色（12×12 缩略后取鲜艳像素均值），给
+     * 音乐卡按钮底色微微染色；同一张封面只算一次。 */
+    private int lightArtTint(android.graphics.Bitmap bmp) {
+        if (bmp == null) {
+            return 0;
+        }
+        if (bmp == lightMusicTintSrc) {
+            return lightMusicTint;
+        }
+        lightMusicTintSrc = bmp;
+        lightMusicTint = 0;
+        try {
+            android.graphics.Bitmap small =
+                    android.graphics.Bitmap.createScaledBitmap(
+                            bmp, 12, 12, true);
+            long r = 0, g = 0, b = 0, n = 0;
+            for (int y = 0; y < small.getHeight(); y++) {
+                for (int x = 0; x < small.getWidth(); x++) {
+                    int px = small.getPixel(x, y);
+                    if (Color.alpha(px) < 128) {
+                        continue;
+                    }
+                    int pr = Color.red(px), pg = Color.green(px),
+                            pb = Color.blue(px);
+                    int mx = Math.max(pr, Math.max(pg, pb));
+                    int mn = Math.min(pr, Math.min(pg, pb));
+                    if (mx - mn < 24) {
+                        continue;
+                    }
+                    r += pr;
+                    g += pg;
+                    b += pb;
+                    n++;
+                }
+            }
+            if (n > 0) {
+                lightMusicTint = Color.rgb(
+                        (int) (r / n), (int) (g / n),
+                        (int) (b / n));
+            }
+        } catch (Throwable ignored) {
+        }
+        return lightMusicTint;
+    }
+
+    /** v565: 轻气泡音乐卡的自绘按钮（wei 点名重做：
+     * v564 的 emoji 字形三键风格不统一，暂停键被系统渲染
+     * 成蓝灰瓦片）。五种键共用一套自绘字形（双三角/三角/
+     * 竖线/爱心/「词」），中间播放键靠尺寸分主次。
+     * v567: 按 wei「不要这个蒙版玻璃」「按钮就单单是
+     * 按钮」，v565 的毛玻璃圆底 + 描边环已去掉，只剩
+     * 字形；按下只有 0.9 缩放；收藏空心/实心、歌词跟随
+     * 开/关（变蓝）都在本类按状态重绘。 */
+    private final class LightMusicBtn extends View {
+        static final int PREV = 0;
+        static final int TOGGLE = 1;
+        static final int NEXT = 2;
+        static final int FAV = 3;
+        static final int LYRIC = 4;
+
+        final int kind;
+        boolean playing;
+        boolean favorite;
+        boolean active;
+        boolean down;
+        int tint;
+        private final android.graphics.Paint fillPaint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint ringPaint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint glyphPaint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint glyphStroke =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Paint textPaint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path path =
+                new android.graphics.Path();
+
+        LightMusicBtn(int kind) {
+            super(app);
+            this.kind = kind;
+            setClickable(true);
+            ringPaint.setStyle(
+                    android.graphics.Paint.Style.STROKE);
+            glyphPaint.setStyle(
+                    android.graphics.Paint.Style.FILL);
+            // v572: 白色模式下按钮字形转深色（爱心粉、词键
+            // 蓝是字形自身色，在 onDraw 里另行指定，不受
+            // 这里的基础色影响）。
+            int glyphBase = lpWhite()
+                    ? Color.rgb(15, 23, 42) : Color.WHITE;
+            glyphPaint.setColor(glyphBase);
+            glyphStroke.setStyle(
+                    android.graphics.Paint.Style.STROKE);
+            glyphStroke.setColor(glyphBase);
+            glyphStroke.setStrokeCap(
+                    android.graphics.Paint.Cap.ROUND);
+            glyphStroke.setStrokeJoin(
+                    android.graphics.Paint.Join.ROUND);
+            textPaint.setColor(glyphBase);
+            textPaint.setTextAlign(
+                    android.graphics.Paint.Align.CENTER);
+            textPaint.setTypeface(
+                    android.graphics.Typeface.DEFAULT_BOLD);
+        }
+
+        void setPlaying(boolean p) {
+            if (playing != p) {
+                playing = p;
+                invalidate();
+            }
+        }
+
+        void setFavorite(boolean f) {
+            if (favorite != f) {
+                favorite = f;
+                invalidate();
+            }
+        }
+
+        void setActive(boolean a) {
+            if (active != a) {
+                active = a;
+                invalidate();
+            }
+        }
+
+        void setTint(int t) {
+            if (tint != t) {
+                tint = t;
+                invalidate();
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(
+                android.view.MotionEvent e) {
+            switch (e.getAction()) {
+                case android.view.MotionEvent.ACTION_DOWN:
+                    down = true;
+                    setScaleX(0.9f);
+                    setScaleY(0.9f);
+                    invalidate();
+                    return true;
+                case android.view.MotionEvent.ACTION_UP:
+                    boolean inside = down
+                            && e.getX() >= 0 && e.getY() >= 0
+                            && e.getX() <= getWidth()
+                            && e.getY() <= getHeight();
+                    down = false;
+                    setScaleX(1f);
+                    setScaleY(1f);
+                    invalidate();
+                    if (inside) {
+                        performClick();
+                    }
+                    return true;
+                case android.view.MotionEvent.ACTION_CANCEL:
+                    down = false;
+                    setScaleX(1f);
+                    setScaleY(1f);
+                    invalidate();
+                    return true;
+                default:
+                    return super.onTouchEvent(e);
+            }
+        }
+
+        @Override
+        public boolean performClick() {
+            super.performClick();
+            return true;
+        }
+
+        @Override
+        protected void onDraw(android.graphics.Canvas c) {
+            float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) {
+                return;
+            }
+            float cx = w / 2f, cy = h / 2f;
+            // v567: 不要毛玻璃圆底（wei：「不要这个蒙版
+            // 玻璃」「按钮就单单是按钮」）——圆盘填充和描边
+            // 环都去掉，只画字形本身；按下反馈只剩 onTouch
+            // 的 0.9 缩放。收藏爱心粉/描边、词键开启变蓝
+            // 都是字形自身的颜色，保留。
+            // 字形走 24 网格坐标（同 Material 图标的视口），
+            // 居中缩放绘制。
+            float u = Math.min(w, h) / 24f;
+            c.save();
+            c.translate(cx - 12f * u, cy - 12f * u);
+            c.scale(u, u);
+            // v580: 字形填充色按模式走——原先这里写死白色，
+            // 白色模式下上一首/下一首/暂停全成白字白卡看
+            // 不见（wei 逮住）；构造器里按模式定的基础色
+            // 也被这行覆盖了。白色模式用墨色，黑色模式白。
+            glyphPaint.setColor(lpWhite()
+                    ? Color.rgb(15, 23, 42) : Color.WHITE);
+            path.reset();
+            switch (kind) {
+                case PREV:
+                    tri(18.5f, 6.8f, 12.8f, 12f, 18.5f, 17.2f);
+                    tri(12.8f, 6.8f, 7.2f, 12f, 12.8f, 17.2f);
+                    path.addRect(new android.graphics.RectF(
+                            4.6f, 6.8f, 6.4f, 17.2f),
+                            android.graphics.Path.Direction.CW);
+                    c.drawPath(path, glyphPaint);
+                    break;
+                case NEXT:
+                    tri(5.5f, 6.8f, 11.2f, 12f, 5.5f, 17.2f);
+                    tri(11.2f, 6.8f, 16.8f, 12f, 11.2f, 17.2f);
+                    path.addRect(new android.graphics.RectF(
+                            17.6f, 6.8f, 19.4f, 17.2f),
+                            android.graphics.Path.Direction.CW);
+                    c.drawPath(path, glyphPaint);
+                    break;
+                case TOGGLE:
+                    if (playing) {
+                        path.addRoundRect(
+                                new android.graphics.RectF(
+                                        7.4f, 6.6f, 10.6f, 17.4f),
+                                1.4f, 1.4f,
+                                android.graphics.Path.Direction.CW);
+                        path.addRoundRect(
+                                new android.graphics.RectF(
+                                        13.4f, 6.6f, 16.6f, 17.4f),
+                                1.4f, 1.4f,
+                                android.graphics.Path.Direction.CW);
+                        c.drawPath(path, glyphPaint);
+                    } else {
+                        tri(9.2f, 6.6f, 9.2f, 17.4f, 17.8f, 12f);
+                        c.drawPath(path, glyphPaint);
+                        glyphStroke.setStrokeWidth(1.1f);
+                        c.drawPath(path, glyphStroke);
+                    }
+                    break;
+                case FAV:
+                    path.moveTo(12f, 20.6f);
+                    path.cubicTo(4.2f, 14.6f, 2.6f, 11.2f,
+                            2.6f, 8.4f);
+                    path.cubicTo(2.6f, 5.7f, 4.7f, 3.9f,
+                            7.1f, 3.9f);
+                    path.cubicTo(9.1f, 3.9f, 11f, 5.1f,
+                            12f, 7.1f);
+                    path.cubicTo(13f, 5.1f, 14.9f, 3.9f,
+                            16.9f, 3.9f);
+                    path.cubicTo(19.3f, 3.9f, 21.4f, 5.7f,
+                            21.4f, 8.4f);
+                    path.cubicTo(21.4f, 11.2f, 19.8f, 14.6f,
+                            12f, 20.6f);
+                    path.close();
+                    // v576: 爱心比其他字形小一圈（wei：收藏
+                    // 图标再小一点）——它的路径在 24 网格里
+                    // 几乎占满（高约 16.7），上一首/暂停等只
+                    // 有约 10.8，绕中心缩到 0.78 才齐平。
+                    c.save();
+                    c.translate(12f, 12f);
+                    c.scale(0.78f, 0.78f);
+                    c.translate(-12f, -12f);
+                    if (favorite) {
+                        glyphPaint.setColor(
+                                Color.rgb(255, 64, 129));
+                        c.drawPath(path, glyphPaint);
+                    } else {
+                        glyphStroke.setStrokeWidth(1.6f);
+                        c.drawPath(path, glyphStroke);
+                    }
+                    c.restore();
+                    break;
+                case LYRIC:
+                    // v580: 同上——白色模式下未激活的「词」原
+                    // 先写死白色看不见，激活的浅蓝也太淡；
+                    // 白色模式未激活用墨色、激活用深蓝。
+                    textPaint.setColor(active
+                            ? (lpWhite()
+                                    ? Color.rgb(37, 99, 235)
+                                    : Color.rgb(147, 197, 253))
+                            : (lpWhite()
+                                    ? Color.rgb(15, 23, 42)
+                                    : Color.WHITE));
+                    textPaint.setTextSize(11f);
+                    android.graphics.Paint.FontMetrics fm =
+                            textPaint.getFontMetrics();
+                    float ty = 12f - (fm.ascent + fm.descent)
+                            / 2f;
+                    c.drawText("词", 12f, ty, textPaint);
+                    break;
+                default:
+                    break;
+            }
+            c.restore();
+        }
+
+        private void tri(float x1, float y1, float x2,
+                float y2, float x3, float y3) {
+            path.moveTo(x1, y1);
+            path.lineTo(x2, y2);
+            path.lineTo(x3, y3);
+            path.close();
+        }
+    }
+
+    private View buildLightMusicCard() {
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        // v572: 白色模式下音乐卡换浅底细线。
+        if (lpWhite()) {
+            bg.setColor(Color.argb(245, 248, 250, 252));
+            bg.setStroke(dp(1), Color.rgb(226, 232, 240));
+        } else {
+            bg.setColor(Color.argb(242, 30, 36, 52));
+        }
+        bg.setCornerRadius(dp(14));
+        card.setBackground(bg);
+        card.setPadding(dp(10), dp(10), dp(10), dp(8));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        android.widget.LinearLayout top =
+                new android.widget.LinearLayout(app);
+        top.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.ImageView art =
+                new android.widget.ImageView(app);
+        android.graphics.Bitmap artBmp = lightMusicArt != null
+                ? lightMusicArt
+                : (lightMusicData != null
+                        ? lightMusicData.largeIcon : null);
+        if (artBmp != null) {
+            art.setImageBitmap(artBmp);
+            art.setScaleType(
+                    android.widget.ImageView.ScaleType
+                            .CENTER_CROP);
+        } else {
+            android.graphics.drawable.Drawable dr =
+                    lightMusicData != null
+                            ? lightAppIcon(lightMusicData.pkg,
+                                    lightMusicData)
+                            : null;
+            if (dr != null) {
+                art.setImageDrawable(dr);
+            }
+        }
+        android.widget.LinearLayout.LayoutParams artLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(44), dp(44));
+        art.setLayoutParams(artLp);
+        top.addView(art);
+        android.widget.LinearLayout mid =
+                new android.widget.LinearLayout(app);
+        mid.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.LinearLayout.LayoutParams midLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        midLp.leftMargin = dp(10);
+        mid.setLayoutParams(midLp);
+        android.widget.TextView title =
+                new android.widget.TextView(app);
+        title.setText(lightMusicTitle != null
+                ? lightMusicTitle : "");
+        title.setTextSize(13.5f);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        title.setTextColor(lpWhite()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
+        title.setSingleLine(true);
+        applyLightScroll(title);
+        mid.addView(title, new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        android.widget.TextView artist =
+                new android.widget.TextView(app);
+        artist.setText(lightMusicArtist != null
+                ? lightMusicArtist : "");
+        artist.setTextSize(11.5f);
+        artist.setTextColor(lpTextC());
+        artist.setSingleLine(true);
+        applyLightScroll(artist);
+        mid.addView(artist, new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        lightMusicLyricView = new android.widget.TextView(app);
+        lightMusicLyricView.setText(lightMusicLyric != null
+                ? lightMusicLyric : "");
+        lightMusicLyricView.setTextSize(11.5f);
+        lightMusicLyricView.setTextColor(lpWhite()
+                ? Color.rgb(71, 85, 105)
+                : Color.argb(200, 255, 255, 255));
+        lightMusicLyricView.setSingleLine(true);
+        // v568: 歌词行同经典钉住胶囊的歌词口径——恒滚动
+        // （不跟 scroll 开关，那个开关管的是标题/正文）。
+        lightMusicLyricView.setEllipsize(
+                android.text.TextUtils.TruncateAt.MARQUEE);
+        lightMusicLyricView.setMarqueeRepeatLimit(-1);
+        lightMusicLyricView.setSelected(true);
+        lightMusicLyricView.setVisibility(
+                lightMusicLyric != null
+                        && !lightMusicLyric.isEmpty()
+                        ? View.VISIBLE : View.GONE);
+        mid.addView(lightMusicLyricView);
+        top.addView(mid);
+        // v565: 右上角不再写「音乐 · 置顶」——卡片自己
+        // 置顶就够了（wei 点名去掉）。
+        card.addView(top);
+        // 进度行（有真实时长才显示，不编造）。
+        if (lightMusicDurMs > 0) {
+            android.widget.LinearLayout prog =
+                    new android.widget.LinearLayout(app);
+            prog.setOrientation(
+                    android.widget.LinearLayout.HORIZONTAL);
+            prog.setGravity(Gravity.CENTER_VERTICAL);
+            android.widget.LinearLayout.LayoutParams progLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .MATCH_PARENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            progLp.topMargin = dp(6);
+            prog.setLayoutParams(progLp);
+            lightMusicBar = new android.widget.ProgressBar(app,
+                    null,
+                    android.R.attr.progressBarStyleHorizontal);
+            lightMusicBar.setMax((int) Math.min(
+                    lightMusicDurMs, Integer.MAX_VALUE));
+            lightMusicBar.setProgress((int) Math.min(
+                    Math.max(lightMusicPosMs, 0),
+                    Integer.MAX_VALUE));
+            android.widget.LinearLayout.LayoutParams barLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            0, android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT,
+                            1f);
+            lightMusicBar.setLayoutParams(barLp);
+            prog.addView(lightMusicBar);
+            lightMusicTime = new android.widget.TextView(app);
+            lightMusicTime.setTextSize(10.5f);
+            lightMusicTime.setTextColor(lpTextC());
+            android.widget.LinearLayout.LayoutParams timeLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            timeLp.leftMargin = dp(8);
+            lightMusicTime.setLayoutParams(timeLp);
+            prog.addView(lightMusicTime);
+            card.addView(prog);
+        }
+        // 控制行（v565 重做、v567 去毛玻璃圆底）：纯字形
+        // 键一排——收藏
+        // 在左头、词在右头（同系统音乐卡的摆法），中间
+        // 上一首/播放暂停/下一首，播放键大一圈。v566:
+        // 面板加宽到 292dp、侧键 40dp / 播放键 52dp /
+        // 间距 8dp——v565 的 256dp 固定宽塞不进 224dp
+        // 卡内宽，下一首被裁一半、词键整个出界（wei
+        // 截图指出），这版五键完整不裁。
+        android.widget.LinearLayout ctrls =
+                new android.widget.LinearLayout(app);
+        ctrls.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        ctrls.setGravity(Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams ctrLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        ctrLp.topMargin = dp(4);
+        ctrls.setLayoutParams(ctrLp);
+        final int tint = lightArtTint(artBmp);
+        lightMusicFavBtn = buildLightMusicBtn(
+                LightMusicBtn.FAV, tint, dp(40));
+        lightMusicFavBtn.setFavorite(lightMusicFavorite);
+        lightMusicFavBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        onLightMusicFavTap();
+                    }
+                });
+        ctrls.addView(lightMusicFavBtn);
+        ctrls.addView(lightCtrlSpacer());
+        LightMusicBtn prevBtn = buildLightMusicBtn(
+                LightMusicBtn.PREV, tint, dp(40));
+        prevBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        FileLog.i("Light music action prev");
+                        sendMusicControl("prev", -1);
+                    }
+                });
+        ctrls.addView(prevBtn);
+        lightMusicPlayBtn = buildLightMusicBtn(
+                LightMusicBtn.TOGGLE, tint, dp(52));
+        android.widget.LinearLayout.LayoutParams playLp =
+                (android.widget.LinearLayout.LayoutParams)
+                        lightMusicPlayBtn.getLayoutParams();
+        playLp.leftMargin = dp(8);
+        playLp.rightMargin = dp(8);
+        lightMusicPlayBtn.setLayoutParams(playLp);
+        lightMusicPlayBtn.setPlaying(lightMusicPlaying);
+        lightMusicPlayBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        FileLog.i("Light music action toggle");
+                        sendMusicControl("toggle", -1);
+                    }
+                });
+        ctrls.addView(lightMusicPlayBtn);
+        LightMusicBtn nextBtn = buildLightMusicBtn(
+                LightMusicBtn.NEXT, tint, dp(40));
+        nextBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        FileLog.i("Light music action next");
+                        sendMusicControl("next", -1);
+                    }
+                });
+        ctrls.addView(nextBtn);
+        ctrls.addView(lightCtrlSpacer());
+        lightMusicLyricBtn = buildLightMusicBtn(
+                LightMusicBtn.LYRIC, tint, dp(40));
+        lightMusicLyricBtn.setActive(lightLyricFollow);
+        lightMusicLyricBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        onLightLyricToggle();
+                    }
+                });
+        ctrls.addView(lightMusicLyricBtn);
+        card.addView(ctrls);
+        updateLightMusicProgressViews();
+        return card;
+    }
+
+    private LightMusicBtn buildLightMusicBtn(int kind,
+            int tint, int sizeDp) {
+        LightMusicBtn b = new LightMusicBtn(kind);
+        b.setTint(tint);
+        b.setLayoutParams(
+                new android.widget.LinearLayout.LayoutParams(
+                        sizeDp, sizeDp));
+        return b;
+    }
+
+    private View lightCtrlSpacer() {
+        View s = new View(app);
+        s.setLayoutParams(
+                new android.widget.LinearLayout.LayoutParams(
+                        0, 1, 1f));
+        return s;
+    }
+
+    /** v565: 收藏键——走经典音乐卡同款的会话通道
+     * （sendMusicControl 的 favorite 命令，NS 侧用
+     * setRating 真收藏）；本地先翻转爱心兜底，会话进度
+     * tick 带回真值时再对齐。会话没暴露收藏状态
+     * （hasFavorite=false）时打 noAction 日志，方便定位
+     * 是哪个播放器不支持。 */
+    private void onLightMusicFavTap() {
+        FileLog.i("Light music fav tap hasFav="
+                + lightMusicHasFavorite);
+        lightMusicFavorite = !lightMusicFavorite;
+        if (lightMusicFavBtn != null) {
+            lightMusicFavBtn.setFavorite(lightMusicFavorite);
+        }
+        sendMusicControl("favorite", -1);
+        if (!lightMusicHasFavorite) {
+            FileLog.i("Light music fav noAction");
+        }
+    }
+
+    /** v565: 「词」键——开/关歌词跟随显示。开后每行新
+     * 歌词按到达药丸同款在边缘亮一次（flashLightLyricPill，
+     * 数据走现有 ACTION_LYRIC 通道）；关即停。 */
+    /** v566: 轻气泡歌词跟随自带监听开关——直接命令 NS
+     * 的歌词监听（ACTION_LYRIC_LISTEN），不再借经典路径
+     * syncLyricListen 的状态：它只认经典胶囊钉住/开卡，
+     * 轻气泡下没人保活，v565 实测播放到一半监听掉了、
+     * 歌词就再也不亮。开时顺带把 NS 的 musicKey 对齐
+     * 到当前音乐 key（播放器重发通知换 key 也不怕）。 */
+    private void sendLightLyricListen(boolean on, String key) {
+        if (app == null) {
+            return;
+        }
+        if (on && key == null) {
+            return;
+        }
+        android.content.Intent intent = new android.content.Intent(
+                NotificationService.ACTION_LYRIC_LISTEN);
+        if (key != null) {
+            intent.putExtra("key", key);
+        }
+        intent.putExtra("listen", on);
+        try {
+            app.sendBroadcast(intent);
+        } catch (Throwable ignored) {
+        }
+        FileLog.i("Light lyric listen -> " + on);
+    }
+
+    private void onLightLyricToggle() {
+        lightLyricFollow = !lightLyricFollow;
+        FileLog.i(lightLyricFollow ? "Light lyric on"
+                : "Light lyric off");
+        sendLightLyricListen(lightLyricFollow,
+                lightMusicData != null
+                        ? lightMusicData.key : null);
+        if (!lightLyricFollow) {
+            // v569: 词关了，歌词下面的副药丸一并收。
+            lightSubEndRunnable.run();
+        }
+        if (lightMusicLyricBtn != null) {
+            lightMusicLyricBtn.setActive(lightLyricFollow);
+        }
+        if (lightLyricFollow && lightMusicLyric != null
+                && !lightMusicLyric.isEmpty()) {
+            flashLightLyricPill(lightMusicLyric);
+        }
+    }
+
+    /** v565: 歌词行到达展示——复用小签药丸：展开成
+     * 「音乐图标 + 当前歌词行」，跟着呼吸闪约 3.5 个周期
+     * 后落回小点；新行直接换内容并重置计时（同到达药丸
+     * 「永远只显示最新」的口径）。 */
+    private void flashLightLyricPill(String line) {
+        if (line == null || line.isEmpty()) {
+            return;
+        }
+        // v577: 通知正在主药丸上闪时歌词不抢——等它闪完
+        // 收纳，收尾逻辑会把当前歌词行再亮出来。
+        if (lightFlashKey != null) {
+            return;
+        }
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null
+                || !lightDotAdded) {
+            return;
+        }
+        android.graphics.drawable.Drawable icon =
+                lightMusicData != null
+                        ? lightAppIcon(
+                                lightDisplayPkg(lightMusicData),
+                                lightMusicData)
+                        : null;
+        if (icon != null) {
+            lightPillIcon.setImageDrawable(icon);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightPillIcon.setVisibility(View.GONE);
+        }
+        setLightPillLyricMode(true);
+        lightPillLabel.setText(line);
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightPulsing = true;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+        FileLog.i("Light lyric line " + line);
+    }
+
+    /** v566: 药丸文字模式——到达药丸（应用名）保持紧凑
+     * 单行省略；歌词药丸要整行显示（wei 定「显示完整
+     * 歌词、不用省略」）：放开宽度到屏幕宽减边距、允许
+     * 折到第二行、不省略。两种闪法共用一个 label，每次
+     * 亮之前先切模式。 */
+    private void setLightPillLyricMode(boolean lyric) {
+        if (lightPillLabel == null || app == null) {
+            return;
+        }
+        if (lyric) {
+            lightPillLabel.setSingleLine(false);
+            lightPillLabel.setMaxLines(2);
+            lightPillLabel.setEllipsize(null);
+            int max = app.getResources().getDisplayMetrics()
+                    .widthPixels - dp(64);
+            lightPillLabel.setMaxWidth(
+                    Math.max(dp(110), max));
+        } else {
+            lightPillLabel.setSingleLine(true);
+            lightPillLabel.setMaxLines(1);
+            lightPillLabel.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+            lightPillLabel.setMaxWidth(dp(110));
+        }
+    }
+
+    private static String lightFormatMs(long ms) {
+        if (ms < 0) {
+            ms = 0;
+        }
+        long s = ms / 1000;
+        return (s / 60) + ":" + String.format(
+                java.util.Locale.US, "%02d", s % 60);
+    }
+
+    private void updateLightMusicProgressViews() {
+        if (lightMusicBar != null && lightMusicDurMs > 0) {
+            lightMusicBar.setMax((int) Math.min(lightMusicDurMs,
+                    Integer.MAX_VALUE));
+            lightMusicBar.setProgress((int) Math.min(
+                    Math.max(lightMusicPosMs, 0),
+                    Integer.MAX_VALUE));
+        }
+        if (lightMusicTime != null && lightMusicDurMs > 0) {
+            lightMusicTime.setText(
+                    lightFormatMs(lightMusicPosMs) + " / "
+                            + lightFormatMs(lightMusicDurMs));
+        }
+        if (lightMusicPlayBtn != null) {
+            lightMusicPlayBtn.setPlaying(lightMusicPlaying);
+        }
+        if (lightMusicFavBtn != null) {
+            lightMusicFavBtn.setFavorite(lightMusicFavorite);
+        }
+        if (lightMusicLyricBtn != null) {
+            lightMusicLyricBtn.setActive(lightLyricFollow);
+        }
+    }
+
+    /** v564: 音乐到达（popCapsule 轻气泡分支）——不弹胶囊，
+     * 只更新轻气泡音乐状态；系统音乐通知由钩子侧藏掉
+     * （NotifCollectionHook 的只藏不撤），音乐从此只活在
+     * 面板音乐卡里。 */
+    private void lightMusicIn(NotifData d) {
+        if (d == null) {
+            return;
+        }
+        boolean newSong = lightMusicData == null
+                || !d.key.equals(lightMusicData.key)
+                || (lightMusicTitle == null
+                        ? d.title != null
+                        : !lightMusicTitle.equals(d.title));
+        lightMusicData = d;
+        if (d.title != null && !d.title.isEmpty()) {
+            lightMusicTitle = d.title;
+        }
+        if (d.text != null && !d.text.isEmpty()) {
+            lightMusicArtist = d.text;
+        }
+        if (d.largeIcon != null) {
+            lightMusicArt = d.largeIcon;
+        }
+        if (d.lyrics != null && !d.lyrics.isEmpty()) {
+            lightMusicLyric = d.lyrics;
+        }
+        if (newSong) {
+            lightMusicPosMs = 0;
+            // v565: 新歌的收藏状态重新等 tick 报真值。
+            lightMusicFavorite = false;
+            lightMusicHasFavorite = false;
+        }
+        FileLog.i("Light music in pkg=" + d.pkg
+                + " title=" + lightMusicTitle);
+        // v566: 歌词跟随开着时，每次音乐通知进来都把
+        // NS 监听按最新 key 重新武装一次——播放器中途
+        // 重发通知/换 key，监听也能自己接回来。
+        if (lightLyricFollow) {
+            sendLightLyricListen(true, d.key);
+        }
+        refreshLightDot();
+        if (lightPanelAdded) {
+            rebuildLightPanelRows();
+        }
+        writeLightMirror();
+    }
+
+    /** v564: 音乐通知被移除（NS 转发 ACTION_MUSIC_GONE）——
+     * 音乐卡撤下、小签按栈状态决定去留。 */
+    public void onLightMusicGone(final String key) {
+        if (key == null) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (lightMusicData != null
+                        && key.equals(lightMusicData.key)) {
+                    FileLog.i("Light music out key=" + key);
+                    lightMusicData = null;
+                    lightMusicArt = null;
+                    lightMusicPlaying = false;
+                    lightMusicPosMs = 0;
+                    lightMusicDurMs = 0;
+                    writeLightMirror();
+                    // v565: 音乐没了，收藏与歌词跟随一并收。
+                    lightMusicFavorite = false;
+                    lightMusicHasFavorite = false;
+                    if (lightLyricFollow) {
+                        lightLyricFollow = false;
+                        FileLog.i("Light lyric off");
+                        sendLightLyricListen(false, key);
+                    }
+                    if (lightTabBg != null) {
+                        lightTabBg.setColor(
+                                Color.rgb(59, 130, 246));
+                    }
+                    refreshLightDot();
+                    if (lightPanelAdded) {
+                        rebuildLightPanelRows();
+                    }
+                }
+            }
+        });
+    }
+
     /** Tap the edge handle: re-deliver the most recently swiped
      * capsule through onNotification, so the scene / silence
      * gates apply exactly as for a fresh arrival (it queues
@@ -1518,6 +5597,17 @@ public class BubbleWindow {
      * this as those states change; unlock comes via
      * XposedEntry's USER_PRESENT branch). */
     public void refreshRecallHandle() {
+        // v565: 轻气泡里回看改名「时光机」、只从收纳面板
+        // 进入，经典回看边缘签不许出现（wei 截图里它还挂
+        // 在左边缘带角标）。边缘只留收纳小签一个东西；
+        // 经典模式下回看签照旧，不受影响。
+        if (FeatureFlags.lightMode) {
+            if (recallWindowAdded) {
+                FileLog.i("Light recall edge off");
+            }
+            hideRecallHandle();
+            return;
+        }
         if (!FeatureFlags.recallCapsule || recallStack.isEmpty()) {
             hideRecallHandle();
             return;
@@ -1702,6 +5792,14 @@ public class BubbleWindow {
      * 打开应用）执行后的「消费」这条通知：走 dissipateOne
      * 老路摘掉在屏胶囊（连带清它的通知动作暂存）。 */
     private void menuConsume(NotifData d) {
+        // v564: 轻气泡面板里长按出的菜单，消费的是收纳栈
+        // 里的条目（不在屏上，dissipateOne 摘不到）——在栈
+        // 里就从栈里摘（处理完即走，不进时光机：时光机只
+        // 收「打开/删除/清除」，wei 口径）。不在栈里（经典
+        // 胶囊）才走老路。
+        if (FeatureFlags.lightMode && lightRemove(d)) {
+            return;
+        }
         dissipateOne(d);
     }
 
@@ -1713,12 +5811,155 @@ public class BubbleWindow {
         if (d == null) {
             return;
         }
+        // v564: 轻气泡下没有扇子落点——这条本来就在收纳栈
+        // 里（面板菜单触发），「以后收纳」对它就是保持收纳。
+        if (FeatureFlags.lightMode && isOrdinaryForLight(d)) {
+            lightCollect(d);
+            return;
+        }
         pileIntoFan(d);
         if (d.key != null) {
             removeNotifByKey(d.key);
         }
         holdWindowHeight = true;
         rebuildDock();
+    }
+
+    /** v570: 菜单条目构建（经典浮层菜单与轻气泡面板内嵌
+     * 菜单共用一份）。条目口径：回复/打开应用回复/标为已读
+     * 按通知自带能力出现；稍后提醒固定有；放入时光机——经
+     * 典看时光机（原回看）开关、轻气泡恒有；这个应用以后
+     * 收纳——轻气泡不出现（wei 定：轻气泡模式不要这个，
+     * 本来就全收纳）；这个应用不再弹固定有。条目点击里调
+     * 的 dismissMenu() 同时管浮层菜单与内嵌菜单的收起。 */
+    private void buildMenuItems(
+            android.widget.LinearLayout panel, final NotifData d,
+            final NotifActions acts) {
+        // 1) 回复（有 RemoteInput 才有）/ 打开应用回复（兜底）。
+        if (acts != null && acts.hasReply()) {
+            panel.addView(buildMenuRow("↩", "回复", "不用打开应用",
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            toggleMenuReplyBox();
+                        }
+                    }));
+            buildMenuReplyBox(panel, d, acts);
+        } else if (d.contentIntent != null) {
+            panel.addView(buildMenuRow("➤", "打开应用回复",
+                    "该应用不支持直接回复",
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            openAppForReply(d);
+                        }
+                    }));
+        }
+        // 2) 标为已读（通知自带已读动作才有）。
+        if (acts != null && acts.hasMarkRead()) {
+            panel.addView(buildMenuRow("✓", "标为已读", null,
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            try {
+                                acts.markReadIntent.send();
+                                FileLog.i("MarkRead sent pkg="
+                                        + d.pkg);
+                            } catch (Throwable t) {
+                                FileLog.i("MarkRead fail pkg="
+                                        + d.pkg + " err=" + t);
+                            }
+                            menuConsume(d);
+                        }
+                    }));
+        }
+        // 3) 稍后提醒（自有能力，固定有）。
+        panel.addView(buildMenuRow("◷", "稍后提醒", "10 分钟后",
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        dismissMenu();
+                        snoozeNotif(d);
+                        menuConsume(d);
+                    }
+                }));
+        // 4) 放入时光机（v570 改名，原「收进回看」；经典看
+        // 时光机开关、关着就不出现保持菜单干净；轻气泡里
+        // 时光机是本体，恒有）。
+        if (FeatureFlags.lightMode || FeatureFlags.recallCapsule) {
+            panel.addView(buildMenuRow("↩", "放入时光机", null,
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            pushRecall(d);
+                            menuConsume(d);
+                        }
+                    }));
+        }
+        // 5) v558: 这个应用以后收纳（原「只贴边」待遇，
+        // 改名后统一叫收纳）。当前有效规则还是跟随才
+        // 显示——已是收纳/永不弹的（含走了「全部应用」
+        // 默认条目的）不显示，避免死按钮。落盘与不再弹
+        // 同路：广播给 App 进程走 AppRules 单一数据源。
+        // v559: 有效值是 POP（显式弹出例外，绕过默认
+        // 收纳）时它现在也是照常弹的，同样显示这一行。
+        int effRule = AppRules.modeFor(d.pkg);
+        // v570: 轻气泡不出现这一行（wei 定——轻气泡里普通
+        // 通知本来就全收纳，这行是死按钮）。
+        if (!FeatureFlags.lightMode
+                && (effRule == AppRules.DEFAULT
+                || effRule == AppRules.POP)) {
+            panel.addView(buildMenuRow("⇥", "这个应用以后收纳",
+                    null, new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            try {
+                                android.content.Intent ri =
+                                        new android.content.Intent(
+                                                NotificationService
+                                                        .ACTION_SET_APP_RULE);
+                                ri.setPackage(
+                                        "com.chenan.flymebobo");
+                                ri.putExtra("pkg", d.pkg);
+                                ri.putExtra("mode",
+                                        AppRules.VALUE_EDGE);
+                                app.sendBroadcast(ri);
+                                FileLog.i("QuickMenu setEdge pkg="
+                                        + d.pkg);
+                            } catch (Throwable ignored) {
+                            }
+                            collectCurrentIntoFan(d);
+                        }
+                    }));
+        }
+        // 6) 这个应用不再弹（走 AppRules 单一数据源：广播
+        // 给 App 进程落盘 + 回广播刷新 SystemUI 的规则表）。
+        panel.addView(buildMenuRow("✕", "这个应用不再弹", null,
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        dismissMenu();
+                        try {
+                            android.content.Intent ri =
+                                    new android.content.Intent(
+                                            NotificationService
+                                                    .ACTION_SET_APP_RULE);
+                            ri.setPackage("com.chenan.flymebobo");
+                            ri.putExtra("pkg", d.pkg);
+                            ri.putExtra("mode",
+                                    AppRules.VALUE_NEVER);
+                            app.sendBroadcast(ri);
+                            FileLog.i("QuickMenu never pkg="
+                                    + d.pkg);
+                        } catch (Throwable ignored) {
+                        }
+                        menuConsume(d);
+                    }
+                }));
     }
 
     private void showCapsuleMenu(CapsuleView cap, final NotifData d) {
@@ -1787,126 +6028,7 @@ public class BubbleWindow {
             rootL.addView(panel, plp);
             menuPanel = panel;
 
-            // 1) 回复（有 RemoteInput 才有）/ 打开应用回复（兜底）。
-            if (acts != null && acts.hasReply()) {
-                panel.addView(buildMenuRow("↩", "回复", "不用打开应用",
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                toggleMenuReplyBox();
-                            }
-                        }));
-                buildMenuReplyBox(panel, d, acts);
-            } else if (d.contentIntent != null) {
-                panel.addView(buildMenuRow("➤", "打开应用回复",
-                        "该应用不支持直接回复",
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                dismissMenu();
-                                openAppForReply(d);
-                            }
-                        }));
-            }
-            // 2) 标为已读（通知自带已读动作才有）。
-            if (acts != null && acts.hasMarkRead()) {
-                panel.addView(buildMenuRow("✓", "标为已读", null,
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                dismissMenu();
-                                try {
-                                    acts.markReadIntent.send();
-                                    FileLog.i("MarkRead sent pkg="
-                                            + d.pkg);
-                                } catch (Throwable t) {
-                                    FileLog.i("MarkRead fail pkg="
-                                            + d.pkg + " err=" + t);
-                                }
-                                menuConsume(d);
-                            }
-                        }));
-            }
-            // 3) 稍后提醒（自有能力，固定有）。
-            panel.addView(buildMenuRow("◷", "稍后提醒", "10 分钟后",
-                    new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            dismissMenu();
-                            snoozeNotif(d);
-                            menuConsume(d);
-                        }
-                    }));
-            // 4) 收进回看（回看开关关着就不出现，保持菜单干净）。
-            if (FeatureFlags.recallCapsule) {
-                panel.addView(buildMenuRow("↩", "收进回看", null,
-                        new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                dismissMenu();
-                                pushRecall(d);
-                                menuConsume(d);
-                            }
-                        }));
-            }
-            // 5) v558: 这个应用以后收纳（原「只贴边」待遇，
-            // 改名后统一叫收纳）。当前有效规则还是跟随才
-            // 显示——已是收纳/永不弹的（含走了「全部应用」
-            // 默认条目的）不显示，避免死按钮。落盘与不再弹
-            // 同路：广播给 App 进程走 AppRules 单一数据源。
-            // v559: 有效值是 POP（显式弹出例外，绕过默认
-            // 收纳）时它现在也是照常弹的，同样显示这一行。
-            int effRule = AppRules.modeFor(d.pkg);
-            if (effRule == AppRules.DEFAULT
-                    || effRule == AppRules.POP) {
-                panel.addView(buildMenuRow("⇥", "这个应用以后收纳",
-                        null, new View.OnClickListener() {
-                            @Override
-                            public void onClick(View v) {
-                                dismissMenu();
-                                try {
-                                    android.content.Intent ri =
-                                            new android.content.Intent(
-                                                    NotificationService
-                                                            .ACTION_SET_APP_RULE);
-                                    ri.setPackage(
-                                            "com.chenan.flymebobo");
-                                    ri.putExtra("pkg", d.pkg);
-                                    ri.putExtra("mode",
-                                            AppRules.VALUE_EDGE);
-                                    app.sendBroadcast(ri);
-                                    FileLog.i("QuickMenu setEdge pkg="
-                                            + d.pkg);
-                                } catch (Throwable ignored) {
-                                }
-                                collectCurrentIntoFan(d);
-                            }
-                        }));
-            }
-            // 6) 这个应用不再弹（走 AppRules 单一数据源：广播
-            // 给 App 进程落盘 + 回广播刷新 SystemUI 的规则表）。
-            panel.addView(buildMenuRow("✕", "这个应用不再弹", null,
-                    new View.OnClickListener() {
-                        @Override
-                        public void onClick(View v) {
-                            dismissMenu();
-                            try {
-                                android.content.Intent ri =
-                                        new android.content.Intent(
-                                                NotificationService
-                                                        .ACTION_SET_APP_RULE);
-                                ri.setPackage("com.chenan.flymebobo");
-                                ri.putExtra("pkg", d.pkg);
-                                ri.putExtra("mode",
-                                        AppRules.VALUE_NEVER);
-                                app.sendBroadcast(ri);
-                                FileLog.i("QuickMenu never pkg="
-                                        + d.pkg);
-                            } catch (Throwable ignored) {
-                            }
-                            menuConsume(d);
-                        }
-                    }));
+            buildMenuItems(panel, d, acts);
 
             menuRoot = rootL;
             // v547: 窗口类型从 TYPE_APPLICATION_OVERLAY 换成
@@ -2055,7 +6177,8 @@ public class BubbleWindow {
                                 .WRAP_CONTENT));
         android.widget.TextView g = new android.widget.TextView(app);
         g.setText(glyph);
-        g.setTextColor(Color.WHITE);
+        g.setTextColor(lpMenuLight()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
         g.setTextSize(15);
         g.setGravity(Gravity.CENTER);
         row.addView(g, new android.widget.LinearLayout.LayoutParams(
@@ -2063,7 +6186,8 @@ public class BubbleWindow {
                         .WRAP_CONTENT));
         android.widget.TextView t = new android.widget.TextView(app);
         t.setText(label);
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(lpMenuLight()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
         t.setTextSize(14);
         // v548: 必须 singleLine + ellipsize。原来 label 没设
         // singleLine：sub 先按期望宽占位（如「该应用不支持
@@ -2083,7 +6207,9 @@ public class BubbleWindow {
             android.widget.TextView s =
                     new android.widget.TextView(app);
             s.setText(sub);
-            s.setTextColor(Color.argb(115, 255, 255, 255));
+            s.setTextColor(lpMenuLight()
+                    ? Color.rgb(100, 116, 139)
+                    : Color.argb(115, 255, 255, 255));
             s.setTextSize(11.5f);
             s.setSingleLine(true);
             s.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -2130,12 +6256,17 @@ public class BubbleWindow {
         final android.widget.EditText input =
                 new android.widget.EditText(app);
         input.setHint("输入回复…");
-        input.setHintTextColor(Color.argb(128, 255, 255, 255));
-        input.setTextColor(Color.WHITE);
+        input.setHintTextColor(lpMenuLight()
+                ? Color.rgb(148, 163, 184)
+                : Color.argb(128, 255, 255, 255));
+        input.setTextColor(lpMenuLight()
+                ? Color.rgb(15, 23, 42) : Color.WHITE);
         input.setTextSize(13.5f);
         input.setSingleLine(true);
         GradientDrawable ibg = new GradientDrawable();
-        ibg.setColor(Color.argb(36, 255, 255, 255));
+        ibg.setColor(lpMenuLight()
+                ? Color.rgb(241, 245, 249)
+                : Color.argb(36, 255, 255, 255));
         ibg.setCornerRadius(dp(999));
         input.setBackground(ibg);
         input.setPadding(dp(13), dp(8), dp(13), dp(8));
@@ -2214,6 +6345,15 @@ public class BubbleWindow {
         }
         boolean show = menuReplyBox.getVisibility() != View.VISIBLE;
         menuReplyBox.setVisibility(show ? View.VISIBLE : View.GONE);
+        // v570: 内嵌菜单里的回复框要输入法——面板窗口临时
+        // 改可聚焦，收起回复框时恢复（经典浮层菜单窗口本
+        // 来就可聚焦，不受影响）。
+        if (lightInlineMenu != null) {
+            setLightPanelFocusable(show);
+            // v574: 回复框展开/收起，菜单变高/变矮，面板
+            // 跟着撑开/缩回。
+            applyLightScrollCap();
+        }
         // v547: 回复框展开/收起后面板高度变了，按同一锚点
         // 重算位置（不播动画，整块仍须可见）。
         if (menuPanel != null) {
@@ -2284,6 +6424,8 @@ public class BubbleWindow {
      * 挡触摸或叠暗。 */
     private void closeOverlays() {
         dismissMenuNow();
+        // v564: 轻气泡收纳面板也是全局单浮层的一员。
+        dismissLightPanel();
     }
 
     /** v557: 长按菜单开关被关（FEATURE_TOGGLE 分发调用）——
@@ -2421,6 +6563,10 @@ public class BubbleWindow {
      * 重复调用安全：正淡出时直接忽略；收尾按根视图身份
      * 核对，不会误拆淡出期间新打开的菜单。 */
     public void dismissMenu() {
+        // v570: 轻气泡内嵌菜单也归这里收（它的条目点击走的
+        // 都是 dismissMenu()）——摘掉内嵌菜单本体，行刷新
+        // 由动作路径（lightRemove 等）自己负责。
+        collapseLightInlineMenu();
         if (menuRoot == null) {
             menuClosing = false;
             return;
@@ -3857,6 +8003,16 @@ public class BubbleWindow {
         handler.post(new Runnable() {
             @Override
             public void run() {
+                // v576: 轻气泡下载卡随通知移除一起撤。
+                if (FeatureFlags.lightMode
+                        && lightDownloads.remove(key) != null) {
+                    FileLog.i("Light download removed");
+                    refreshLightDot();
+                    if (lightPanelAdded
+                            && !lightPanelRecallMode) {
+                        rebuildLightPanelRows();
+                    }
+                }
                 removeNotifByKey(key);
                 rebuildDock();
             }
@@ -3910,6 +8066,44 @@ public class BubbleWindow {
         // code / two-factor authentication). Tried last, after
         // all Chinese patterns.
         return findEnglishCode(s);
+    }
+
+    /** v593: 从通知原文里认有效期——「有效期1分钟」
+     * 「5分钟内有效」「10分钟后过期」「valid for 5
+     * minutes」这类通知自己写明时长的，才有倒计时数
+     * 据；认不出返回 0（不编倒计时）。 */
+    private static long parseCodeValidityMs(String title,
+            String text) {
+        String s = (title != null ? title : "")
+                + "\n" + (text != null ? text : "");
+        String[][] pats = new String[][]{
+                {"有效期[^0-9]{0,4}([0-9]+)\\s*(小时|分钟|分|秒)"},
+                {"([0-9]+)\\s*(小时|分钟|分)内有效"},
+                {"([0-9]+)\\s*(小时|分钟|分)后(过期|失效)"},
+                {"(?i)valid for ([0-9]+)\\s*(hours?|minutes?|mins?|seconds?)"},
+                {"(?i)expires? in ([0-9]+)\\s*(hours?|minutes?|mins?)"}};
+        for (String[] p : pats) {
+            try {
+                java.util.regex.Matcher m =
+                        java.util.regex.Pattern.compile(p[0])
+                                .matcher(s);
+                if (m.find()) {
+                    long n = Long.parseLong(m.group(1));
+                    String u = m.group(2);
+                    if (u.startsWith("小")
+                            || u.toLowerCase().startsWith("h")) {
+                        return n * 3600_000L;
+                    }
+                    if (u.startsWith("秒")
+                            || u.toLowerCase().startsWith("s")) {
+                        return n * 1000L;
+                    }
+                    return n * 60_000L;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return 0;
     }
 
     /** v245: smart-locker cabinet/box number. "第17箱" (百为智能),
@@ -4123,7 +8317,8 @@ public class BubbleWindow {
             }
             if (rule == AppRules.EDGE
                     && !data.isDownload && !data.isLive
-                    && !data.isNavi && !data.isBus) {
+                    && !data.isNavi && !data.isBus
+                    && !FeatureFlags.lightMode) {
                 // v561: recalled 重投豁免 EDGE 落点——回看
                 // 把手、稍后提醒都是用户主动取回，若再按
                 // EDGE 收进扇子就是原地打转。只豁免这一次
@@ -4138,6 +8333,104 @@ public class BubbleWindow {
                     pileIntoFan(data);
                     return;
                 }
+            }
+        }
+        // v564: 轻气泡分支（在经典开关与后续全部逻辑之前；
+        // lightMode 关时整段不存在）。普通通知：安静规则
+        // NEVER 已在上面否决；「弹出」(POP) = 放行系统正常
+        // 通知——不收不弹（NS 侧同步不撤这条，见
+        // NotificationService 的 Light release）；「收纳」
+        // (EDGE) 与默认一律入轻气泡收纳栈。音乐：不弹胶囊，
+        // 只更新面板音乐卡状态。v576: 下载同样不弹经典胶
+        // 囊，进面板当卡片；实况/导航/公交不接入轻气泡、
+        // 也不弹经典胶囊（wei：轻气泡切换后不能显示经典
+        // 模式内容），系统通知原样留在通知栏。
+        if (FeatureFlags.lightMode && data != null
+                && !data.isCall && data.pkg != null) {
+            if (data.isMusic) {
+                if (FeatureFlags.lightMusicCard) {
+                    if (FeatureFlags.notif
+                            && FeatureFlags.music) {
+                        lightMusicIn(data);
+                    }
+                    return;
+                }
+                // v578: 「音乐卡片」关——不显示卡片，音乐
+                // 按普通通知收纳（POP 仍放行；NEVER 已在
+                // 上面否决）。
+                if (!FeatureFlags.notif) {
+                    return;
+                }
+                if (AppRules.modeFor(data.pkg)
+                        == AppRules.POP) {
+                    FileLog.i("Light release pkg=" + data.pkg);
+                    return;
+                }
+                lightCollectMusicOff(data);
+                return;
+            }
+            if (data.isDownload) {
+                if (FeatureFlags.notif && FeatureFlags.dl) {
+                    lightDownloadIn(data);
+                }
+                return;
+            }
+            if (data.isLive || data.isNavi || data.isBus) {
+                return;
+            }
+            if (isOrdinaryForLight(data)) {
+                if (!FeatureFlags.notif) {
+                    return;
+                }
+                if (AppRules.modeFor(data.pkg) == AppRules.POP) {
+                    FileLog.i("Light release pkg=" + data.pkg);
+                    return;
+                }
+                // v587: 验证码识别搬进轻气泡——经典路径的
+                // 识别点在本分支之后，轻气泡以前从没给
+                // data.code 赋过值。同款识别（含柜号），
+                // 识别完再收纳。
+                if (FeatureFlags.code && data.code == null) {
+                    String[] found = extractCode(data.title,
+                            data.text);
+                    if (found != null) {
+                        data.code = found[0];
+                        data.codeLabel = found[1];
+                        data.isPickupCode =
+                                isPickupKeyword(found[1]);
+                        if (data.isPickupCode) {
+                            data.cabinet = extractCabinet(
+                                    data.title, data.text);
+                        }
+                    }
+                }
+                boolean freshLight = true;
+                if (data.key != null) {
+                    for (NotifData e : lightStack) {
+                        if (data.key.equals(e.key)) {
+                            freshLight = false;
+                            break;
+                        }
+                    }
+                }
+                lightCollect(data);
+                // v587: 验证码自动复制搬过来（wei 定）——
+                // 与经典同口径：只复制验证码不复制取件码，
+                // 只在新条目上复制一次（同 key 更新不重
+                // 复），开关在 autoCopyVerifyCode 里。
+                if (freshLight && data.code != null
+                        && !data.isPickupCode) {
+                    autoCopyVerifyCode(data.code);
+                }
+                // v586: 轻气泡新通知也响一声（wei 定：
+                // 「轻气泡新通知提示一下」）——与经典真弹
+                // 出同口径，走 BubbleSound 自己的门：提示
+                // 音总开关、按应用规则（默认不响，六个默
+                // 认应用跟随全局）、1 秒节流、勿扰压制全
+                // 在里面。菜单重收（collectCurrentIntoFan）
+                // 不走这里，不会响。
+                BubbleSound.play(app, data.pkg);
+                return;
             }
         }
         // v259: APP feature switches (real-time, no restart).
@@ -5570,6 +9863,13 @@ public class BubbleWindow {
         handler.post(new Runnable() {
             @Override
             public void run() {
+                // v576: 轻气泡下没有经典下载胶囊——进度进
+                // 面板下载卡，原地刷新。
+                if (FeatureFlags.lightMode) {
+                    lightDownloadProgress(key, title, text, pct,
+                            completed);
+                    return;
+                }
                 for (int i = 0; i < dock.getChildCount(); i++) {
                     View v = dock.getChildAt(i);
                     if (v instanceof CapsuleView) {
@@ -5651,6 +9951,42 @@ public class BubbleWindow {
         handler.post(new Runnable() {
             @Override
             public void run() {
+                // v564: 轻气泡音乐卡歌词行跟随。
+                if (FeatureFlags.lightMode
+                        && lightMusicData != null
+                        && key.equals(lightMusicData.key)) {
+                    lightMusicLyric = lyric;
+                    if (lightMusicData != null) {
+                        lightMusicData.lyrics = lyric;
+                    }
+                    if (lightMusicLyricView != null
+                            && lightPanelAdded) {
+                        lightMusicLyricView.setText(lyric);
+                        // v568: 换行后重选一次，跑马灯从新
+                        // 行起滚（经典重绑同款做法）。
+                        lightMusicLyricView.setSelected(false);
+                        lightMusicLyricView.setSelected(true);
+                        lightMusicLyricView.setVisibility(
+                                lyric.isEmpty() ? View.GONE
+                                        : View.VISIBLE);
+                    }
+                    // v565: 歌词跟随开着时，新行按到达
+                    // 药丸同款在边缘亮一次；NS 的「找不到
+                    // 当前歌词」是占位提示，不是歌词，不亮。
+                    if (lightLyricFollow && !lyric.isEmpty()
+                            && !"找不到当前歌词".equals(lyric)) {
+                        flashLightLyricPill(lyric);
+                    }
+                }
+                // v566 诊断：跟随开着、NS 也发了歌词，却
+                // 对不上当前音乐 key——打一条，下次中途
+                // 停能分清是 key 漂移还是 NS 没发。
+                if (FeatureFlags.lightMode && lightLyricFollow
+                        && lightMusicData != null
+                        && !key.equals(lightMusicData.key)) {
+                    FileLog.i("Light lyric keymiss got=" + key
+                            + " want=" + lightMusicData.key);
+                }
                 if (dock == null) {
                     return;
                 }
@@ -7889,6 +12225,32 @@ public class BubbleWindow {
             // whether a card is open or not. Find the music capsule
             // by key and update it either way; the card UI (seek /
             // time) is harmless when the card is closed.
+            // v564: 轻气泡音乐状态跟随会话广播（面板音乐卡
+            // 的进度/播放态、呼吸灯变色都读这份状态）。
+            if (FeatureFlags.lightMode && lightMusicData != null
+                    && key != null
+                    && key.equals(lightMusicData.key)) {
+                lightMusicPosMs = positionMs;
+                lightMusicDurMs = durationMs;
+                if (playing != lightMusicPlaying) {
+                    lightMusicPlaying = playing;
+                    if (lightPanelAdded) {
+                        updateLightMusicProgressViews();
+                    }
+                }
+                // v565: 收藏真值随 tick 对齐（会话暴露了
+                // heart rating 才有这一路；没有就保留本地
+                // 翻转的状态）。
+                if (hasFavorite) {
+                    lightMusicHasFavorite = true;
+                    if (favorite != lightMusicFavorite) {
+                        lightMusicFavorite = favorite;
+                        if (lightPanelAdded) {
+                            updateLightMusicProgressViews();
+                        }
+                    }
+                }
+            }
             if (key == null) {
                 return;
             }
@@ -7939,6 +12301,26 @@ public class BubbleWindow {
      * one music capsule for this key. */
     public void onMusicState(String key, String title, String artist) {
         try {
+            // v564: 轻气泡音乐卡的歌名/歌手跟随会话（切歌
+            // 立刻换，不等新通知）。
+            if (FeatureFlags.lightMode && lightMusicData != null
+                    && key != null
+                    && key.equals(lightMusicData.key)) {
+                boolean changed = false;
+                if (title != null && !title.isEmpty()
+                        && !title.equals(lightMusicTitle)) {
+                    lightMusicTitle = title;
+                    changed = true;
+                }
+                if (artist != null && !artist.isEmpty()
+                        && !artist.equals(lightMusicArtist)) {
+                    lightMusicArtist = artist;
+                    changed = true;
+                }
+                if (changed && lightPanelAdded) {
+                    rebuildLightPanelRows();
+                }
+            }
             if (key == null) {
                 return;
             }
@@ -8012,6 +12394,15 @@ public class BubbleWindow {
     public void onMusicArt(String key,
             android.graphics.Bitmap art) {
         try {
+            // v564: 轻气泡音乐卡封面跟随会话。
+            if (FeatureFlags.lightMode && lightMusicData != null
+                    && key != null && art != null
+                    && key.equals(lightMusicData.key)) {
+                lightMusicArt = art;
+                if (lightPanelAdded) {
+                    rebuildLightPanelRows();
+                }
+            }
             if (key == null || art == null || dock == null) {
                 return;
             }
@@ -9478,6 +13869,15 @@ public class BubbleWindow {
      * every pin/card transition re-syncs it. */
     private void syncLyricListen(String key) {
         if (app == null || key == null) {
+            return;
+        }
+        // v566: 轻气泡歌词跟随开着时，这条 key 的监听
+        // 归轻气泡自己管（sendLightLyricListen），经典
+        // 同步不许插手——它按经典胶囊状态算 want，中途
+        // 发一条 listen=false 就能把轻气泡的歌词掐断。
+        if (FeatureFlags.lightMode && lightLyricFollow
+                && lightMusicData != null
+                && key.equals(lightMusicData.key)) {
             return;
         }
         boolean want = false;

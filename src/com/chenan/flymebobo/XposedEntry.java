@@ -306,14 +306,21 @@ public class XposedEntry extends XposedModule {
         } catch (Throwable t) {
             log(6, TAG, "CallNotifSuppress install failed", t);
         }
+        // v565 曾在此装 LightQsMediaSuppress 藏控制中心
+        // 的系统音乐卡；v566 摘除——wei 2026-11-27 定
+        // 「状态栏的音乐不管他了」，控制中心音乐卡保持
+        // 系统原样，不再拦截（类文件保留，不安装）。
         IntentFilter filter = new IntentFilter(NotificationService.ACTION_NOTIFY);
         filter.addAction(NotificationService.ACTION_LYRIC);
         filter.addAction(NotificationService.ACTION_DOWNLOAD);
         filter.addAction(NotificationService.ACTION_DOWNLOAD_REMOVE);
+        filter.addAction(NotificationService.ACTION_MUSIC_GONE);
         filter.addAction(NotificationService.ACTION_CALL);
         filter.addAction(NotificationService.ACTION_CALL_RESULT);
         filter.addAction(NotificationService.ACTION_MUSIC_PROGRESS);
         filter.addAction(NotificationService.ACTION_FEATURE_TOGGLE);
+        filter.addAction(NotificationService.ACTION_LIGHT_OPEN);
+        filter.addAction(NotificationService.ACTION_LIGHT_RECALL_OPEN);
         filter.addAction(NotificationService.ACTION_APP_RULES);
         filter.addAction(NotificationService.ACTION_SCENE_EXC);
         filter.addAction(NotificationService.ACTION_SOUND_RULES);
@@ -397,6 +404,9 @@ public class XposedEntry extends XposedModule {
                         // v539: unlocked — the recall handle may
                         // show again (if its 3 minutes are not up).
                         bw.refreshRecallHandle();
+                        // v564: unlocked — the light dot may
+                        // show again too.
+                        bw.refreshLightDot();
                     }
                     return;
                 }
@@ -495,6 +505,21 @@ public class XposedEntry extends XposedModule {
                 // service — the listener's own FileLog lines never
                 // reach the log the user sends, so the result is
                 // forwarded here (SystemUI process) to be visible.
+                // v575: App 收纳/时光机页点行打开——转给
+                // BubbleWindow 走面板同款流程（按 key 找条目）。
+                if (NotificationService.ACTION_LIGHT_OPEN.equals(
+                        intent.getAction())) {
+                    BubbleWindow.getInstance().lightOpenByKey(
+                            intent.getStringExtra("key"));
+                    return;
+                }
+                if (NotificationService.ACTION_LIGHT_RECALL_OPEN
+                        .equals(intent.getAction())) {
+                    BubbleWindow.getInstance()
+                            .lightRecallOpenByKey(
+                                    intent.getStringExtra("key"));
+                    return;
+                }
                 if (NotificationService.ACTION_CANCEL_DIAG.equals(
                         intent.getAction())) {
                     FileLog.i("CancelDiag key=" + intent.getStringExtra("key")
@@ -543,6 +568,72 @@ public class XposedEntry extends XposedModule {
                         BubbleWindow bw = BubbleWindow.getInstance();
                         if (bw != null) {
                             bw.onRecallCapsuleDisabled();
+                        }
+                    }
+                    // v564: 轻气泡设计模式翻动——SystemUI 侧
+                    // 立即换挡（开：小签按栈刷新；关：面板与
+                    // 小签立即收、音乐状态清）。
+                    if ("lightMode".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onLightModeChanged(fenabled);
+                        }
+                    }
+                    // v572: 轻气泡黑/白模式翻动——小签与面板
+                    // 立即按新皮重画。
+                    if ("lightPanelWhite".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onLightPanelThemeChanged();
+                        }
+                    }
+                    // v578: 轻气泡「音乐卡片」开关翻动——关时
+                    // 立即清掉面板音乐卡与歌词跟随状态。
+                    if ("lightMusicCard".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.onLightMusicCardChanged(fenabled);
+                        }
+                    }
+                    // v591: 边缘发光开关翻动——refresh 里
+                    // 同步光晕窗口的挂/撤。
+                    if ("lightDotGlow".equals(fkey)) {
+                        BubbleWindow bw = BubbleWindow.getInstance();
+                        if (bw != null) {
+                            bw.refreshLightDot();
+                        }
+                    }
+                    // v564: 小签位置是字符串——设置页 chips /
+                    // 拖动落盘回推都借这条广播带 pos extra。
+                    if ("lightDotPos".equals(fkey)) {
+                        String pos = intent.getStringExtra("pos");
+                        if (pos != null) {
+                            FeatureFlags.lightDotPos =
+                                    FeatureFlags
+                                            .parseLightDotPos(pos);
+                            FileLog.i("Light pos -> "
+                                    + FeatureFlags.lightDotPos);
+                            BubbleWindow bw =
+                                    BubbleWindow.getInstance();
+                            if (bw != null) {
+                                bw.refreshLightDot();
+                            }
+                        }
+                    }
+                    // v567: 面板外观是打包字符串——设置页滑条
+                    // 借这条广播带 style extra，SystemUI 侧更
+                    // 新静态值，下次开面板按新外观建。
+                    if ("lightPanelStyle".equals(fkey)) {
+                        String style = intent.getStringExtra(
+                                "style");
+                        if (style != null) {
+                            FeatureFlags.lightPanelStyle =
+                                    FeatureFlags
+                                            .parseLightPanelStyle(
+                                                    style);
+                            FileLog.i("Light style -> "
+                                    + FeatureFlags
+                                            .lightPanelStyle);
                         }
                     }
                     // v557: 长按菜单开关关掉——正开着的菜单立即
@@ -993,6 +1084,17 @@ public class XposedEntry extends XposedModule {
                     String rkey = intent.getStringExtra("key");
                     BubbleWindow.getInstance()
                             .onNotificationRemoved(rkey);
+                    return;
+                }
+                // v564: music notification gone — the light
+                // panel's music card comes down.
+                if (NotificationService.ACTION_MUSIC_GONE.equals(
+                        intent.getAction())) {
+                    String mkey = intent.getStringExtra("key");
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onLightMusicGone(mkey);
+                    }
                     return;
                 }
                 // Live download progress (v95, v98, v99: title

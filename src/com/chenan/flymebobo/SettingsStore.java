@@ -409,7 +409,9 @@ public class SettingsStore {
                             || "bubbleCustomName".equals(key)
                             || "bubbleCustomPath".equals(key)
                             || "recallTtlMin".equals(key)
-                            || "filterWords".equals(key)) {
+                            || "filterWords".equals(key)
+                            || "lightDotPos".equals(key)
+                            || "lightPanelStyle".equals(key)) {
                         fEd.putString(key, v);
                         fChanged = true;
                         continue;

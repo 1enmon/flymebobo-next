@@ -157,6 +157,143 @@ public class FeatureFlags {
     // prefs + 文件镜像通道（fileOrPrefsString，v545 教训），
     // SettingsStore 恢复按字符串回。改词表走 FEATURE_TOGGLE
     // 广播带 words extra 即时生效（XposedEntry）。
+    // v564 (2.5.0): 轻气泡设计模式总开关——默认关（= 经典
+    // 模式，行为与 2.4.6 完全一致）；开启后普通通知不弹胶囊、
+    // 静默收进边缘小签（简洁模式形态），音乐进收纳面板置顶卡、
+    // 系统音乐通知隐藏，App 设置页换轻气泡设计。模式值走
+    // flymebobo_features 的布尔键 "lightMode"，文件镜像同
+    // 其他开关（fileOrPrefsBool）。SystemUI 侧即时生效点在
+    // BubbleWindow.onLightModeChanged（XposedEntry 转发）。
+    public static volatile boolean lightMode = false;
+    // v572: 轻气泡黑 / 白双模式（wei 定）——false = 黑色
+    // 模式（深色面板/药丸，现行长相）；true = 白色模式
+    // （白底 + 黑色描边，文字转深色）。布尔键
+    // "lightPanelWhite"，文件镜像同 lightMode 口径。
+    public static volatile boolean lightPanelWhite = false;
+    // v578: 轻气泡「音乐卡片」总开关（wei 定名）——默认开：
+    // 开了音乐显示在收纳面板的卡片里；关了不显示卡片，
+    // 音乐按普通通知收纳。布尔键 "lightMusicCard"，文件
+    // 镜像同 lightMode 口径。
+    public static volatile boolean lightMusicCard = true;
+    // v591: 呼吸灯边缘发光（wei 点名小功能）——默认开：
+    // 小签呼吸时屏幕边缘泛起同色光晕，放歌时跟签一
+    // 起流转颜色。布尔键 "lightDotGlow"，文件镜像同
+    // lightMode 口径。
+    public static volatile boolean lightDotGlow = true;
+    // v564: 轻气泡小签位置——与已移除的两点同格式同刻度
+    // （字符串 prefs + 文件镜像，fileOrPrefsString）：首字
+    // L/R=贴左边/右边，尾数 0/1/2=靠上/中间/靠下，默认
+    // "L1"（左·中间，试验田通知收纳 v0.6 定版值）。改位置
+    // 走 FEATURE_TOGGLE 带 pos extra（设置页）或拖动经
+    // NotificationService.ACTION_SET_LIGHT_DOT_POS 落盘回推。
+    public static volatile String lightDotPos = "L1";
+
+    // v567: 收纳面板外观（wei 定：面板要能调整大小——
+    // 圆角、长宽、透明度、比例都要能调）。五项打包成一个
+    // 字符串键 "lightPanelStyle" = "宽dp,可见行数,圆角dp,
+    // 不透明%,比例%"，走字符串 prefs + 文件镜像（同
+    // lightDotPos 口径）；设置页滑条经 FEATURE_TOGGLE 的
+    // style extra 即时同步 SystemUI，下次开面板生效。
+    public static volatile String lightPanelStyle =
+            "292,5,18,94,100";
+
+    /** v567: 面板外观解析+钳位，返回 [宽,可见行数,圆角,
+     * 不透明%,比例%]；坏值逐项回默认。纯函数，App 进程
+     * 读 prefs 时也可直接用。 */
+    public static int[] lightPanelStyleValues(String raw) {
+        int[] out = {292, 5, 18, 94, 100};
+        int[] min = {240, 3, 0, 30, 80};
+        int[] max = {360, 8, 36, 100, 120};
+        if (raw != null) {
+            String[] parts = raw.split(",");
+            for (int i = 0; i < out.length && i < parts.length;
+                    i++) {
+                try {
+                    out[i] = Integer.parseInt(parts[i].trim());
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        for (int i = 0; i < out.length; i++) {
+            if (out[i] < min[i]) {
+                out[i] = min[i];
+            }
+            if (out[i] > max[i]) {
+                out[i] = max[i];
+            }
+        }
+        return out;
+    }
+
+    /** v567: 规范化打包（解析→钳位→重组），落盘/广播
+     * 都用这个形态。 */
+    public static String parseLightPanelStyle(String raw) {
+        int[] v = lightPanelStyleValues(raw);
+        return v[0] + "," + v[1] + "," + v[2] + "," + v[3]
+                + "," + v[4];
+    }
+
+    public static int lightPanelWidthDp() {
+        return lightPanelStyleValues(lightPanelStyle)[0];
+    }
+
+    public static int lightPanelRows() {
+        return lightPanelStyleValues(lightPanelStyle)[1];
+    }
+
+    public static int lightPanelRadiusDp() {
+        return lightPanelStyleValues(lightPanelStyle)[2];
+    }
+
+    public static int lightPanelAlphaPct() {
+        return lightPanelStyleValues(lightPanelStyle)[3];
+    }
+
+    public static int lightPanelScalePct() {
+        return lightPanelStyleValues(lightPanelStyle)[4];
+    }
+
+    /** v564: 小签位置解析：坏值回默认 "L1"。 */
+    public static String parseLightDotPos(String raw) {
+        if (raw != null) {
+            String s = raw.trim().toUpperCase(
+                    java.util.Locale.US);
+            if (s.length() == 2
+                    && (s.charAt(0) == 'L' || s.charAt(0) == 'R')
+                    && s.charAt(1) >= '0' && s.charAt(1) <= '2') {
+                return s;
+            }
+        }
+        return "L1";
+    }
+
+    /** v564: 小签贴右边？ */
+    public static boolean lightDotRight() {
+        return lightDotPos != null && lightDotPos.startsWith("R");
+    }
+
+    /** v564: 小签高度档位：0=靠上、1=中间、2=靠下。 */
+    public static int lightDotBand() {
+        return parseLightDotPos(lightDotPos).charAt(1) - '0';
+    }
+
+    /** v564: 档位 → 小签顶边占屏高的比例（与两点共用刻度）。 */
+    public static float posYFrac(int band) {
+        switch (band) {
+            case 0:
+                return 0.16f;
+            case 2:
+                return 0.72f;
+            default:
+                return 0.46f;
+        }
+    }
+
+    /** v564: 小签顶边占屏高比例。 */
+    public static float lightDotYFrac() {
+        return posYFrac(lightDotBand());
+    }
+
     public static final String DEFAULT_FILTER_WORDS =
             "促销\n秒杀\n领券\n限时抢购\n返现\n优惠券";
     public static volatile String filterWords = DEFAULT_FILTER_WORDS;
@@ -315,6 +452,21 @@ public class FeatureFlags {
         } else if ("keywordFilter".equals(key)) {
             keywordFilter = enabled;
             FileLog.i("KeywordFilter -> " + (enabled ? "on" : "off"));
+        } else if ("lightMode".equals(key)) {
+            lightMode = enabled;
+            FileLog.i("Light mode -> " + (enabled ? "on" : "off"));
+        } else if ("lightPanelWhite".equals(key)) {
+            lightPanelWhite = enabled;
+            FileLog.i("Light panelWhite -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("lightMusicCard".equals(key)) {
+            lightMusicCard = enabled;
+            FileLog.i("Light musicCard -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("lightDotGlow".equals(key)) {
+            lightDotGlow = enabled;
+            FileLog.i("Light dotGlow -> "
+                    + (enabled ? "on" : "off"));
         }
         // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
@@ -388,6 +540,23 @@ public class FeatureFlags {
             // 示 1 分钟、实际按默认 3 分钟过期）。
             recallTtlMin = parseRecallTtlMin(
                     fileOrPrefsString("recallTtlMin", prefs, "3"));
+            // v564: 轻气泡设计模式——默认关（经典）；小签位置
+            // 是字符串键，走文件优先（同 recallTtlMin 口径）。
+            lightMode = fileOrPrefsBool("lightMode", prefs, false);
+            lightPanelWhite = fileOrPrefsBool(
+                    "lightPanelWhite", prefs, false);
+            lightMusicCard = fileOrPrefsBool(
+                    "lightMusicCard", prefs, true);
+            lightDotGlow = fileOrPrefsBool(
+                    "lightDotGlow", prefs, true);
+            lightDotPos = parseLightDotPos(
+                    fileOrPrefsString("lightDotPos", prefs, "L1"));
+            lightPanelStyle = parseLightPanelStyle(
+                    fileOrPrefsString("lightPanelStyle", prefs,
+                            "292,5,18,94,100"));
+            FileLog.i("Light load -> mode=" + lightMode
+                    + " pos=" + lightDotPos
+                    + " style=" + lightPanelStyle);
             // v534: 当前音效 id（字符串 prefs，默认 "soft" 轻木）。
             // v535: 自定义文件路径/名也是字符串——三个字符串键都
             // 走逐键安全读：某个键万一被旧备份写坏成别的类型，

@@ -97,6 +97,27 @@ public class NotificationService extends NotificationListenerService {
      * 照常回广播 ACTION_APP_RULES 刷新 SystemUI。 */
     public static final String ACTION_SET_APP_RULE =
             "com.chenan.flymebobo.SET_APP_RULE";
+    /** v564: SystemUI -> APP, 轻气泡小签被拖动改了档位——
+     * 位置的落盘在 App 进程做（与 collectDotPos 同路）：写
+     * flymebobo_features 的 "lightDotPos" + SettingsStore
+     * 备份，再回广播 FEATURE_TOGGLE(key=lightDotPos, pos)
+     * 让 SystemUI 对齐。extras: "pos"。 */
+    public static final String ACTION_SET_LIGHT_DOT_POS =
+            "com.chenan.flymebobo.SET_LIGHT_DOT_POS";
+    /** v575: APP -> SystemUI, 轻气泡 App 的收纳页点行——
+     * 按 key 走面板同款打开流程（出栈、进时光机、停闪、
+     * 按打开方式开），不再只是启动应用。extras: "key"。 */
+    public static final String ACTION_LIGHT_OPEN =
+            "com.chenan.flymebobo.LIGHT_OPEN";
+    /** v575: APP -> SystemUI, 轻气泡 App 的时光机页点行
+     * ——按 key 走面板时光机同款打开。extras: "key"。 */
+    public static final String ACTION_LIGHT_RECALL_OPEN =
+            "com.chenan.flymebobo.LIGHT_RECALL_OPEN";
+    /** v564: APP -> SystemUI, 音乐通知被移除（会话结束）——
+     * 轻气泡面板的音乐卡据此撤下。extras: "key"。经典路径
+     * 不消费这条。 */
+    public static final String ACTION_MUSIC_GONE =
+            "com.chenan.flymebobo.MUSIC_GONE";
     /** v508: APP -> SystemUI, a scene exception changed in
      * SceneExceptionsActivity. Extra: "sceneexc_flat" (the whole
      * stored set, flattened). SystemUI applies it at once. */
@@ -3699,6 +3720,7 @@ public class NotificationService extends NotificationListenerService {
             dismissFilter.addAction(ACTION_DISMISS);
             dismissFilter.addAction(ACTION_MUSIC_CONTROL);
             dismissFilter.addAction(ACTION_SET_APP_RULE);
+            dismissFilter.addAction(ACTION_SET_LIGHT_DOT_POS);
             m.invoke(this, callControlReceiver, dismissFilter, 2);
         } catch (Throwable t) {
             try {
@@ -3708,6 +3730,7 @@ public class NotificationService extends NotificationListenerService {
                 dismissFilter2.addAction(ACTION_DISMISS);
                 dismissFilter2.addAction(ACTION_MUSIC_CONTROL);
                 dismissFilter2.addAction(ACTION_SET_APP_RULE);
+                dismissFilter2.addAction(ACTION_SET_LIGHT_DOT_POS);
                 registerReceiver(callControlReceiver, dismissFilter2);
             } catch (Throwable ignored) {
             }
@@ -4188,6 +4211,28 @@ public class NotificationService extends NotificationListenerService {
                             FileLog.i("SetAppRule pkg=" + rp
                                     + " mode=" + rm);
                         }
+                        return;
+                    }
+                    // v564: 轻气泡小签拖动落盘——写 prefs +
+                    // 备份，再回 FEATURE_TOGGLE 让 SystemUI
+                    // 对齐位置（同 collectDotPos 的旧路）。
+                    if (ACTION_SET_LIGHT_DOT_POS.equals(
+                            intent.getAction())) {
+                        String pos = intent.getStringExtra("pos");
+                        pos = FeatureFlags.parseLightDotPos(pos);
+                        context.getSharedPreferences(
+                                "flymebobo_features",
+                                android.content.Context.MODE_PRIVATE)
+                                .edit().putString("lightDotPos", pos)
+                                .commit();
+                        SettingsStore.saveAll(context);
+                        android.content.Intent back =
+                                new android.content.Intent(
+                                        ACTION_FEATURE_TOGGLE);
+                        back.putExtra("key", "lightDotPos");
+                        back.putExtra("pos", pos);
+                        context.sendBroadcast(back);
+                        FileLog.i("SetLightDotPos pos=" + pos);
                         return;
                     }
                     // v171: music card control from SystemUI.
@@ -5262,7 +5307,33 @@ public class NotificationService extends NotificationListenerService {
             // are NOT cancelled either (v95): the 1s tick re-reads the
             // live progress from the active notification.
             boolean isDownload = isDownloadType;
-            if (!isMusic && !isDownload && FeatureFlags.notif) {
+            // v564: 轻气泡「弹出」档 = 放行系统正常通知——这条
+            // 不撤，让它按系统原样留在通知栏（BubbleWindow 侧
+            // 同样不收不弹）。模式与规则都读 App 进程自己的
+            // prefs（本进程的 FeatureFlags 静态值不保证新鲜）。
+            boolean lightRelease = false;
+            if (!isMusic && !isDownload) {
+                try {
+                    boolean lm = getSharedPreferences(
+                            "flymebobo_features",
+                            android.content.Context.MODE_PRIVATE)
+                            .getBoolean("lightMode", false);
+                    if (lm) {
+                        AppRules.load(this);
+                        lightRelease = AppRules.modeFor(
+                                sbn.getPackageName())
+                                == AppRules.POP;
+                        if (lightRelease) {
+                            FileLog.i("Light release keep shade"
+                                    + " pkg="
+                                    + sbn.getPackageName());
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            if (!isMusic && !isDownload && FeatureFlags.notif
+                    && !lightRelease) {
                 try {
                     cancelNotif(sbn);
                 } catch (Throwable ignored) {
@@ -5353,6 +5424,16 @@ public class NotificationService extends NotificationListenerService {
         // the music stopped, so stop listening.
         if (sbn != null && musicKey != null
                 && musicKey.equals(sbn.getKey())) {
+            // v564: 告诉 SystemUI 音乐结束了（轻气泡面板的
+            // 音乐卡据此撤下；经典路径不消费这条广播）。
+            try {
+                android.content.Intent gone =
+                        new android.content.Intent(
+                                ACTION_MUSIC_GONE);
+                gone.putExtra("key", sbn.getKey());
+                sendBroadcast(gone);
+            } catch (Throwable ignored) {
+            }
             musicListening = false;
             teardownMusicSession();
             musicToken = null;
