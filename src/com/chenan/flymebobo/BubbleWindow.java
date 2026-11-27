@@ -198,79 +198,6 @@ public class BubbleWindow {
     private final java.util.Map<String, Runnable> snoozeTimers =
             new java.util.HashMap<>();
     private static final long SNOOZE_DELAY_MS = 10 * 60_000L;
-    // v546: 排队呼吸点——suppressedQueue 里哪些 key 是场景门
-    // 排的（决定小点颜色：场景=橙、静默=紫、混合优先橙）。
-    private final java.util.HashSet<String> sceneQueuedKeys =
-            new java.util.HashSet<>();
-    private FrameLayout dotRoot;
-    private View dotView;
-    private WindowManager.LayoutParams dotParams;
-    private boolean dotWindowAdded;
-    private android.animation.ValueAnimator dotAnimator;
-    // v549: 呼吸点拖动状态（按住上下拖改高度档位，松手落盘；
-    // 拖动阈值内抬手算点击=瞄一眼）。rawY/起始 y 都记原始值。
-    private float dotDownRawY;
-    private int dotDragStartY;
-    private boolean dotDragging;
-    // v546: 排队瞄一眼面板（点小点展开；全屏透明层 + 左侧
-    // 小面板，点外面收起；只是看，不动队列）。
-    private FrameLayout queuePanelRoot;
-    private android.widget.LinearLayout queuePanelBox;
-    private WindowManager.LayoutParams queuePanelParams;
-    private boolean queuePanelAdded;
-    // v556: 收纳点（替代扇子，wei 定稿）——与排队呼吸点是
-    // 两个独立的东西：排队点临时（场景/静默排队，补弹完
-    // 消失），收纳点长存（开了替代开关就一直在边缘守着，
-    // 收进去的普通胶囊不过期、处理一条少一条）。本来要
-    // 进扇子（pile）的普通胶囊改收进 collectStack（头=
-    // 最新，最多 20 条，溢出最老转回看栈）。快照就是
-    // NotifData 本体（同回看栈的做法）。
-    private final java.util.ArrayDeque<NotifData> collectStack =
-            new java.util.ArrayDeque<>();
-    private static final int COLLECT_MAX = 20;
-    private FrameLayout cdotRoot;
-    private FrameLayout cdotBody;
-    private View cdotTab;
-    private android.widget.TextView cdotBadge;
-    private android.widget.LinearLayout cdotPeek;
-    private View cdotPeekDot;
-    private android.widget.TextView cdotPeekLabel;
-    private WindowManager.LayoutParams cdotParams;
-    private boolean cdotWindowAdded;
-    private android.animation.ValueAnimator cdotAnimator;
-    // 收纳点拖动状态（同呼吸点：阈值内抬手=点击开面板，
-    // 超阈值上下拖改高度档位，松手落盘）。
-    private float cdotDownRawY;
-    private int cdotDragStartY;
-    private boolean cdotDragging;
-    private boolean cdotPeeking;
-    private final Runnable cdotPeekEndRunnable = new Runnable() {
-        @Override
-        public void run() {
-            cdotPeeking = false;
-            if (cdotPeek != null) {
-                cdotPeek.setVisibility(View.GONE);
-            }
-            if (cdotTab != null) {
-                cdotTab.setVisibility(View.VISIBLE);
-            }
-            if (cdotBadge != null) {
-                cdotBadge.setVisibility(View.VISIBLE);
-            }
-            refreshCollectDot();
-        }
-    };
-    private final java.util.HashMap<String, String>
-            collectLabelCache = new java.util.HashMap<>();
-    private final java.util.HashMap<String, Integer>
-            collectColorCache = new java.util.HashMap<>();
-    // v556: 收纳面板（点小点展开；全屏透明层 + 贴小点一侧
-    // 的面板，点外面收起；能操作：点条目展开成胶囊、左滑
-    // 收进回看、顶部全部展开、行长按呼长按菜单）。
-    private FrameLayout collectPanelRoot;
-    private android.widget.LinearLayout collectPanelBox;
-    private WindowManager.LayoutParams collectPanelParams;
-    private boolean collectPanelAdded;
     /** v320: Amap bus live navigation state (no voice). Mode A
      * (waiting) shows real-time arrival from BusNaviHook; mode B
      * (on the bus) shows next stop / remaining stations, computed
@@ -671,29 +598,13 @@ public class BubbleWindow {
                     }
                 } catch (Throwable ignored) {
                 }
-                // v546: 呼吸点同样的屏幕守卫（亮屏重评、灭屏藏）。
+                // v547: 长按菜单也别残留在息屏/锁屏上。
+                // v557: 息屏走硬摘版——这种最该摘干净的
+                // 时刻不走动画异步路径（动画收尾一旦被
+                // 跳过，全屏层就漏在屏上吃触摸）。
                 try {
-                    if (on) {
-                        refreshQueueDot();
-                    } else {
-                        hideQueueDot();
-                        dismissQueuePanel();
-                        // v547: 长按菜单也别残留在息屏/锁屏上。
-                        // v557: 息屏走硬摘版——这种最该摘干净的
-                        // 时刻不走动画异步路径（动画收尾一旦被
-                        // 跳过，全屏层就漏在屏上吃触摸）。
+                    if (!on) {
                         dismissMenuNow();
-                    }
-                } catch (Throwable ignored) {
-                }
-                // v556: 收纳点同样的屏幕守卫（亮屏重评、
-                // 灭屏藏点收面板）。
-                try {
-                    if (on) {
-                        refreshCollectDot();
-                    } else {
-                        hideCollectDot();
-                        dismissCollectPanel();
                     }
                 } catch (Throwable ignored) {
                 }
@@ -1228,10 +1139,6 @@ public class BubbleWindow {
                 onGateBreakThrough(data, brkBurst, brkMention,
                         brkFired);
             } else {
-                // v546: 记住这条是场景门排的（呼吸点颜色口径）。
-                if (data.key != null) {
-                    sceneQueuedKeys.add(data.key);
-                }
                 enqueueSuppressed(data);
                 return;
             }
@@ -1441,14 +1348,10 @@ public class BubbleWindow {
                         && sender.equals(burstSenderKey(qd))) {
                     mine.add(qd);
                     it.remove();
-                    if (qd.key != null) {
-                        sceneQueuedKeys.remove(qd.key);
-                    }
                 }
             }
         }
         if (!mine.isEmpty()) {
-            refreshQueueDot();
             for (final NotifData qd : mine) {
                 handler.post(new Runnable() {
                     @Override
@@ -1479,8 +1382,6 @@ public class BubbleWindow {
                 this.suppressedQueue.poll();
             }
         }
-        // v546: 队列增减 → 呼吸点跟着刷新。
-        refreshQueueDot();
     }
 
     // ---- v539: 边缘回看胶囊 ----
@@ -1797,21 +1698,27 @@ public class BubbleWindow {
         });
     }
 
-    /** v556: 菜单动作（回复发送/标已读/稍后/收进回看/
-     * 不再弹/打开应用）执行后的「消费」这条通知：在屏胶囊
-     * 走 dissipateOne 老路；收纳面板里长按出来的菜单，
-     * 这条不在屏上，就从收纳栈里摘掉（连带清它的通知
-     * 动作暂存，同 dissipateOne 的收尾）。 */
+    /** 菜单动作（回复发送/标已读/稍后/收进回看/不再弹/
+     * 打开应用）执行后的「消费」这条通知：走 dissipateOne
+     * 老路摘掉在屏胶囊（连带清它的通知动作暂存）。 */
     private void menuConsume(NotifData d) {
-        if (d != null && collectRemove(d)) {
-            if (d.key != null) {
-                synchronized (ACTIONS_BY_KEY) {
-                    ACTIONS_BY_KEY.remove(d.key);
-                }
-            }
+        dissipateOne(d);
+    }
+
+    /** v558: 菜单「这个应用以后收纳」点完后，当前这条按
+     * 收纳待遇落地：在屏上的走 pileIntoFan 落点收进扇子，
+     * 再把可见胶囊摘掉。不走 menuConsume——这条是要
+     * 「收起来」，不是「处理掉」。 */
+    private void collectCurrentIntoFan(NotifData d) {
+        if (d == null) {
             return;
         }
-        dissipateOne(d);
+        pileIntoFan(d);
+        if (d.key != null) {
+            removeNotifByKey(d.key);
+        }
+        holdWindowHeight = true;
+        rebuildDock();
     }
 
     private void showCapsuleMenu(CapsuleView cap, final NotifData d) {
@@ -1824,11 +1731,10 @@ public class BubbleWindow {
         showCapsuleMenuAt(loc[0], loc[1], capW, cap.getHeight(), d);
     }
 
-    /** v556: 锚点版菜单入口——收纳面板的行长按没有胶囊
-     * 可锚，就拿行自己的屏幕坐标/尺寸当锚点，菜单本体、
-     * 定位、入场动画全与胶囊长按共用一份（showCapsuleMenu
-     * 也收敛到这里）。调用前要先把锚点坐标量好：本方法
-     * 一进来就 closeOverlays，锚点所在的面板会被拆掉。 */
+    /** 锚点版菜单入口——拿锚点（胶囊）的屏幕坐标/尺寸
+     * 定位，菜单本体、定位、入场动画全共用一份
+     * （showCapsuleMenu 也收敛到这里）。调用前要先把锚点
+     * 坐标量好：本方法一进来就 closeOverlays。 */
     private void showCapsuleMenuAt(int anchorX, int anchorY,
             int anchorW, int anchorH, final NotifData d) {
         // v547: 全局只许一个浮层——先把已开的（含正淡出中的
@@ -1943,7 +1849,41 @@ public class BubbleWindow {
                             }
                         }));
             }
-            // 5) 这个应用不再弹（走 AppRules 单一数据源：广播
+            // 5) v558: 这个应用以后收纳（原「只贴边」待遇，
+            // 改名后统一叫收纳）。当前有效规则还是跟随才
+            // 显示——已是收纳/永不弹的（含走了「全部应用」
+            // 默认条目的）不显示，避免死按钮。落盘与不再弹
+            // 同路：广播给 App 进程走 AppRules 单一数据源。
+            // v559: 有效值是 POP（显式弹出例外，绕过默认
+            // 收纳）时它现在也是照常弹的，同样显示这一行。
+            int effRule = AppRules.modeFor(d.pkg);
+            if (effRule == AppRules.DEFAULT
+                    || effRule == AppRules.POP) {
+                panel.addView(buildMenuRow("⇥", "这个应用以后收纳",
+                        null, new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                dismissMenu();
+                                try {
+                                    android.content.Intent ri =
+                                            new android.content.Intent(
+                                                    NotificationService
+                                                            .ACTION_SET_APP_RULE);
+                                    ri.setPackage(
+                                            "com.chenan.flymebobo");
+                                    ri.putExtra("pkg", d.pkg);
+                                    ri.putExtra("mode",
+                                            AppRules.VALUE_EDGE);
+                                    app.sendBroadcast(ri);
+                                    FileLog.i("QuickMenu setEdge pkg="
+                                            + d.pkg);
+                                } catch (Throwable ignored) {
+                                }
+                                collectCurrentIntoFan(d);
+                            }
+                        }));
+            }
+            // 6) 这个应用不再弹（走 AppRules 单一数据源：广播
             // 给 App 进程落盘 + 回广播刷新 SystemUI 的规则表）。
             panel.addView(buildMenuRow("✕", "这个应用不再弹", null,
                     new View.OnClickListener() {
@@ -2338,17 +2278,12 @@ public class BubbleWindow {
         }
     }
 
-    /** v547: 统一浮层管理点——长按菜单与呼吸点瞄一眼面板
-     * 全局同时只许一个在屏。两个 show 入口打开前都先调它：
-     * 已开的浮层（包括正淡出动画中的菜单）立即拆干净，
-     * 不等动画、不残留透明层挡触摸或叠暗。 */
+    /** v547: 统一浮层管理点——长按菜单全局同时只许一个
+     * 在屏。show 入口打开前先调它：已开的菜单（包括正
+     * 淡出动画中的）立即拆干净，不等动画、不残留透明层
+     * 挡触摸或叠暗。 */
     private void closeOverlays() {
         dismissMenuNow();
-        dismissQueuePanel();
-        // v556: 收纳面板也归全局单浮层管——开任何新浮层
-        // 前先把它拆掉，反之亦然（showCollectPanel 入口
-        // 也走 closeOverlays）。
-        dismissCollectPanel();
     }
 
     /** v557: 长按菜单开关被关（FEATURE_TOGGLE 分发调用）——
@@ -2359,14 +2294,14 @@ public class BubbleWindow {
     }
 
     /** v557: 通知气泡总开关被关（FEATURE_TOGGLE 分发
-     * 调用）——三个全屏浮层一并收掉，别留透明层在屏上。 */
+     * 调用）——全屏浮层一并收掉，别留透明层在屏上。 */
     public void onNotifMasterDisabled() {
         closeOverlays();
     }
 
     /** v557: 菜单锚在场校验——整组消散 / 场景 flush 这类
      * 批量路径走完后调一次：锚数据还在 dock 胶囊里、组
-     * 数据里或收纳栈里任一处就算在场；都不在了说明锚是
+     * 数据里任一处就算在场；都不在了说明锚是
      * 被批量路径顺带清掉的（dissipateOne/onNotificationRemoved
      * 的按 key 跟随关闭覆盖不到），菜单立即硬摘，别留一块
      * 冲着空气的全屏层。 */
@@ -2404,16 +2339,6 @@ public class BubbleWindow {
                     }
                 }
                 if (present) {
-                    break;
-                }
-            }
-        }
-        if (!present) {
-            for (NotifData sd : collectStack) {
-                if (sd == anchor || (sd != null
-                        && anchor.key != null
-                        && anchor.key.equals(sd.key))) {
-                    present = true;
                     break;
                 }
             }
@@ -2569,1420 +2494,6 @@ public class BubbleWindow {
         }
         handler.postDelayed(r, SNOOZE_DELAY_MS);
         FileLog.i("Snooze set pkg=" + d.pkg + " delayMin=10");
-    }
-
-    // ---- v546: 排队呼吸点 ----
-    // 数据源就是场景/静默共用的 suppressedQueue 本体（不另建
-    // 队列）：enqueueSuppressed / flushSuppressedQueue 的增减
-    // 时机调 refreshQueueDot。守卫与回看把手同款：屏幕亮 +
-    // 已解锁才显示（场景中恰恰要显示，所以不查 sceneSuppressed）。
-    // 小点窗口只占小点本身（10×26dp），其余区域天然穿透。
-
-    public void refreshQueueDot() {
-        if (app == null || wm == null) {
-            return;
-        }
-        if (android.os.Looper.myLooper()
-                != android.os.Looper.getMainLooper()) {
-            handler.post(new Runnable() {
-                @Override
-                public void run() {
-                    refreshQueueDot();
-                }
-            });
-            return;
-        }
-        boolean has;
-        synchronized (suppressedQueue) {
-            has = !suppressedQueue.isEmpty();
-        }
-        if (!FeatureFlags.queueDot || !has) {
-            hideQueueDot();
-            dismissQueuePanel();
-            return;
-        }
-        if (!isScreenInteractive() || isKeyguardLocked()) {
-            hideQueueDot();
-            return;
-        }
-        ensureQueueDot();
-        if (dotRoot == null || dotView == null) {
-            return;
-        }
-        // 颜色：队列里有场景门排的 → 橙；纯静默 → 紫。
-        boolean scene = false;
-        synchronized (suppressedQueue) {
-            for (NotifData qd : suppressedQueue) {
-                if (qd.key != null
-                        && sceneQueuedKeys.contains(qd.key)) {
-                    scene = true;
-                    break;
-                }
-            }
-        }
-        GradientDrawable dbg = new GradientDrawable();
-        dbg.setColor(scene ? Color.rgb(255, 176, 77)
-                : Color.rgb(167, 139, 250));
-        float r = dp(8);
-        // v549: 圆角朝屏幕内侧——贴左边时右两角圆，贴右边
-        // 时镜像（左两角圆）。
-        if (FeatureFlags.queueDotRight()) {
-            dbg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
-        } else {
-            dbg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
-        }
-        dotView.setBackground(dbg);
-        // v549: 位置按设置走（贴边+高度档位）——设置页改了
-        // 或拖动落盘回广播都会走到这，已挂着的窗口当场挪位。
-        applyDotPos();
-        if (!dotWindowAdded) {
-            try {
-                wm.addView(dotRoot, dotParams);
-                dotWindowAdded = true;
-            } catch (Throwable ignored) {
-                return;
-            }
-        } else {
-            try {
-                wm.updateViewLayout(dotRoot, dotParams);
-            } catch (Throwable ignored) {
-            }
-        }
-        dotRoot.setVisibility(View.VISIBLE);
-        startDotBreathing();
-        if (queuePanelAdded) {
-            rebuildQueuePanelRows();
-        }
-    }
-
-    private void startDotBreathing() {
-        if (dotView == null) {
-            return;
-        }
-        if (dotAnimator != null && dotAnimator.isRunning()) {
-            return;
-        }
-        // 约 3.2 秒一个呼吸周期（去 1.6s + 回 1.6s）。
-        dotAnimator = android.animation.ValueAnimator.ofFloat(
-                0.25f, 1f);
-        dotAnimator.setDuration(1600);
-        dotAnimator.setRepeatCount(
-                android.animation.ValueAnimator.INFINITE);
-        dotAnimator.setRepeatMode(
-                android.animation.ValueAnimator.REVERSE);
-        dotAnimator.addUpdateListener(
-                new android.animation.ValueAnimator
-                        .AnimatorUpdateListener() {
-                    @Override
-                    public void onAnimationUpdate(
-                            android.animation.ValueAnimator a) {
-                        if (dotView != null) {
-                            dotView.setAlpha(
-                                    (Float) a.getAnimatedValue());
-                        }
-                    }
-                });
-        dotAnimator.start();
-    }
-
-    private void hideQueueDot() {
-        // v549: 拖到一半被收点（队列空了/灭屏）也要复位，
-        // 不然 dotDragging 卡住 applyDotPos 永远跳过。
-        dotDragging = false;
-        if (dotAnimator != null) {
-            try {
-                dotAnimator.cancel();
-            } catch (Throwable ignored) {
-            }
-            dotAnimator = null;
-        }
-        if (dotRoot != null && dotWindowAdded && wm != null) {
-            try {
-                wm.removeView(dotRoot);
-            } catch (Throwable ignored) {
-            }
-        }
-        dotWindowAdded = false;
-    }
-
-    /** v549: 把设置里的位置（贴边+高度档位）落到小点窗口
-     * 参数上。拖动进行中不套（不然队列一刷新就把正拖着的
-     * 点拽回档位上）。 */
-    private void applyDotPos() {
-        if (dotParams == null || app == null || dotDragging) {
-            return;
-        }
-        dotParams.gravity = (FeatureFlags.queueDotRight()
-                ? Gravity.END : Gravity.START) | Gravity.TOP;
-        android.util.DisplayMetrics dm =
-                app.getResources().getDisplayMetrics();
-        float frac = FeatureFlags.queueDotYFrac();
-        // v556: 与收纳点同贴边同档位时，收纳点占位（它
-        // 长存），排队点自动偏移一档（往下让，到底档就
-        // 往上让），别叠在一起。收纳栈空着（点没出）时
-        // 不让。
-        if (FeatureFlags.collectDot && !collectStack.isEmpty()
-                && FeatureFlags.queueDotRight()
-                        == FeatureFlags.collectDotRight()
-                && FeatureFlags.queueDotBand()
-                        == FeatureFlags.collectDotBand()) {
-            int band = FeatureFlags.queueDotBand();
-            int shifted = band < 2 ? band + 1 : band - 1;
-            frac = FeatureFlags.posYFrac(shifted);
-        }
-        dotParams.y = (int) (dm.heightPixels * frac);
-    }
-
-    /** v549: 拖动结束——高度落成最近的档位，贴边不变；先
-     * 本地换上（手感即时），再广播给 App 进程落盘（prefs +
-     * 文件镜像，单一数据源，同 ACTION_SET_APP_RULE 路子），
-     * App 落盘后会回广播 FEATURE_TOGGLE 对齐各进程标志。 */
-    private void persistDotPosFromDrag(int band) {
-        String side = FeatureFlags.queueDotRight() ? "R" : "L";
-        String pos = FeatureFlags.parseQueueDotPos(
-                side + band);
-        if (!pos.equals(FeatureFlags.queueDotPos)) {
-            FeatureFlags.queueDotPos = pos;
-            try {
-                android.content.Intent ri =
-                        new android.content.Intent(
-                                NotificationService
-                                        .ACTION_SET_QUEUE_DOT_POS);
-                ri.setPackage("com.chenan.flymebobo");
-                ri.putExtra("pos", pos);
-                app.sendBroadcast(ri);
-            } catch (Throwable ignored) {
-            }
-            FileLog.i("QueueDotPos drag -> " + pos);
-        }
-        refreshQueueDot();
-    }
-
-    private void ensureQueueDot() {
-        if (dotRoot != null || app == null || wm == null) {
-            return;
-        }
-        try {
-            FrameLayout rootL = new FrameLayout(app);
-            View dot = new View(app);
-            rootL.addView(dot, new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT));
-            // v549: 点击/拖动二合一——阈值（8dp）内抬手算
-            // 点击（瞄一眼面板）；超过阈值上下拖改高度，
-            // 松手落成最近档位并落盘。左右贴边只能在设置
-            // 里改，拖动只管高度。
-            rootL.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v,
-                        android.view.MotionEvent e) {
-                    if (dotParams == null) {
-                        return false;
-                    }
-                    switch (e.getActionMasked()) {
-                        case android.view.MotionEvent.ACTION_DOWN:
-                            dotDownRawY = e.getRawY();
-                            dotDragStartY = dotParams.y;
-                            dotDragging = false;
-                            return true;
-                        case android.view.MotionEvent.ACTION_MOVE: {
-                            float dy = e.getRawY() - dotDownRawY;
-                            if (!dotDragging
-                                    && Math.abs(dy) > dp(8)) {
-                                dotDragging = true;
-                                dismissQueuePanel();
-                            }
-                            if (dotDragging && wm != null
-                                    && dotWindowAdded) {
-                                android.util.DisplayMetrics dm =
-                                        app.getResources()
-                                                .getDisplayMetrics();
-                                int maxY = dm.heightPixels - dp(26);
-                                int ny = dotDragStartY + (int) dy;
-                                if (ny < 0) {
-                                    ny = 0;
-                                }
-                                if (ny > maxY) {
-                                    ny = maxY;
-                                }
-                                dotParams.y = ny;
-                                try {
-                                    wm.updateViewLayout(
-                                            dotRoot, dotParams);
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                            return true;
-                        }
-                        case android.view.MotionEvent.ACTION_UP:
-                        case android.view.MotionEvent.ACTION_CANCEL: {
-                            boolean wasDrag = dotDragging;
-                            dotDragging = false;
-                            if (!wasDrag) {
-                                showQueuePanel();
-                            } else {
-                                android.util.DisplayMetrics dm =
-                                        app.getResources()
-                                                .getDisplayMetrics();
-                                float centerFrac =
-                                        (dotParams.y + dp(13))
-                                                / (float) dm.heightPixels;
-                                int band = centerFrac < 0.31f ? 0
-                                        : centerFrac < 0.59f ? 1 : 2;
-                                persistDotPosFromDrag(band);
-                            }
-                            return true;
-                        }
-                        default:
-                            return false;
-                    }
-                }
-            });
-            dotRoot = rootL;
-            dotView = dot;
-            dotParams = new WindowManager.LayoutParams(
-                    dp(10), dp(26),
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            // v549: 初始位置按设置（默认 L1 = 左 + 46%，同 v546）。
-            applyDotPos();
-            dotParams.setTitle("flymebobo-queuedot");
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /** 点小点：瞄一眼排队中的通知。只是看——不移除、不标记，
-     * 静默/场景结束后照常补弹。 */
-    private void showQueuePanel() {
-        // v547: 同长按菜单——打开前走统一浮层管理点，
-        // 已开的菜单/面板先立即拆干净，全局只留一个浮层。
-        closeOverlays();
-        if (app == null || wm == null) {
-            return;
-        }
-        try {
-            FrameLayout rootL = new FrameLayout(app);
-            rootL.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    dismissQueuePanel();
-                }
-            });
-            // v557: 根上补触摸关闭——ACTION_DOWN 落在内容盒
-            // 之外即收（滑动起手也能关层，不必等 click 抬手；
-            // 事故里就是滑动关不掉、全屏根一直吃触摸）。盒内
-            // 触摸由盒子自己消费，走不到根这里；落在盒外才
-            // dismiss 并消费，盒内/未命中返回 false 不干扰
-            // 原点击关闭。
-            rootL.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v,
-                        android.view.MotionEvent e) {
-                    if (e.getAction()
-                            == android.view.MotionEvent.ACTION_DOWN
-                            && queuePanelBox != null) {
-                        int[] loc = new int[2];
-                        queuePanelBox.getLocationOnScreen(loc);
-                        float x = e.getRawX();
-                        float y = e.getRawY();
-                        if (x < loc[0]
-                                || x > loc[0] + queuePanelBox.getWidth()
-                                || y < loc[1]
-                                || y > loc[1]
-                                        + queuePanelBox.getHeight()) {
-                            dismissQueuePanel();
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-            });
-            android.widget.LinearLayout box =
-                    new android.widget.LinearLayout(app);
-            box.setOrientation(
-                    android.widget.LinearLayout.VERTICAL);
-            box.setPadding(dp(10), dp(10), dp(10), dp(10));
-            GradientDrawable bbg = new GradientDrawable();
-            bbg.setColor(Color.argb(240, 20, 24, 38));
-            bbg.setCornerRadius(dp(18));
-            box.setBackground(bbg);
-            box.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                }
-            });
-            // v549: 面板跟着小点走——小点贴右边时面板从右侧
-            // 出，高度跟小点的档位（原来写死左侧 46%）。
-            boolean dotRight = FeatureFlags.queueDotRight();
-            FrameLayout.LayoutParams blp =
-                    new FrameLayout.LayoutParams(
-                            dp(232), FrameLayout.LayoutParams
-                                    .WRAP_CONTENT,
-                            Gravity.TOP | (dotRight
-                                    ? Gravity.END : Gravity.START));
-            if (dotRight) {
-                blp.rightMargin = dp(14);
-            } else {
-                blp.leftMargin = dp(14);
-            }
-            android.util.DisplayMetrics dm =
-                    app.getResources().getDisplayMetrics();
-            blp.topMargin = Math.max(dp(48),
-                    (int) (dm.heightPixels
-                            * FeatureFlags.queueDotYFrac()) - dp(30));
-            rootL.addView(box, blp);
-            queuePanelRoot = rootL;
-            queuePanelBox = box;
-            // v547: 与长按菜单对齐——窗口类型同样换成
-            // TYPE_SYSTEM_ERROR（与胶囊窗口同型，层级口径
-            // 一致，别再出现 OVERLAY 被 SYSTEM_ERROR 压住）。
-            queuePanelParams = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            queuePanelParams.gravity = Gravity.TOP | Gravity.START;
-            queuePanelParams.setTitle("flymebobo-queuepanel");
-            wm.addView(queuePanelRoot, queuePanelParams);
-            queuePanelAdded = true;
-            FileLog.i("Overlay add name=queuepanel");
-            rebuildQueuePanelRows();
-            // v547: 轻淡入——面板从小点一侧微微放大 + 淡入
-            // （约 180ms），与长按菜单入场同风格。
-            box.setAlpha(0f);
-            box.setScaleX(0.96f);
-            box.setScaleY(0.96f);
-            box.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        // v549: 放大锚点在小点那一侧（右贴边时
-                        // 锚到面板右缘）。
-                        box.setPivotX(FeatureFlags.queueDotRight()
-                                ? box.getWidth() : 0);
-                        box.setPivotY(box.getHeight() / 2f);
-                        box.animate().alpha(1f).scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(180)
-                                .setInterpolator(
-                                        new android.view.animation
-                                                .DecelerateInterpolator())
-                                .start();
-                    } catch (Throwable ignored) {
-                    }
-                }
-            });
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void rebuildQueuePanelRows() {
-        if (queuePanelBox == null || app == null) {
-            return;
-        }
-        queuePanelBox.removeAllViews();
-        android.widget.TextView head =
-                new android.widget.TextView(app);
-        head.setText("排队中 · 结束后补弹");
-        head.setTextColor(Color.argb(140, 255, 255, 255));
-        head.setTextSize(12);
-        head.setPadding(dp(6), dp(2), dp(6), dp(8));
-        queuePanelBox.addView(head);
-        java.util.ArrayList<NotifData> snap;
-        synchronized (suppressedQueue) {
-            snap = new java.util.ArrayList<>(suppressedQueue);
-        }
-        int show = Math.min(5, snap.size());
-        for (int i = 0; i < show; i++) {
-            queuePanelBox.addView(buildQueueRow(snap.get(i)));
-        }
-        if (snap.size() > show) {
-            android.widget.TextView more =
-                    new android.widget.TextView(app);
-            more.setText("还有 " + (snap.size() - show) + " 条");
-            more.setTextColor(Color.argb(140, 255, 255, 255));
-            more.setTextSize(12);
-            more.setPadding(dp(6), dp(6), dp(6), dp(2));
-            queuePanelBox.addView(more);
-        }
-        if (snap.isEmpty()) {
-            dismissQueuePanel();
-            hideQueueDot();
-        }
-    }
-
-    private android.widget.LinearLayout buildQueueRow(NotifData d) {
-        android.widget.LinearLayout row =
-                new android.widget.LinearLayout(app);
-        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(6), dp(7), dp(6), dp(7));
-        android.widget.ImageView iv =
-                new android.widget.ImageView(app);
-        try {
-            android.graphics.drawable.Drawable dr =
-                    app.getPackageManager().getApplicationIcon(d.pkg);
-            if (dr != null) {
-                iv.setImageDrawable(dr);
-            } else if (d.icon != null) {
-                iv.setImageBitmap(d.icon);
-            }
-        } catch (Throwable ignored) {
-            if (d.icon != null) {
-                iv.setImageBitmap(d.icon);
-            }
-        }
-        row.addView(iv, new android.widget.LinearLayout.LayoutParams(
-                dp(28), dp(28)));
-        String line = (d.title == null ? "" : d.title)
-                + ((d.text != null && !d.text.isEmpty())
-                        ? "：" + d.text : "");
-        android.widget.TextView tx =
-                new android.widget.TextView(app);
-        tx.setText(line);
-        tx.setTextColor(Color.argb(224, 255, 255, 255));
-        tx.setTextSize(13);
-        tx.setSingleLine(true);
-        tx.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        android.widget.LinearLayout.LayoutParams tlp =
-                new android.widget.LinearLayout.LayoutParams(
-                        0, android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT, 1f);
-        tlp.leftMargin = dp(8);
-        row.addView(tx, tlp);
-        android.widget.TextView tm =
-                new android.widget.TextView(app);
-        tm.setText(agoText(d.postTime));
-        tm.setTextColor(Color.argb(102, 255, 255, 255));
-        tm.setTextSize(11);
-        android.widget.LinearLayout.LayoutParams mlp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT,
-                        android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT);
-        mlp.leftMargin = dp(6);
-        row.addView(tm, mlp);
-        return row;
-    }
-
-    private static String agoText(long postTime) {
-        if (postTime <= 0) {
-            return "";
-        }
-        long diff = System.currentTimeMillis() - postTime;
-        if (diff < 60_000L) {
-            return "刚刚";
-        }
-        if (diff < 3600_000L) {
-            return (diff / 60_000L) + "分钟前";
-        }
-        return (diff / 3600_000L) + "小时前";
-    }
-
-    public void dismissQueuePanel() {
-        if (queuePanelRoot != null && queuePanelAdded) {
-            // v557: 摘失败保留句柄（不清标志、不置 null），
-            // 等下一次再试，别把窗口弄丢（同菜单的口径）。
-            if (!removeOverlayView(queuePanelRoot, "queuepanel")) {
-                return;
-            }
-        }
-        queuePanelAdded = false;
-        queuePanelRoot = null;
-        queuePanelBox = null;
-    }
-
-    // ---- v556: 收纳点（替代扇子） ----
-    // 与排队呼吸点分工：排队点管「被闸门拦下、等着补弹」
-    // 的队列（临时的）；收纳点管「本来要进扇子、被用户
-    // 收起来慢慢处理」的普通胶囊（长存的）。改道点：
-    // pileIntoFan（只贴边/关键词）、dockOneCapsule（收纳
-    // 手势）、dockGroup（整组收）、dismissOpenCard（关
-    // 大卡片）、dissipateAllOneByOne 收尾（fanOrCollect）。
-    // 小点窗口只占小点本身，其余区域天然穿透；守卫与
-    // 排队点同款：屏幕亮 + 已解锁才显示。
-
-    /** 收纳资格：只有普通通知。音乐/下载/实况/导航/
-     * 公交/来电各有自己的位置，永远不收。 */
-    private static boolean isOrdinaryForCollect(NotifData d) {
-        return d != null && d.pkg != null
-                && !d.isMusic && !d.isDownload && !d.isLive
-                && !d.isNavi && !d.isBus && !d.isCall;
-    }
-
-    /** 收一条进收纳栈（头=最新；同 key 替换；满 20 条
-     * 最老一条转进回看栈，回看关着 pushRecall 自己会
-     * 拒绝、等于直接丢弃）。 */
-    public void collectPush(final NotifData d) {
-        if (d == null) {
-            return;
-        }
-        if (android.os.Looper.myLooper()
-                != android.os.Looper.getMainLooper()) {
-            handler.post(new Runnable() {
-                @Override
-                public void run() {
-                    collectPush(d);
-                }
-            });
-            return;
-        }
-        if (!FeatureFlags.collectDot
-                || !isOrdinaryForCollect(d)) {
-            return;
-        }
-        if (d.key != null) {
-            java.util.Iterator<NotifData> it =
-                    collectStack.iterator();
-            while (it.hasNext()) {
-                NotifData o = it.next();
-                if (o != null && d.key.equals(o.key)) {
-                    it.remove();
-                }
-            }
-        }
-        collectStack.addFirst(d);
-        FileLog.i("Collect in pkg=" + d.pkg
-                + " n=" + collectStack.size());
-        while (collectStack.size() > COLLECT_MAX) {
-            NotifData old = collectStack.removeLast();
-            FileLog.i("Collect overflow pkg=" + old.pkg);
-            pushRecall(old);
-        }
-        refreshCollectDot();
-        flashCollectPeek(d);
-        if (collectPanelAdded) {
-            rebuildCollectPanelRows();
-        }
-    }
-
-    /** 从收纳栈摘掉一条（菜单消费/面板操作共用）。
-     * 摘到了返回 true 并刷新小点与面板。 */
-    private boolean collectRemove(NotifData d) {
-        if (d == null) {
-            return false;
-        }
-        boolean removed = false;
-        java.util.Iterator<NotifData> it =
-                collectStack.iterator();
-        while (it.hasNext()) {
-            NotifData o = it.next();
-            if (o == d || (d.key != null && o != null
-                    && d.key.equals(o.key))) {
-                it.remove();
-                removed = true;
-                break;
-            }
-        }
-        if (removed) {
-            FileLog.i("Collect out pkg=" + d.pkg
-                    + " n=" + collectStack.size());
-            refreshCollectDot();
-            if (collectPanelAdded) {
-                rebuildCollectPanelRows();
-            }
-        }
-        return removed;
-    }
-
-    public void refreshCollectDot() {
-        if (app == null || wm == null) {
-            return;
-        }
-        if (android.os.Looper.myLooper()
-                != android.os.Looper.getMainLooper()) {
-            handler.post(new Runnable() {
-                @Override
-                public void run() {
-                    refreshCollectDot();
-                }
-            });
-            return;
-        }
-        if (!FeatureFlags.collectDot || collectStack.isEmpty()) {
-            hideCollectDot();
-            dismissCollectPanel();
-            // 收纳点没了，排队点的避让也随之解除。
-            refreshQueueDot();
-            return;
-        }
-        if (!isScreenInteractive() || isKeyguardLocked()) {
-            hideCollectDot();
-            return;
-        }
-        ensureCollectDot();
-        if (cdotRoot == null || cdotTab == null) {
-            return;
-        }
-        layoutCollectChildren();
-        // 签的颜色跟随设置（角标恒红，不跟随）。
-        GradientDrawable tbg = new GradientDrawable();
-        tbg.setColor(FeatureFlags.collectDotColorValue());
-        float r = dp(9);
-        if (FeatureFlags.collectDotRight()) {
-            tbg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
-        } else {
-            tbg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
-        }
-        cdotTab.setBackground(tbg);
-        if (cdotBadge != null) {
-            int n = collectStack.size();
-            cdotBadge.setText(n > 9 ? "9+" : String.valueOf(n));
-        }
-        applyCollectDotPos();
-        if (!cdotWindowAdded) {
-            try {
-                wm.addView(cdotRoot, cdotParams);
-                cdotWindowAdded = true;
-            } catch (Throwable ignored) {
-                return;
-            }
-        } else {
-            try {
-                wm.updateViewLayout(cdotRoot, cdotParams);
-            } catch (Throwable ignored) {
-            }
-        }
-        cdotRoot.setVisibility(View.VISIBLE);
-        startCollectBreathing();
-        if (collectPanelAdded) {
-            rebuildCollectPanelRows();
-        }
-        // 收纳点出现/挪位，排队点重算避让。
-        refreshQueueDot();
-    }
-
-    private void startCollectBreathing() {
-        if (cdotBody == null) {
-            return;
-        }
-        if (cdotAnimator != null && cdotAnimator.isRunning()) {
-            return;
-        }
-        // 与排队点同节奏：约 3.2 秒一个呼吸周期。
-        cdotAnimator = android.animation.ValueAnimator.ofFloat(
-                0.25f, 1f);
-        cdotAnimator.setDuration(1600);
-        cdotAnimator.setRepeatCount(
-                android.animation.ValueAnimator.INFINITE);
-        cdotAnimator.setRepeatMode(
-                android.animation.ValueAnimator.REVERSE);
-        cdotAnimator.addUpdateListener(
-                new android.animation.ValueAnimator
-                        .AnimatorUpdateListener() {
-                    @Override
-                    public void onAnimationUpdate(
-                            android.animation.ValueAnimator a) {
-                        if (cdotBody != null) {
-                            cdotBody.setAlpha(
-                                    (Float) a.getAnimatedValue());
-                        }
-                    }
-                });
-        cdotAnimator.start();
-    }
-
-    private void hideCollectDot() {
-        cdotDragging = false;
-        cdotPeeking = false;
-        if (handler != null) {
-            handler.removeCallbacks(cdotPeekEndRunnable);
-        }
-        if (cdotAnimator != null) {
-            try {
-                cdotAnimator.cancel();
-            } catch (Throwable ignored) {
-            }
-            cdotAnimator = null;
-        }
-        if (cdotRoot != null && cdotWindowAdded && wm != null) {
-            try {
-                wm.removeView(cdotRoot);
-            } catch (Throwable ignored) {
-            }
-        }
-        cdotWindowAdded = false;
-    }
-
-    /** 收纳点位置落到窗口参数上（拖动中不套，同排队点）。 */
-    private void applyCollectDotPos() {
-        if (cdotParams == null || app == null || cdotDragging) {
-            return;
-        }
-        cdotParams.gravity = (FeatureFlags.collectDotRight()
-                ? Gravity.END : Gravity.START) | Gravity.TOP;
-        android.util.DisplayMetrics dm =
-                app.getResources().getDisplayMetrics();
-        cdotParams.y = (int) (dm.heightPixels
-                * FeatureFlags.collectDotYFrac());
-    }
-
-    /** 签/角标/探头胶囊在 body 里的贴边方向（贴右边时
-     * 全部镜像到右缘）。refresh 时按当前设置重排。 */
-    private void layoutCollectChildren() {
-        if (cdotTab == null) {
-            return;
-        }
-        boolean right = FeatureFlags.collectDotRight();
-        int side = right ? Gravity.END : Gravity.START;
-        FrameLayout.LayoutParams tlp =
-                new FrameLayout.LayoutParams(dp(13), dp(38));
-        tlp.gravity = Gravity.CENTER_VERTICAL | side;
-        cdotTab.setLayoutParams(tlp);
-        if (cdotBadge != null) {
-            FrameLayout.LayoutParams blp =
-                    new FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.WRAP_CONTENT,
-                            dp(15));
-            blp.gravity = Gravity.TOP | side;
-            if (right) {
-                blp.rightMargin = dp(6);
-            } else {
-                blp.leftMargin = dp(6);
-            }
-            blp.topMargin = dp(2);
-            cdotBadge.setLayoutParams(blp);
-        }
-        if (cdotPeek != null) {
-            FrameLayout.LayoutParams plp =
-                    new FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.WRAP_CONTENT,
-                            FrameLayout.LayoutParams.WRAP_CONTENT);
-            plp.gravity = Gravity.CENTER_VERTICAL | side;
-            cdotPeek.setLayoutParams(plp);
-        }
-    }
-
-    /** 拖动结束：高度落成最近档位（同排队点的口径），
-     * 本地先换上，再广播给 App 进程落盘。 */
-    private void persistCollectPosFromDrag(int band) {
-        String side = FeatureFlags.collectDotRight() ? "R" : "L";
-        String pos = FeatureFlags.parseCollectDotPos(
-                side + band);
-        if (!pos.equals(FeatureFlags.collectDotPos)) {
-            FeatureFlags.collectDotPos = pos;
-            try {
-                android.content.Intent ri =
-                        new android.content.Intent(
-                                NotificationService
-                                        .ACTION_SET_COLLECT_DOT_POS);
-                ri.setPackage("com.chenan.flymebobo");
-                ri.putExtra("pos", pos);
-                app.sendBroadcast(ri);
-            } catch (Throwable ignored) {
-            }
-            FileLog.i("CollectDotPos drag -> " + pos);
-        }
-        refreshCollectDot();
-    }
-
-    private void ensureCollectDot() {
-        if (cdotRoot != null || app == null || wm == null) {
-            return;
-        }
-        try {
-            FrameLayout rootL = new FrameLayout(app);
-            FrameLayout body = new FrameLayout(app);
-            rootL.addView(body, new FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT, dp(38)));
-            View tab = new View(app);
-            body.addView(tab);
-            android.widget.TextView badge =
-                    new android.widget.TextView(app);
-            badge.setTextSize(9);
-            badge.setTextColor(Color.WHITE);
-            badge.setTypeface(badge.getTypeface(),
-                    android.graphics.Typeface.BOLD);
-            badge.setGravity(Gravity.CENTER);
-            badge.setPadding(dp(3), 0, dp(3), 0);
-            badge.setMinWidth(dp(15));
-            GradientDrawable bbg = new GradientDrawable();
-            bbg.setShape(GradientDrawable.OVAL);
-            bbg.setColor(Color.rgb(239, 68, 68));
-            badge.setBackground(bbg);
-            body.addView(badge);
-            // 探头小胶囊：应用色圆点 + 应用名，默认收起。
-            android.widget.LinearLayout peek =
-                    new android.widget.LinearLayout(app);
-            peek.setOrientation(
-                    android.widget.LinearLayout.HORIZONTAL);
-            peek.setGravity(Gravity.CENTER_VERTICAL);
-            peek.setPadding(dp(8), dp(5), dp(10), dp(5));
-            GradientDrawable pbg = new GradientDrawable();
-            pbg.setColor(Color.argb(240, 20, 24, 38));
-            pbg.setCornerRadius(dp(999));
-            peek.setBackground(pbg);
-            View pdot = new View(app);
-            android.widget.LinearLayout.LayoutParams dlp =
-                    new android.widget.LinearLayout.LayoutParams(
-                            dp(8), dp(8));
-            dlp.rightMargin = dp(5);
-            peek.addView(pdot, dlp);
-            android.widget.TextView plabel =
-                    new android.widget.TextView(app);
-            plabel.setTextColor(Color.WHITE);
-            plabel.setTextSize(11);
-            plabel.setSingleLine(true);
-            plabel.setEllipsize(
-                    android.text.TextUtils.TruncateAt.END);
-            plabel.setMaxWidth(dp(110));
-            peek.addView(plabel);
-            peek.setVisibility(View.GONE);
-            body.addView(peek);
-            // 点击/拖动二合一（同排队点）：阈值内抬手=
-            // 开面板；超阈值上下拖改高度，松手落档落盘。
-            rootL.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v,
-                        android.view.MotionEvent e) {
-                    if (cdotParams == null) {
-                        return false;
-                    }
-                    switch (e.getActionMasked()) {
-                        case android.view.MotionEvent.ACTION_DOWN:
-                            cdotDownRawY = e.getRawY();
-                            cdotDragStartY = cdotParams.y;
-                            cdotDragging = false;
-                            return true;
-                        case android.view.MotionEvent.ACTION_MOVE: {
-                            float dy = e.getRawY() - cdotDownRawY;
-                            if (!cdotDragging
-                                    && Math.abs(dy) > dp(8)) {
-                                cdotDragging = true;
-                                dismissCollectPanel();
-                            }
-                            if (cdotDragging && wm != null
-                                    && cdotWindowAdded) {
-                                android.util.DisplayMetrics dm =
-                                        app.getResources()
-                                                .getDisplayMetrics();
-                                int maxY = dm.heightPixels - dp(38);
-                                int ny = cdotDragStartY + (int) dy;
-                                if (ny < 0) {
-                                    ny = 0;
-                                }
-                                if (ny > maxY) {
-                                    ny = maxY;
-                                }
-                                cdotParams.y = ny;
-                                try {
-                                    wm.updateViewLayout(
-                                            cdotRoot, cdotParams);
-                                } catch (Throwable ignored) {
-                                }
-                            }
-                            return true;
-                        }
-                        case android.view.MotionEvent.ACTION_UP:
-                        case android.view.MotionEvent.ACTION_CANCEL: {
-                            boolean wasDrag = cdotDragging;
-                            cdotDragging = false;
-                            if (!wasDrag) {
-                                showCollectPanel();
-                            } else {
-                                android.util.DisplayMetrics dm =
-                                        app.getResources()
-                                                .getDisplayMetrics();
-                                float centerFrac =
-                                        (cdotParams.y + dp(19))
-                                                / (float) dm.heightPixels;
-                                int band = centerFrac < 0.31f ? 0
-                                        : centerFrac < 0.59f ? 1 : 2;
-                                persistCollectPosFromDrag(band);
-                            }
-                            return true;
-                        }
-                        default:
-                            return false;
-                    }
-                }
-            });
-            cdotRoot = rootL;
-            cdotBody = body;
-            cdotTab = tab;
-            cdotBadge = badge;
-            cdotPeek = peek;
-            cdotPeekDot = pdot;
-            cdotPeekLabel = plabel;
-            cdotParams = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.WRAP_CONTENT, dp(38),
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            applyCollectDotPos();
-            cdotParams.setTitle("flymebobo-collectdot");
-            layoutCollectChildren();
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private String collectAppLabel(String pkg) {
-        if (pkg == null) {
-            return "";
-        }
-        String cached = collectLabelCache.get(pkg);
-        if (cached != null) {
-            return cached;
-        }
-        String label = pkg;
-        try {
-            android.content.pm.ApplicationInfo ai =
-                    app.getPackageManager().getApplicationInfo(
-                            pkg, 0);
-            CharSequence cs = app.getPackageManager()
-                    .getApplicationLabel(ai);
-            if (cs != null) {
-                label = cs.toString();
-            }
-        } catch (Throwable ignored) {
-        }
-        collectLabelCache.put(pkg, label);
-        return label;
-    }
-
-    /** 探头胶囊的圆点色：通知图标的平均色（1×1 缩放
-     * 取色），取不到回退收纳点主题色。按包名缓存。 */
-    private int collectAppColor(NotifData d) {
-        if (d == null || d.pkg == null) {
-            return FeatureFlags.collectDotColorValue();
-        }
-        Integer cached = collectColorCache.get(d.pkg);
-        if (cached != null) {
-            return cached;
-        }
-        int color = FeatureFlags.collectDotColorValue();
-        try {
-            if (d.icon != null && !d.icon.isRecycled()) {
-                android.graphics.Bitmap one =
-                        android.graphics.Bitmap.createScaledBitmap(
-                                d.icon, 1, 1, true);
-                if (one != null) {
-                    int px = one.getPixel(0, 0);
-                    if (android.graphics.Color.alpha(px) >= 32) {
-                        color = px;
-                    }
-                    if (one != d.icon) {
-                        one.recycle();
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        collectColorCache.put(d.pkg, color);
-        return color;
-    }
-
-    /** 新条目收进时小点探头：签暂让位给一颗小胶囊
-     * （应用色圆点 + 应用名）约 1.2 秒，再缩回签形态。
-     * 是小点自己窗口内的形态变化，不开新浮层。 */
-    private void flashCollectPeek(NotifData d) {
-        if (cdotRoot == null || cdotPeek == null
-                || !cdotWindowAdded) {
-            return;
-        }
-        try {
-            cdotPeekLabel.setText(collectAppLabel(d.pkg));
-            GradientDrawable dotBg = new GradientDrawable();
-            dotBg.setShape(GradientDrawable.OVAL);
-            dotBg.setColor(collectAppColor(d));
-            cdotPeekDot.setBackground(dotBg);
-            cdotPeeking = true;
-            cdotTab.setVisibility(View.GONE);
-            if (cdotBadge != null) {
-                cdotBadge.setVisibility(View.GONE);
-            }
-            cdotPeek.setVisibility(View.VISIBLE);
-            try {
-                wm.updateViewLayout(cdotRoot, cdotParams);
-            } catch (Throwable ignored) {
-            }
-            handler.removeCallbacks(cdotPeekEndRunnable);
-            handler.postDelayed(cdotPeekEndRunnable, 1200);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    /** 点小点：收纳面板。和瞄一眼面板不同——这里能
-     * 操作：点条目展开成胶囊、左滑收进回看、顶部全部
-     * 展开、行长按呼长按菜单。 */
-    private void showCollectPanel() {
-        // 全局单浮层：打开前先拆已开的浮层（同长按菜单）。
-        closeOverlays();
-        if (app == null || wm == null
-                || collectStack.isEmpty()) {
-            return;
-        }
-        try {
-            FrameLayout rootL = new FrameLayout(app);
-            rootL.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                    dismissCollectPanel();
-                }
-            });
-            // v557: 根上补触摸关闭——ACTION_DOWN 落在内容盒
-            // 之外即收（滑动起手也能关层，同瞄一眼面板的修法）。
-            rootL.setOnTouchListener(new View.OnTouchListener() {
-                @Override
-                public boolean onTouch(View v,
-                        android.view.MotionEvent e) {
-                    if (e.getAction()
-                            == android.view.MotionEvent.ACTION_DOWN
-                            && collectPanelBox != null) {
-                        int[] loc = new int[2];
-                        collectPanelBox.getLocationOnScreen(loc);
-                        float x = e.getRawX();
-                        float y = e.getRawY();
-                        if (x < loc[0]
-                                || x > loc[0] + collectPanelBox.getWidth()
-                                || y < loc[1]
-                                || y > loc[1]
-                                        + collectPanelBox.getHeight()) {
-                            dismissCollectPanel();
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-            });
-            final android.widget.LinearLayout box =
-                    new android.widget.LinearLayout(app);
-            box.setOrientation(
-                    android.widget.LinearLayout.VERTICAL);
-            box.setPadding(dp(10), dp(10), dp(10), dp(10));
-            GradientDrawable bbg = new GradientDrawable();
-            bbg.setColor(Color.argb(240, 20, 24, 38));
-            bbg.setCornerRadius(dp(18));
-            box.setBackground(bbg);
-            box.setOnClickListener(new View.OnClickListener() {
-                @Override
-                public void onClick(View v) {
-                }
-            });
-            // 面板跟着小点走：贴右边时从右侧出，高度跟档位。
-            boolean dotRight = FeatureFlags.collectDotRight();
-            FrameLayout.LayoutParams blp =
-                    new FrameLayout.LayoutParams(
-                            dp(264), FrameLayout.LayoutParams
-                                    .WRAP_CONTENT,
-                            Gravity.TOP | (dotRight
-                                    ? Gravity.END : Gravity.START));
-            if (dotRight) {
-                blp.rightMargin = dp(14);
-            } else {
-                blp.leftMargin = dp(14);
-            }
-            android.util.DisplayMetrics dm =
-                    app.getResources().getDisplayMetrics();
-            blp.topMargin = Math.max(dp(48),
-                    (int) (dm.heightPixels
-                            * FeatureFlags.collectDotYFrac()) - dp(30));
-            rootL.addView(box, blp);
-            collectPanelRoot = rootL;
-            collectPanelBox = box;
-            // 层级与长按菜单同档（TYPE_SYSTEM_ERROR）。
-            collectPanelParams = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams
-                                    .FLAG_LAYOUT_NO_LIMITS,
-                    PixelFormat.TRANSLUCENT);
-            collectPanelParams.gravity = Gravity.TOP | Gravity.START;
-            collectPanelParams.setTitle("flymebobo-collectpanel");
-            wm.addView(collectPanelRoot, collectPanelParams);
-            collectPanelAdded = true;
-            FileLog.i("Overlay add name=collectpanel");
-            rebuildCollectPanelRows();
-            // 入场：从小点一侧微微放大 + 淡入（同瞄一眼面板）。
-            box.setAlpha(0f);
-            box.setScaleX(0.96f);
-            box.setScaleY(0.96f);
-            box.post(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        box.setPivotX(FeatureFlags.collectDotRight()
-                                ? box.getWidth() : 0);
-                        box.setPivotY(box.getHeight() / 2f);
-                        box.animate().alpha(1f).scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(180)
-                                .setInterpolator(
-                                        new android.view.animation
-                                                .DecelerateInterpolator())
-                                .start();
-                    } catch (Throwable ignored) {
-                    }
-                }
-            });
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void rebuildCollectPanelRows() {
-        if (collectPanelBox == null || app == null) {
-            return;
-        }
-        collectPanelBox.removeAllViews();
-        android.widget.LinearLayout head =
-                new android.widget.LinearLayout(app);
-        head.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(6), dp(2), dp(6), dp(8));
-        android.widget.TextView title =
-                new android.widget.TextView(app);
-        title.setText("收纳 " + collectStack.size() + " 条");
-        title.setTextColor(Color.argb(140, 255, 255, 255));
-        title.setTextSize(12);
-        head.addView(title, new android.widget.LinearLayout
-                .LayoutParams(0, android.widget.LinearLayout
-                        .LayoutParams.WRAP_CONTENT, 1f));
-        android.widget.TextView all =
-                new android.widget.TextView(app);
-        all.setText("全部展开");
-        all.setTextColor(Color.rgb(147, 197, 253));
-        all.setTextSize(12.5f);
-        all.setPadding(dp(8), dp(2), dp(2), dp(2));
-        all.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                expandAllCollect();
-            }
-        });
-        head.addView(all);
-        collectPanelBox.addView(head);
-        // 新 → 旧（栈头最新，ArrayDeque 迭代就是头→尾）。
-        for (NotifData d : collectStack) {
-            collectPanelBox.addView(buildCollectRow(d));
-        }
-        if (collectStack.isEmpty()) {
-            dismissCollectPanel();
-            hideCollectDot();
-        }
-    }
-
-    private android.widget.LinearLayout buildCollectRow(
-            final NotifData d) {
-        final android.widget.LinearLayout row =
-                new android.widget.LinearLayout(app);
-        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(6), dp(7), dp(6), dp(7));
-        android.widget.ImageView iv =
-                new android.widget.ImageView(app);
-        try {
-            android.graphics.drawable.Drawable dr =
-                    app.getPackageManager().getApplicationIcon(d.pkg);
-            if (dr != null) {
-                iv.setImageDrawable(dr);
-            } else if (d.icon != null) {
-                iv.setImageBitmap(d.icon);
-            }
-        } catch (Throwable ignored) {
-            if (d.icon != null) {
-                iv.setImageBitmap(d.icon);
-            }
-        }
-        row.addView(iv, new android.widget.LinearLayout.LayoutParams(
-                dp(28), dp(28)));
-        android.widget.LinearLayout texts =
-                new android.widget.LinearLayout(app);
-        texts.setOrientation(android.widget.LinearLayout.VERTICAL);
-        android.widget.LinearLayout.LayoutParams tlp =
-                new android.widget.LinearLayout.LayoutParams(
-                        0, android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT, 1f);
-        tlp.leftMargin = dp(8);
-        android.widget.TextView t1 =
-                new android.widget.TextView(app);
-        t1.setText(d.title == null ? collectAppLabel(d.pkg)
-                : d.title);
-        t1.setTextColor(Color.argb(224, 255, 255, 255));
-        t1.setTextSize(13);
-        t1.setSingleLine(true);
-        t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        texts.addView(t1);
-        if (d.text != null && !d.text.isEmpty()
-                && !d.text.equals(d.title)) {
-            android.widget.TextView t2 =
-                    new android.widget.TextView(app);
-            t2.setText(d.text);
-            t2.setTextColor(Color.argb(150, 255, 255, 255));
-            t2.setTextSize(11.5f);
-            t2.setSingleLine(true);
-            t2.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            texts.addView(t2);
-        }
-        row.addView(texts, tlp);
-        android.widget.TextView tm =
-                new android.widget.TextView(app);
-        tm.setText(agoText(d.postTime));
-        tm.setTextColor(Color.argb(102, 255, 255, 255));
-        tm.setTextSize(11);
-        android.widget.LinearLayout.LayoutParams mlp =
-                new android.widget.LinearLayout.LayoutParams(
-                        android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT,
-                        android.widget.LinearLayout.LayoutParams
-                                .WRAP_CONTENT);
-        mlp.leftMargin = dp(6);
-        row.addView(tm, mlp);
-        // 手势三合一：点=展开成胶囊；左滑=收进回看；
-        // 长按=呼长按菜单（锚点先量好再开菜单——菜单一开
-        // 面板就被 closeOverlays 拆了）。
-        row.setOnTouchListener(new View.OnTouchListener() {
-            private float downX;
-            private float downY;
-            private boolean swiping;
-            private boolean lpFired;
-            private final Runnable lpRunnable = new Runnable() {
-                @Override
-                public void run() {
-                    if (!FeatureFlags.longPressMenu) {
-                        return;
-                    }
-                    int[] loc = new int[2];
-                    row.getLocationOnScreen(loc);
-                    int w = row.getWidth();
-                    int h = row.getHeight();
-                    lpFired = true;
-                    showCapsuleMenuAt(loc[0], loc[1], w, h, d);
-                }
-            };
-
-            @Override
-            public boolean onTouch(View v,
-                    android.view.MotionEvent e) {
-                switch (e.getActionMasked()) {
-                    case android.view.MotionEvent.ACTION_DOWN:
-                        downX = e.getRawX();
-                        downY = e.getRawY();
-                        swiping = false;
-                        lpFired = false;
-                        handler.postDelayed(lpRunnable, 450);
-                        return true;
-                    case android.view.MotionEvent.ACTION_MOVE: {
-                        float dx = e.getRawX() - downX;
-                        float dy = e.getRawY() - downY;
-                        if (!swiping && dx < -dp(10)
-                                && Math.abs(dx) > Math.abs(dy)) {
-                            swiping = true;
-                            handler.removeCallbacks(lpRunnable);
-                        }
-                        if (swiping) {
-                            row.setTranslationX(Math.min(0, dx));
-                        } else if (Math.abs(dx) > dp(10)
-                                || Math.abs(dy) > dp(10)) {
-                            handler.removeCallbacks(lpRunnable);
-                        }
-                        return true;
-                    }
-                    case android.view.MotionEvent.ACTION_UP:
-                    case android.view.MotionEvent.ACTION_CANCEL: {
-                        handler.removeCallbacks(lpRunnable);
-                        if (swiping) {
-                            float dx = e.getRawX() - downX;
-                            if (dx < -dp(56)) {
-                                collectToRecall(d);
-                            } else {
-                                row.animate().translationX(0)
-                                        .setDuration(150).start();
-                            }
-                        } else if (!lpFired) {
-                            collectPopOut(d);
-                        }
-                        return true;
-                    }
-                    default:
-                        return false;
-                }
-            }
-        });
-        return row;
-    }
-
-    /** 面板点条目：从收纳栈摘下，经 onNotification 按
-     * 正常路径弹出（打 recalled 标记绕开三层去重，同
-     * 回看重弹的口径；场景/静默闸门与应用规则照常把关）。 */
-    private void collectPopOut(NotifData d) {
-        dismissCollectPanel();
-        if (!collectRemove(d)) {
-            return;
-        }
-        d.recalled = true;
-        if (d.key != null) {
-            synchronized (seenNotifKeys) {
-                seenNotifKeys.remove(d.key);
-            }
-        }
-        FileLog.i("Collect pop pkg=" + d.pkg);
-        onNotification(d);
-    }
-
-    /** 面板左滑：收进回看栈（回看关着 pushRecall 自己
-     * 拒绝，等于直接移除）。 */
-    private void collectToRecall(NotifData d) {
-        if (!collectRemove(d)) {
-            return;
-        }
-        if (FeatureFlags.recallCapsule) {
-            pushRecall(d);
-            FileLog.i("Collect toRecall pkg=" + d.pkg);
-        } else {
-            FileLog.i("Collect drop pkg=" + d.pkg
-                    + " (recall off)");
-        }
-    }
-
-    /** 全部展开：按旧→新顺序逐条经 onNotification 弹出
-     * （应用规则/闸门在 popCapsule 里照常把关），然后
-     * 清空收纳栈、收面板。 */
-    private void expandAllCollect() {
-        java.util.ArrayList<NotifData> items =
-                new java.util.ArrayList<>(collectStack);
-        collectStack.clear();
-        dismissCollectPanel();
-        refreshCollectDot();
-        FileLog.i("Collect expandAll n=" + items.size());
-        for (int i = items.size() - 1; i >= 0; i--) {
-            NotifData d = items.get(i);
-            d.recalled = true;
-            if (d.key != null) {
-                synchronized (seenNotifKeys) {
-                    seenNotifKeys.remove(d.key);
-                }
-            }
-            onNotification(d);
-        }
-    }
-
-    public void dismissCollectPanel() {
-        if (collectPanelRoot != null && collectPanelAdded) {
-            // v557: 摘失败保留句柄（不清标志、不置 null），
-            // 等下一次再试，别把窗口弄丢（同菜单的口径）。
-            if (!removeOverlayView(collectPanelRoot,
-                    "collectpanel")) {
-                return;
-            }
-        }
-        collectPanelAdded = false;
-        collectPanelRoot = null;
-        collectPanelBox = null;
     }
 
     // ---- v525: temporary silence flush plumbing ----
@@ -4505,10 +3016,6 @@ public class BubbleWindow {
         if (!copy.isEmpty()) {
             FileLog.i("SceneFlush n=" + copy.size());
         }
-        // v546: 队列已清空——场景标记一并清，呼吸点随之刷新
-        // （重投时若再被门拦下，enqueue 会重新标记/刷新）。
-        sceneQueuedKeys.clear();
-        refreshQueueDot();
         for (NotifData d : copy) {
             onNotification(d);
         }
@@ -5580,13 +4087,6 @@ public class BubbleWindow {
      * addPileIconForGroup 进扇子，点扇子能原样展开。关键词
      * 过滤命中时复用同一落点，不另造路径。 */
     private void pileIntoFan(NotifData data) {
-        // v556: 收纳模式开着时，普通通知不进扇子，改收进
-        // 收纳点（「只贴边」规则与关键词过滤共用这个落点，
-        // 一并改道，保持一致）。
-        if (FeatureFlags.collectDot && isOrdinaryForCollect(data)) {
-            collectPush(data);
-            return;
-        }
         NotifGroup stored = dockedGroups.get(data.pkg);
         if (stored != null && data.key != null) {
             for (int i = stored.items.size() - 1; i >= 0; i--) {
@@ -5624,8 +4124,20 @@ public class BubbleWindow {
             if (rule == AppRules.EDGE
                     && !data.isDownload && !data.isLive
                     && !data.isNavi && !data.isBus) {
-                pileIntoFan(data);
-                return;
+                // v561: recalled 重投豁免 EDGE 落点——回看
+                // 把手、稍后提醒都是用户主动取回，若再按
+                // EDGE 收进扇子就是原地打转。只豁免这一次
+                // 落点，不改存储的规则（下条新消息照样
+                // 收纳）；NEVER 在上面已否决，场景/静默
+                // 闸门在下面照常管。v563: 日志标记改名为
+                // Recall bypassEdge（原标记随旧功能一并清）。
+                if (data.recalled) {
+                    FileLog.i("Recall bypassEdge pkg="
+                            + data.pkg);
+                } else {
+                    pileIntoFan(data);
+                    return;
+                }
             }
         }
         // v259: APP feature switches (real-time, no restart).
@@ -9565,13 +8077,6 @@ public class BubbleWindow {
                 if (destroy) {
                     return;
                 }
-                // v556: 收纳模式开着时，关掉的大卡片（普通
-                // 通知）不进扇子，改收进收纳点。
-                if (FeatureFlags.collectDot
-                        && isOrdinaryForCollect(removed)) {
-                    collectPush(removed);
-                    return;
-                }
                 NotifGroup docked = new NotifGroup(pkg);
                 docked.add(removed);
                 addPileIconForGroup(docked);
@@ -10637,30 +9142,6 @@ public class BubbleWindow {
                 || !dockingGroups.add(target)) {
             return;
         }
-        // v556: 收纳模式开着且整组都是普通通知 → 不进扇子，
-        // 整组收进收纳点（旧→新序入栈，最新落在栈顶）。
-        // 混了特殊类型的组（音乐/下载等）照旧走扇子。
-        if (FeatureFlags.collectDot && !target.items.isEmpty()) {
-            boolean allOrdinary = true;
-            for (NotifData d : target.items) {
-                if (!isOrdinaryForCollect(d)) {
-                    allOrdinary = false;
-                    break;
-                }
-            }
-            if (allOrdinary) {
-                java.util.ArrayList<NotifData> items =
-                        new java.util.ArrayList<>(target.items);
-                groups.remove(target);
-                dockingGroups.remove(target);
-                holdWindowHeight = true;
-                rebuildDock();
-                for (int i = items.size() - 1; i >= 0; i--) {
-                    collectPush(items.get(i));
-                }
-                return;
-            }
-        }
         // Old tops of the surviving capsules, by key, so they can
         // slide up one by one to fill the position.
         int rowTop = 0;
@@ -10706,45 +9187,6 @@ public class BubbleWindow {
         }, 300);
     }
 
-    /** v556: dockOneCapsule 的收纳改道版——同一套收纳
-     * 手势、同一个压扁进边缘的动画，只是 300ms 后不落
-     * 扇子图标，而是把这条通知摘下、收进收纳栈。调用前
-     * dockingKeys 已占位（dockOneCapsule 的守卫）。 */
-    private void collectOneCapsule(final CapsuleView cap,
-            final NotifData d, final NotifGroup group) {
-        // 存活胶囊的旧顶边，摘完后依次上顶补位（同
-        // dockOneCapsule 的做法）。
-        final Map<String, Integer> oldTops = new HashMap<>();
-        for (int i = 0; i < dock.getChildCount(); i++) {
-            View v = dock.getChildAt(i);
-            if (v instanceof CapsuleView) {
-                CapsuleView c = (CapsuleView) v;
-                if (c != cap && c.getData() != null
-                        && c.getData().key != null) {
-                    oldTops.put(c.getData().key, (int) v.getY());
-                }
-            }
-        }
-        cap.setPivotX(0f);
-        cap.animate().translationX(0f).scaleX(0f).setDuration(240)
-                .setInterpolator(
-                        new android.view.animation
-                                .DecelerateInterpolator())
-                .withLayer()
-                .start();
-        dock.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                removeNotifByKey(d.key);
-                dockingKeys.remove(d.key);
-                holdWindowHeight = true;
-                rebuildDock();
-                slideSurvivorsUp(oldTops);
-                collectPush(d);
-            }
-        }, 300);
-    }
-
     /** v363: 大卡片模式重左滑——只缩被滑的那一张，全缩进扇子图标
      * （用户 “左滑轻滑钉住，重滑缩小” + “只缩被滑的那一张，其他的
      * 留着” + “全缩 / 别只缩一半”）。轻滑仍走 onSwipeRight 钉住；
@@ -10757,13 +9199,6 @@ public class BubbleWindow {
             final NotifGroup group) {
         if (cap == null || d == null || d.key == null || group == null
                 || dock == null || !dockingKeys.add(d.key)) {
-            return;
-        }
-        // v556: 收纳模式开着时，普通胶囊的收纳手势不进
-        // 扇子，改收进收纳点（动画同款：横向压扁进左边缘，
-        // 只是落点从扇子图标换成收纳栈）。
-        if (FeatureFlags.collectDot && isOrdinaryForCollect(d)) {
-            collectOneCapsule(cap, d, group);
             return;
         }
         // Old tops of the surviving capsules, by key, so they can
@@ -12042,37 +10477,6 @@ public class BubbleWindow {
     }
 
 
-    /** v556: 一组通知「进扇子」的统一落点分流——收纳模式
-     * 关着时原样走 addPileIconForGroup；开着时普通通知逐条
-     * 改收进收纳点（旧→新序入栈，最新落在栈顶），特殊类型
-     * （音乐/下载/实况/导航/公交/来电）仍留在扇子里。
-     * dissipateAllOneByOne 的收尾（钉住组的溢出 + 整组
-     * 汇聚）走这里，别的扇子入口各自在源头改道。 */
-    private void fanOrCollect(NotifGroup g) {
-        if (g == null || g.items.isEmpty()) {
-            return;
-        }
-        if (!FeatureFlags.collectDot) {
-            addPileIconForGroup(g);
-            return;
-        }
-        NotifGroup special = null;
-        for (int i = g.items.size() - 1; i >= 0; i--) {
-            NotifData d = g.items.get(i);
-            if (isOrdinaryForCollect(d)) {
-                collectPush(d);
-            } else if (d != null) {
-                if (special == null) {
-                    special = new NotifGroup(g.pkg);
-                }
-                special.add(d);
-            }
-        }
-        if (special != null && !special.items.isEmpty()) {
-            addPileIconForGroup(special);
-        }
-    }
-
     /**
      * Dissipate everything ONE BY ONE (user 2026-11-18 "你整个一条
      * 一条消散的"): the non-pinned notifications below the anchor
@@ -12327,12 +10731,12 @@ public class BubbleWindow {
                 // Pinned groups' docked icons first (they pop in
                 // below the pinned notification), then the rest.
                 for (NotifGroup docked : pinnedDocked) {
-                    fanOrCollect(docked);
+                    addPileIconForGroup(docked);
                 }
                 for (NotifGroup g : queue) {
                     // v457: 自动销毁——组里全被撤销了就没图标可弹了。
                     if (!g.pinned && !g.items.isEmpty()) {
-                        fanOrCollect(g);
+                        addPileIconForGroup(g);
                     }
                 }
                 updatePileWindow();

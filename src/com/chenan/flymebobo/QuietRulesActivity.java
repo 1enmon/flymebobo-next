@@ -170,7 +170,12 @@ public class QuietRulesActivity extends Activity {
     private static final int[] RULE_SEG_MODES = {
             AppRules.DEFAULT, AppRules.EDGE, AppRules.NEVER};
     private static final String[] RULE_SEG_LABELS = {
-            "跟随", "只贴边", "永不弹"};
+            "跟随", "收纳", "永不弹"};
+    /** v560: 「全部应用」行专用标签——它是顶层默认，
+     * 没有谁可跟随，第一档是「弹出」（存储值仍是
+     * AppRules.DEFAULT，语义不变）。 */
+    private static final String[] RULE_SEG_LABELS_DEFAULT = {
+            "弹出", "收纳", "永不弹"};
     /** 场景里两段的显示顺序 → SceneExceptions 模式值。 */
     private static final int[] SCENE_SEG_MODES = {
             SceneExceptions.FOLLOW, SceneExceptions.BREAK};
@@ -191,6 +196,9 @@ public class QuietRulesActivity extends Activity {
     private LinearLayout listBox;
     private TextView countText;
     private EditText searchBox;
+    /** v559: 「全部应用」行的「场景里」分段行，供场景模式
+     * 总开关置灰联动（与主页卡那行同口径）。 */
+    private View defaultSceneSegRow;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -578,7 +586,10 @@ public class QuietRulesActivity extends Activity {
                 "每个应用一行：平时待遇 + 场景里让不让"));
         appsCard.addView(cardDesc("「场景里」指游戏、视频全屏时："
                 + "突破＝照常弹，排队＝先收着、退出场景再补弹。"
-                + "永不弹最大：设了永不弹，场景里突破了也不弹。"));
+                + "永不弹最大：设了永不弹，场景里突破了也不弹。"
+                + "「全部应用」设成收纳，单个应用的中间档变"
+                + "「弹出」；设成永不弹，第三档变「弹出」"
+                + "——点它可让这个应用照常弹。"));
 
         searchBox = new EditText(this);
         searchBox.setHint("搜索应用（没设过的默认跟随、场景里排队）");
@@ -615,6 +626,9 @@ public class QuietRulesActivity extends Activity {
         listBox = new LinearLayout(this);
         listBox.setOrientation(LinearLayout.VERTICAL);
         appsCard.addView(listBox);
+        // v559: 「全部应用」行常驻置顶——不进 rows/rowKeys，
+        // 搜索过滤动不了它；也不进 loaded，底部计数不算它。
+        listBox.addView(buildDefaultRow());
 
         countText = new TextView(this);
         countText.setTextSize(12);
@@ -710,6 +724,96 @@ public class QuietRulesActivity extends Activity {
             }
         });
         return apps;
+    }
+
+    /** v559: 「全部应用」行——全局默认规则，与主页安静规则
+     * 卡里那行（v558）同款：图标盘「全」字、副文案、平时/
+     * 场景里两段控件。不新造逻辑：直接复用本页 segRow /
+     * setRuleMode / setSceneMode / paint* 全套按 key 泛化的
+     * 读写，key 用 AppRules / SceneExceptions 的 KEY_DEFAULT
+     * （同一条目），落盘与回退语义与主页卡那行完全一致。 */
+    private View buildDefaultRow() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(rounded(Color.argb(60, 255, 255, 255),
+                dp(16)));
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams blp = lp();
+        blp.topMargin = dp(10);
+        box.setLayoutParams(blp);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout tile = new LinearLayout(this);
+        tile.setGravity(Gravity.CENTER);
+        tile.setBackground(rounded(Color.WHITE, dp(10)));
+        tile.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(40), dp(40)));
+        TextView glyph = new TextView(this);
+        glyph.setText("全");
+        glyph.setTextSize(15);
+        glyph.setTextColor(SKY);
+        tile.addView(glyph);
+        head.addView(tile);
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView name = new TextView(this);
+        name.setText("全部应用");
+        name.setTextSize(14.5f);
+        name.setTextColor(Color.WHITE);
+        name.setTypeface(name.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(name);
+        TextView sub = new TextView(this);
+        sub.setText("全局默认 · 单独设过的应用不跟这一行");
+        sub.setTextSize(10.5f);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        sub.setSingleLine(true);
+        sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(sub);
+        head.addView(texts);
+        box.addView(head);
+
+        box.addView(segRow("平时", RULE_SEG_LABELS_DEFAULT,
+                AppRules.KEY_DEFAULT, true));
+        View sceneRow = segRow("场景里", SCENE_SEG_LABELS,
+                SceneExceptions.KEY_DEFAULT, false);
+        defaultSceneSegRow = sceneRow;
+        box.addView(sceneRow);
+        paintRuleSeg(AppRules.KEY_DEFAULT);
+        paintSceneSeg(SceneExceptions.KEY_DEFAULT);
+        applyDefaultSceneLinkage();
+        return box;
+    }
+
+    /** v559: 场景模式总开关关 → 「全部应用」行的「场景里」
+     * 分段置灰且不可点（与主页卡 refreshSceneLinkage 同
+     * 口径：分段 item 禁用 + 整行 alpha 0.45）。开关值读
+     * 与 MainActivity.isOn 同一处 prefs（flymebobo_features
+     * 的 sceneMode 键，默认开）。 */
+    private void applyDefaultSceneLinkage() {
+        boolean on = getSharedPreferences("flymebobo_features",
+                Context.MODE_PRIVATE)
+                .getBoolean("sceneMode", true);
+        TextView[] items = sceneSegs.get(
+                SceneExceptions.KEY_DEFAULT);
+        if (items != null) {
+            for (TextView item : items) {
+                if (item != null) {
+                    item.setEnabled(on);
+                }
+            }
+        }
+        if (defaultSceneSegRow != null) {
+            defaultSceneSegRow.setAlpha(on ? 1f : 0.45f);
+        }
     }
 
     private View buildRow(final AppEntry e) {
@@ -815,7 +919,35 @@ public class QuietRulesActivity extends Activity {
                 @Override
                 public void onClick(View v) {
                     if (isRule) {
-                        setRuleMode(pkg, RULE_SEG_MODES[idx]);
+                        if (idx == 1 && !AppRules.KEY_DEFAULT
+                                .equals(pkg)) {
+                            // v559: 单个应用中间档是「与当前
+                            // 默认相反的例外」：默认收纳→写
+                            // POP（弹出），默认非收纳→写
+                            // EDGE（收纳）。全部应用行自己
+                            // 不翻面，走原三档。
+                            setRuleMode(pkg,
+                                    defaultRuleMode()
+                                            == AppRules.EDGE
+                                            ? AppRules.POP
+                                            : AppRules.EDGE);
+                        } else if (idx == 2
+                                && !AppRules.KEY_DEFAULT
+                                        .equals(pkg)
+                                && defaultRuleMode()
+                                        == AppRules.NEVER
+                                && ruleModeOf(pkg)
+                                        != AppRules.NEVER) {
+                            // v562: 默认永不弹时第三档是
+                            // 「弹出」，点它写 POP；这一行
+                            // 本身已是永不弹时，第三档仍是
+                            // 永不弹，走原三档。全部应用行
+                            // 自己不翻面。
+                            setRuleMode(pkg, AppRules.POP);
+                        } else {
+                            setRuleMode(pkg,
+                                    RULE_SEG_MODES[idx]);
+                        }
                     } else {
                         setSceneMode(pkg, SCENE_SEG_MODES[idx]);
                     }
@@ -841,7 +973,83 @@ public class QuietRulesActivity extends Activity {
         }
         AppRules.setRule(this, pkg, mode);
         paintRuleSeg(pkg);
+        if (AppRules.KEY_DEFAULT.equals(pkg)) {
+            // v559: 默认翻面后，名单里所有行的中间档标签
+            // 都要跟着刷新（存量是跟随的行最明显）。
+            for (String k : ruleSegs.keySet()) {
+                if (!AppRules.KEY_DEFAULT.equals(k)) {
+                    paintRuleSeg(k);
+                }
+            }
+        }
         refreshCount();
+    }
+
+    /** v559: 「全部应用」当前的平时值（没设过＝弹出，
+     * 即 AppRules.DEFAULT；v560 起第一档文案叫「弹出」）。 */
+    private int defaultRuleMode() {
+        Integer d = myRules.get(AppRules.KEY_DEFAULT);
+        return d == null ? AppRules.DEFAULT : d;
+    }
+
+    /** v562: 某应用当前的存量平时值（没设过＝跟随）。 */
+    private int ruleModeOf(String pkg) {
+        Integer cur = myRules.get(pkg);
+        return cur == null ? AppRules.DEFAULT : cur;
+    }
+
+    /** v562: POP 的显示档位：默认是永不弹时 POP 在第三
+     * 档（它顶替的是永不弹那档），其余情况在中间档
+     * （顶替收纳那档）。 */
+    private int popSlot() {
+        return defaultRuleMode() == AppRules.NEVER ? 2 : 1;
+    }
+
+    /** v559/v562: 单个应用中间档的显示文字：存量是
+     * EDGE 显示「收纳」；存量是 POP 且 POP 在中间档时
+     * 显示「弹出」；其余情况（跟随、永不弹、POP 在第
+     * 三档）中间档是待选的例外——默认收纳显示
+     * 「弹出」，否则「收纳」。 */
+    private String middleRuleLabel(int storedMode) {
+        if (storedMode == AppRules.EDGE) {
+            return "收纳";
+        }
+        if (storedMode == AppRules.POP && popSlot() == 1) {
+            return "弹出";
+        }
+        return defaultRuleMode() == AppRules.EDGE
+                ? "弹出" : "收纳";
+    }
+
+    /** v562: 单个应用第三档的显示文字：存量是 NEVER
+     * 显示「永不弹」；存量是 POP 且 POP 在第三档时
+     * 显示「弹出」；其余情况默认是永不弹则第三档是
+     * 待选的「弹出」，否则是「永不弹」。 */
+    private String thirdRuleLabel(int storedMode) {
+        if (storedMode == AppRules.NEVER) {
+            return "永不弹";
+        }
+        if (storedMode == AppRules.POP && popSlot() == 2) {
+            return "弹出";
+        }
+        return defaultRuleMode() == AppRules.NEVER
+                ? "弹出" : "永不弹";
+    }
+
+    /** v562: 单个应用「平时」分段的选中档：NEVER 在
+     * 第三档、EDGE 在中间档、POP 按 popSlot、跟随在
+     * 第一档。 */
+    private int ruleSel(int storedMode) {
+        if (storedMode == AppRules.NEVER) {
+            return 2;
+        }
+        if (storedMode == AppRules.EDGE) {
+            return 1;
+        }
+        if (storedMode == AppRules.POP) {
+            return popSlot();
+        }
+        return 0;
     }
 
     private void setSceneMode(String pkg, int mode) {
@@ -858,7 +1066,34 @@ public class QuietRulesActivity extends Activity {
         }
         Integer cur = myRules.get(pkg);
         int mode = cur == null ? AppRules.DEFAULT : cur;
-        paintSeg(items, RULE_SEG_MODES, mode);
+        if (AppRules.KEY_DEFAULT.equals(pkg)) {
+            // 全部应用行自己不翻面：原三档原样画。
+            paintSeg(items, RULE_SEG_MODES, mode);
+            return;
+        }
+        // v559/v562: 档位翻面——文字与选中态按存量/默认
+        // 决定（见 middleRuleLabel / thirdRuleLabel /
+        // ruleSel）。
+        items[1].setText(middleRuleLabel(mode));
+        items[2].setText(thirdRuleLabel(mode));
+        paintSegSel(items, ruleSel(mode));
+    }
+
+    /** 按下标画分段选中态（paintSeg 的下标版，样式同）。 */
+    private void paintSegSel(TextView[] items, int sel) {
+        for (int i = 0; i < items.length; i++) {
+            if (i == sel) {
+                items[i].setBackground(rounded(Color.WHITE, dp(8)));
+                items[i].setTextColor(SKY);
+                items[i].setTypeface(items[i].getTypeface(),
+                        android.graphics.Typeface.BOLD);
+            } else {
+                items[i].setBackground(null);
+                items[i].setTextColor(Color.WHITE);
+                items[i].setTypeface(items[i].getTypeface(),
+                        android.graphics.Typeface.NORMAL);
+            }
+        }
     }
 
     private void paintSceneSeg(String pkg) {
@@ -899,7 +1134,12 @@ public class QuietRulesActivity extends Activity {
                     + " · 其余先排队");
             return;
         }
-        countText.setText("已单独设置 " + myRules.size()
+        // v559: 「全部应用」默认条目（KEY_DEFAULT）也在
+        // myRules 里，但它是默认规则不是名单成员，不计数。
+        int ruleCount = myRules.size()
+                - (myRules.containsKey(AppRules.KEY_DEFAULT)
+                        ? 1 : 0);
+        countText.setText("已单独设置 " + ruleCount
                 + " 个应用的平时待遇 · 场景里突破 " + breaks
                 + " 个，其余排队、退出场景补弹");
     }
@@ -1057,6 +1297,7 @@ public class QuietRulesActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshSilence();
+        applyDefaultSceneLinkage();
         ticking = true;
         ticker.removeCallbacks(tick);
         ticker.postDelayed(tick, 1000);

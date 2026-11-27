@@ -397,10 +397,6 @@ public class XposedEntry extends XposedModule {
                         // v539: unlocked — the recall handle may
                         // show again (if its 3 minutes are not up).
                         bw.refreshRecallHandle();
-                        // v546: 呼吸点同理，解锁后按队列重评。
-                        bw.refreshQueueDot();
-                        // v556: 收纳点同理，解锁后按收纳栈重评。
-                        bw.refreshCollectDot();
                     }
                     return;
                 }
@@ -549,15 +545,6 @@ public class XposedEntry extends XposedModule {
                             bw.onRecallCapsuleDisabled();
                         }
                     }
-                    // v546: 排队呼吸点开关拨动——refresh 内部
-                    // 查开关与队列：关了立即收点，开了且有排队
-                    // 立即出点。
-                    if ("queueDot".equals(fkey)) {
-                        BubbleWindow bw = BubbleWindow.getInstance();
-                        if (bw != null) {
-                            bw.refreshQueueDot();
-                        }
-                    }
                     // v557: 长按菜单开关关掉——正开着的菜单立即
                     // 硬摘。旧版漏了这个分支：关开关只改标志位，
                     // 开着的全屏菜单没人收，会一直赖着吃触摸。
@@ -567,73 +554,12 @@ public class XposedEntry extends XposedModule {
                             bw.onLongPressMenuDisabled();
                         }
                     }
-                    // v557: 通知气泡总开关关掉——三个全屏浮层
-                    // （菜单/瞄一眼面板/收纳面板）一并收掉。
+                    // v557: 通知气泡总开关关掉——全屏浮层
+                    // （长按菜单）一并收掉。
                     if ("notif".equals(fkey) && !fenabled) {
                         BubbleWindow bw = BubbleWindow.getInstance();
                         if (bw != null) {
                             bw.onNotifMasterDisabled();
-                        }
-                    }
-                    // v549: 呼吸点位置不是布尔开关——设置页
-                    // 改位置（或拖动落盘回广播）时借这条广播
-                    // 带 pos extra 过来，SystemUI 立刻换值并
-                    // 让小点当场挪位（同 recallTtlMin 的路子）。
-                    if ("queueDotPos".equals(fkey)) {
-                        String pos = intent.getStringExtra("pos");
-                        if (pos != null) {
-                            FeatureFlags.queueDotPos =
-                                    FeatureFlags.parseQueueDotPos(pos);
-                            FileLog.i("QueueDotPos -> "
-                                    + FeatureFlags.queueDotPos);
-                            BubbleWindow bw = BubbleWindow.getInstance();
-                            if (bw != null) {
-                                bw.refreshQueueDot();
-                            }
-                        }
-                    }
-                    // v556: 收纳点开关拨动——refresh 内部查
-                    // 开关与收纳栈：关了立即收点收面板，开了
-                    // 且栈里有货立即出点（同 queueDot 的路子）。
-                    if ("collectDot".equals(fkey)) {
-                        BubbleWindow bw = BubbleWindow.getInstance();
-                        if (bw != null) {
-                            bw.refreshCollectDot();
-                        }
-                    }
-                    // v556: 收纳点位置/颜色不是布尔开关——
-                    // 设置页改值（或拖动落盘回广播）时借这条
-                    // 广播带 extra 过来，SystemUI 立刻换值
-                    // （同 queueDotPos 的路子）。
-                    if ("collectDotPos".equals(fkey)) {
-                        String pos = intent.getStringExtra("pos");
-                        if (pos != null) {
-                            FeatureFlags.collectDotPos =
-                                    FeatureFlags
-                                            .parseCollectDotPos(pos);
-                            FileLog.i("CollectDotPos -> "
-                                    + FeatureFlags.collectDotPos);
-                            BubbleWindow bw = BubbleWindow.getInstance();
-                            if (bw != null) {
-                                bw.refreshCollectDot();
-                                // 排队点要给收纳点让位，
-                                // 位置变了它也重算一次。
-                                bw.refreshQueueDot();
-                            }
-                        }
-                    }
-                    if ("collectDotColor".equals(fkey)) {
-                        String col = intent.getStringExtra("color");
-                        if (col != null) {
-                            FeatureFlags.collectDotColor =
-                                    FeatureFlags
-                                            .parseCollectDotColor(col);
-                            FileLog.i("CollectDotColor -> "
-                                    + FeatureFlags.collectDotColor);
-                            BubbleWindow bw = BubbleWindow.getInstance();
-                            if (bw != null) {
-                                bw.refreshCollectDot();
-                            }
                         }
                     }
                     // v555: 关键词词表不是布尔开关——设置页

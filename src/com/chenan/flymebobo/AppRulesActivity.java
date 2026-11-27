@@ -46,7 +46,7 @@ import java.util.Set;
 public class AppRulesActivity extends Activity {
 
     private static final String[] MODE_LABELS =
-            {"跟随全局", "永不弹", "只贴边"};
+            {"跟随全局", "永不弹", "收纳"};
     private static final int[] FALLBACK_COLORS = {
             Color.rgb(59, 130, 246), Color.rgb(236, 72, 153),
             Color.rgb(245, 158, 11), Color.rgb(34, 197, 94),
@@ -107,7 +107,7 @@ public class AppRulesActivity extends Activity {
 
         TextView explain = new TextView(this);
         explain.setText("永不弹：通知不进气泡（通知栏照常） · "
-                + "只贴边：只进左侧贴边扇子，不弹胶囊 · "
+                + "收纳：不弹胶囊，自动收纳进左侧扇子 · "
                 + "跟随全局：按总开关走");
         explain.setTextSize(12);
         explain.setLineSpacing(0, 1.5f);

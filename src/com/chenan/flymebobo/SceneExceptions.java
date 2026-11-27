@@ -39,6 +39,13 @@ public final class SceneExceptions {
     public static final String VALUE_BREAK = "break";
     public static final String VALUE_FOLLOW = "follow";
 
+    /** v558: 安静规则「全部应用」行的存储 key（全局默认
+     * 条目），走与 per-app 完全相同的通道（同 prefs、
+     * 同 SettingsStore "x." 备份、同 flatten 广播）。
+     * 回退顺序：显式 per-app 条目 > 默认条目 > 内置
+     * 默认（微信/QQ 突破）。 */
+    public static final String KEY_DEFAULT = "__default__";
+
     /** Out-of-the-box breakthrough apps (chat — the ones a
      * player actually wants to see mid-game). */
     private static final Set<String> DEFAULT_BREAK =
@@ -55,7 +62,9 @@ public final class SceneExceptions {
     }
 
     /** Effective mode for a pkg given a stored-entries map:
-     * an explicit entry wins, otherwise the defaults decide. */
+     * an explicit entry wins, otherwise the v558 global
+     * default entry decides, otherwise the built-in
+     * defaults decide. */
     public static int effective(Map<String, Integer> storedMap,
             String pkg) {
         if (pkg == null) {
@@ -64,6 +73,13 @@ public final class SceneExceptions {
         Integer v = storedMap == null ? null : storedMap.get(pkg);
         if (v != null) {
             return v;
+        }
+        // v558: 回退到「全部应用」默认条目（它自己被查询时
+        // 上面已经命中，不会走到这里）。
+        Integer d = storedMap == null ? null
+                : storedMap.get(KEY_DEFAULT);
+        if (d != null) {
+            return d;
         }
         return DEFAULT_BREAK.contains(pkg) ? BREAK : FOLLOW;
     }

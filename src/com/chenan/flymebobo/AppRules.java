@@ -18,6 +18,13 @@ import java.util.Map;
  *             notification itself is untouched);
  *   EDGE    — no capsule pop; the notification goes straight
  *             into the docked fan, tap the fan to expand it back.
+ *   POP     — v559: explicit "pop anyway" exception, only
+ *             meaningful against a __default__ EDGE entry:
+ *             at the app-rule layer it behaves exactly like
+ *             DEFAULT (normal pop; scene / silence gates
+ *             still apply), it just bypasses the default
+ *             collect. Stored as "pop" through the same
+ *             channels as never/edge.
  *
  * Storage mirrors the other settings: a dedicated prefs file
  * ("flymebobo_apprules", pkg -> "never"/"edge") in the APP,
@@ -33,10 +40,20 @@ public final class AppRules {
     public static final int DEFAULT = 0;
     public static final int NEVER = 1;
     public static final int EDGE = 2;
+    /** v559: 显式「弹出」例外（绕过「全部应用」的默认收纳）。 */
+    public static final int POP = 3;
 
     public static final String PREFS = "flymebobo_apprules";
     public static final String VALUE_NEVER = "never";
     public static final String VALUE_EDGE = "edge";
+    public static final String VALUE_POP = "pop";
+
+    /** v558: 安静规则「全部应用」行的存储 key——全局默认
+     * 条目，不是真包名。它走与 per-app 完全相同的通道
+     * （同 prefs、同 SettingsStore "r." 备份、同 flatten
+     * 广播），所以 SystemUI 侧天然读得到；modeFor 的回退
+     * 顺序：显式 per-app 条目 > 默认条目 > 内置缺省。 */
+    public static final String KEY_DEFAULT = "__default__";
 
     private static volatile Map<String, Integer> rules =
             new HashMap<>();
@@ -49,7 +66,12 @@ public final class AppRules {
             return DEFAULT;
         }
         Integer v = rules.get(pkg);
-        return v == null ? DEFAULT : v;
+        if (v != null) {
+            return v;
+        }
+        // v558: 没有显式条目时回退到「全部应用」默认条目。
+        Integer d = rules.get(KEY_DEFAULT);
+        return d == null ? DEFAULT : d;
     }
 
     /** Intent extra carrying the whole rule set flattened as
@@ -98,6 +120,9 @@ public final class AppRules {
         if (VALUE_EDGE.equals(v)) {
             return EDGE;
         }
+        if (VALUE_POP.equals(v)) {
+            return POP;
+        }
         return DEFAULT;
     }
 
@@ -107,6 +132,9 @@ public final class AppRules {
         }
         if (mode == EDGE) {
             return VALUE_EDGE;
+        }
+        if (mode == POP) {
+            return VALUE_POP;
         }
         return null;
     }

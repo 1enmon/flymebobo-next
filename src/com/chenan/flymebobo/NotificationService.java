@@ -97,22 +97,6 @@ public class NotificationService extends NotificationListenerService {
      * 照常回广播 ACTION_APP_RULES 刷新 SystemUI。 */
     public static final String ACTION_SET_APP_RULE =
             "com.chenan.flymebobo.SET_APP_RULE";
-    /** v549: SystemUI -> APP，呼吸点被直接拖动后新位置
-     * 落盘——设置值的落盘只能在 App 进程做（prefs +
-     * SettingsStore 文件镜像，单一数据源，同
-     * ACTION_SET_APP_RULE 的路子）：extra "pos"（"L1"
-     * 之类）。App 侧在 callControlReceiver 里接，落盘后
-     * 回广播 FEATURE_TOGGLE(key=queueDotPos) 让各进程
-     * 的标志位都对齐。 */
-    public static final String ACTION_SET_QUEUE_DOT_POS =
-            "com.chenan.flymebobo.SET_QUEUE_DOT_POS";
-    /** v556: SystemUI -> APP，收纳点被直接拖动后新位置
-     * 落盘——与 ACTION_SET_QUEUE_DOT_POS 同路：extra
-     * "pos"（"L0" 之类）。App 侧在 callControlReceiver
-     * 里接，落盘后回广播 FEATURE_TOGGLE(key=
-     * collectDotPos) 让各进程标志位对齐。 */
-    public static final String ACTION_SET_COLLECT_DOT_POS =
-            "com.chenan.flymebobo.SET_COLLECT_DOT_POS";
     /** v508: APP -> SystemUI, a scene exception changed in
      * SceneExceptionsActivity. Extra: "sceneexc_flat" (the whole
      * stored set, flattened). SystemUI applies it at once. */
@@ -3715,8 +3699,6 @@ public class NotificationService extends NotificationListenerService {
             dismissFilter.addAction(ACTION_DISMISS);
             dismissFilter.addAction(ACTION_MUSIC_CONTROL);
             dismissFilter.addAction(ACTION_SET_APP_RULE);
-            dismissFilter.addAction(ACTION_SET_QUEUE_DOT_POS);
-            dismissFilter.addAction(ACTION_SET_COLLECT_DOT_POS);
             m.invoke(this, callControlReceiver, dismissFilter, 2);
         } catch (Throwable t) {
             try {
@@ -3726,8 +3708,6 @@ public class NotificationService extends NotificationListenerService {
                 dismissFilter2.addAction(ACTION_DISMISS);
                 dismissFilter2.addAction(ACTION_MUSIC_CONTROL);
                 dismissFilter2.addAction(ACTION_SET_APP_RULE);
-                dismissFilter2.addAction(ACTION_SET_QUEUE_DOT_POS);
-                dismissFilter2.addAction(ACTION_SET_COLLECT_DOT_POS);
                 registerReceiver(callControlReceiver, dismissFilter2);
             } catch (Throwable ignored) {
             }
@@ -4207,63 +4187,6 @@ public class NotificationService extends NotificationListenerService {
                                     AppRules.parse(rm));
                             FileLog.i("SetAppRule pkg=" + rp
                                     + " mode=" + rm);
-                        }
-                        return;
-                    }
-                    // v549: 呼吸点被直接拖动——新位置在 App
-                    // 进程落盘（字符串 prefs + 文件镜像），再
-                    // 回广播 FEATURE_TOGGLE(key=queueDotPos)
-                    // 让 SystemUI 的标志位正式对齐（拖动方
-                    // 自己已经先用上了，这里是落盘确认）。
-                    if (ACTION_SET_QUEUE_DOT_POS.equals(
-                            intent.getAction())) {
-                        String pos = FeatureFlags.parseQueueDotPos(
-                                intent.getStringExtra("pos"));
-                        try {
-                            context.getSharedPreferences(
-                                    "flymebobo_features",
-                                    android.content.Context.MODE_PRIVATE)
-                                    .edit().putString("queueDotPos", pos)
-                                    .commit();
-                            SettingsStore.saveAll(context);
-                            android.content.Intent ti =
-                                    new android.content.Intent(
-                                            ACTION_FEATURE_TOGGLE);
-                            ti.putExtra("key", "queueDotPos");
-                            ti.putExtra("pos", pos);
-                            context.sendBroadcast(ti);
-                            FileLog.i("QueueDotPos saved (drag) -> "
-                                    + pos);
-                        } catch (Throwable ignored) {
-                        }
-                        return;
-                    }
-                    // v556: 收纳点被直接拖动——与呼吸点同路：
-                    // 新位置在 App 进程落盘（字符串 prefs +
-                    // 文件镜像），再回广播 FEATURE_TOGGLE
-                    // (key=collectDotPos) 对齐各进程标志位。
-                    if (ACTION_SET_COLLECT_DOT_POS.equals(
-                            intent.getAction())) {
-                        String pos = FeatureFlags
-                                .parseCollectDotPos(
-                                        intent.getStringExtra("pos"));
-                        try {
-                            context.getSharedPreferences(
-                                    "flymebobo_features",
-                                    android.content.Context.MODE_PRIVATE)
-                                    .edit().putString(
-                                            "collectDotPos", pos)
-                                    .commit();
-                            SettingsStore.saveAll(context);
-                            android.content.Intent ti =
-                                    new android.content.Intent(
-                                            ACTION_FEATURE_TOGGLE);
-                            ti.putExtra("key", "collectDotPos");
-                            ti.putExtra("pos", pos);
-                            context.sendBroadcast(ti);
-                            FileLog.i("CollectDotPos saved (drag)"
-                                    + " -> " + pos);
-                        } catch (Throwable ignored) {
                         }
                         return;
                     }

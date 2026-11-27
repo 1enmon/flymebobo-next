@@ -135,148 +135,6 @@ public class FeatureFlags {
     // （= 新功能即生效；关掉时长按无反应——v454 起长按本来
     // 就无动作）。开关嵌在「通知气泡」卡里（parent=notif）。
     public static volatile boolean longPressMenu = true;
-    // v546: 排队呼吸点——场景/静默排队队列非空时，左边缘
-    // 中段一个呼吸小点（场景=橙、静默=紫），点开瞄队列。
-    // 默认开。开关嵌在「通知气泡」卡里（parent=notif）。
-    public static volatile boolean queueDot = true;
-    // v549: 呼吸点位置——wei 要求可自定义。存字符串
-    // "queueDotPos"：首字 L/R=贴左边/右边，尾数 0/1/2=
-    // 靠上/中间/靠下，默认 "L1"（= v546 现状左边缘 46%）。
-    // 与 recallTtlMin 同路：字符串 prefs + 文件镜像通道
-    // （fileOrPrefsString，v545 教训），SettingsStore 恢复
-    // 按字符串回。改位置走两条即时通道：设置页广播
-    // FEATURE_TOGGLE 带 pos extra；小点上直接拖动则由
-    // SystemUI 广播 ACTION_SET_QUEUE_DOT_POS 给 App 落盘。
-    public static volatile String queueDotPos = "L1";
-
-    /** v549: 呼吸点位置规范化：只认 [LR][0-2]，坏值回 "L1"。 */
-    public static String parseQueueDotPos(String raw) {
-        if (raw != null) {
-            String s = raw.trim().toUpperCase(
-                    java.util.Locale.US);
-            if (s.length() == 2
-                    && (s.charAt(0) == 'L' || s.charAt(0) == 'R')
-                    && s.charAt(1) >= '0' && s.charAt(1) <= '2') {
-                return s;
-            }
-        }
-        return "L1";
-    }
-
-    /** v549: 呼吸点贴右边？ */
-    public static boolean queueDotRight() {
-        return queueDotPos != null && queueDotPos.startsWith("R");
-    }
-
-    /** v549: 呼吸点高度档位：0=靠上、1=中间、2=靠下。 */
-    public static int queueDotBand() {
-        String p = parseQueueDotPos(queueDotPos);
-        return p.charAt(1) - '0';
-    }
-
-    /** v549: 档位 → 小点顶边占屏高的比例（1 档 = v546 的 46%）。 */
-    public static float queueDotYFrac() {
-        return posYFrac(queueDotBand());
-    }
-
-    /** v556: 档位 → 顶边占屏高的比例（排队点/收纳点共用
-     * 同一刻度，避让计算也按这个换算）。 */
-    public static float posYFrac(int band) {
-        switch (band) {
-            case 0:
-                return 0.16f;
-            case 2:
-                return 0.72f;
-            default:
-                return 0.46f;
-        }
-    }
-    // v556: 收纳点（替代扇子）——wei 定：与排队呼吸点是两个
-    // 独立的东西。排队点是临时的（只活在场景/静默排队里，
-    // 补弹完就消失）；收纳点是长存的：开了替代开关，普通
-    // 胶囊不再进扇子（pile），改收进这个边缘小点（最多
-    // 20 条，满了最老的转进回看栈），点开面板能操作（点
-    // 条目展开成胶囊/左滑收进回看/全部展开）。默认关
-    // （扇子是招牌样子，不能默认没了）。开关嵌在「通知
-    // 气泡」卡里（parent=notif），挨着排队呼吸点行。
-    public static volatile boolean collectDot = false;
-    // v556: 收纳点位置——与 queueDotPos 同格式同通道
-    // （字符串 prefs + 文件镜像，fileOrPrefsString）：
-    // 首字 L/R=贴左边/右边，尾数 0/1/2=靠上/中间/靠下，
-    // 默认 "L0"（左·靠上——原扇子展开的位置）。改位置走
-    // FEATURE_TOGGLE 带 pos extra；小点上直接拖动则由
-    // SystemUI 广播 ACTION_SET_COLLECT_DOT_POS 给 App 落盘。
-    public static volatile String collectDotPos = "L0";
-
-    /** v556: 收纳点位置规范化：只认 [LR][0-2]，坏值回 "L0"。 */
-    public static String parseCollectDotPos(String raw) {
-        if (raw != null) {
-            String s = raw.trim().toUpperCase(
-                    java.util.Locale.US);
-            if (s.length() == 2
-                    && (s.charAt(0) == 'L' || s.charAt(0) == 'R')
-                    && s.charAt(1) >= '0' && s.charAt(1) <= '2') {
-                return s;
-            }
-        }
-        return "L0";
-    }
-
-    /** v556: 收纳点贴右边？ */
-    public static boolean collectDotRight() {
-        return collectDotPos != null && collectDotPos.startsWith("R");
-    }
-
-    /** v556: 收纳点高度档位：0=靠上、1=中间、2=靠下。 */
-    public static int collectDotBand() {
-        return parseCollectDotPos(collectDotPos).charAt(1) - '0';
-    }
-
-    /** v556: 收纳点顶边占屏高的比例（与排队点共用刻度）。 */
-    public static float collectDotYFrac() {
-        return posYFrac(collectDotBand());
-    }
-    // v556: 收纳点颜色——wei 定可自定义（排队点的橙/紫是
-    // 语义色，不在自定义范围）。存字符串 id（blue/orange/
-    // purple/green/pink/cyan），默认 blue。同样走字符串
-    // prefs + 文件镜像通道，改色走 FEATURE_TOGGLE 带
-    // color extra 即时生效。角标恒红底白字，不跟随。
-    public static volatile String collectDotColor = "blue";
-
-    /** v556: 收纳点颜色 id 规范化，坏值回 "blue"。 */
-    public static String parseCollectDotColor(String raw) {
-        if (raw != null) {
-            String s = raw.trim().toLowerCase(
-                    java.util.Locale.US);
-            if ("blue".equals(s) || "orange".equals(s)
-                    || "purple".equals(s) || "green".equals(s)
-                    || "pink".equals(s) || "cyan".equals(s)) {
-                return s;
-            }
-        }
-        return "blue";
-    }
-
-    /** v556: 收纳点颜色 id → 实际色值。 */
-    public static int collectDotColorValue() {
-        String c = parseCollectDotColor(collectDotColor);
-        if ("orange".equals(c)) {
-            return android.graphics.Color.rgb(245, 158, 11);
-        }
-        if ("purple".equals(c)) {
-            return android.graphics.Color.rgb(167, 139, 250);
-        }
-        if ("green".equals(c)) {
-            return android.graphics.Color.rgb(34, 197, 94);
-        }
-        if ("pink".equals(c)) {
-            return android.graphics.Color.rgb(236, 72, 153);
-        }
-        if ("cyan".equals(c)) {
-            return android.graphics.Color.rgb(6, 182, 212);
-        }
-        return android.graphics.Color.rgb(59, 130, 246);
-    }
     // v555: 安静规则三件套（wei 定：整合进安静规则卡，不另开
     // 卡片）——连发突破 / @我突破 / 关键词过滤。三个开关都只
     // 影响场景/静默两个排队闸门的决定（关键词过滤影响弹出
@@ -448,12 +306,6 @@ public class FeatureFlags {
         } else if ("longPressMenu".equals(key)) {
             longPressMenu = enabled;
             FileLog.i("LongPressMenu -> " + (enabled ? "on" : "off"));
-        } else if ("queueDot".equals(key)) {
-            queueDot = enabled;
-            FileLog.i("QueueDot -> " + (enabled ? "on" : "off"));
-        } else if ("collectDot".equals(key)) {
-            collectDot = enabled;
-            FileLog.i("CollectDot -> " + (enabled ? "on" : "off"));
         } else if ("burstBreak".equals(key)) {
             burstBreak = enabled;
             FileLog.i("BurstBreak -> " + (enabled ? "on" : "off"));
@@ -517,9 +369,8 @@ public class FeatureFlags {
             recallCapsule = fileOrPrefsBool("recallCapsule", prefs, false);
             // v540: 自动复制验证码——默认开（= v244 起的老行为）。
             autoCopyCode = fileOrPrefsBool("autoCopyCode", prefs, true);
-            // v546: 长按菜单 / 排队呼吸点——默认开。
+            // v546: 长按菜单——默认开。
             longPressMenu = fileOrPrefsBool("longPressMenu", prefs, true);
-            queueDot = fileOrPrefsBool("queueDot", prefs, true);
             // v555: 安静规则三件套——连发/@我突破默认开，
             // 关键词过滤默认关。
             burstBreak = fileOrPrefsBool("burstBreak", prefs, true);
@@ -531,23 +382,6 @@ public class FeatureFlags {
                     DEFAULT_FILTER_WORDS);
             FileLog.i("FilterWords load -> "
                     + filterWordList().size() + " words");
-            // v549: 呼吸点位置（字符串，默认 "L1" 左+中）——
-            // 与 recallTtlMin 同路走文件优先（v545 教训）。
-            queueDotPos = parseQueueDotPos(
-                    fileOrPrefsString("queueDotPos", prefs, "L1"));
-            FileLog.i("QueueDotPos load -> " + queueDotPos);
-            // v556: 收纳点——默认关；位置/颜色是字符串，
-            // 与 queueDotPos 同路走文件优先（v545 教训）。
-            collectDot = fileOrPrefsBool("collectDot", prefs, false);
-            collectDotPos = parseCollectDotPos(
-                    fileOrPrefsString("collectDotPos", prefs, "L0"));
-            collectDotColor = parseCollectDotColor(
-                    fileOrPrefsString("collectDotColor", prefs,
-                            "blue"));
-            FileLog.i("CollectDot load -> "
-                    + (collectDot ? "on" : "off")
-                    + " pos=" + collectDotPos
-                    + " color=" + collectDotColor);
             // v543: 回看保留时长（字符串 prefs，默认 "3" 分钟）。
             // v545: 跟布尔开关同路改走文件优先——只读 prefs 时
             // SystemUI 重启后读到的是旧快照（wei 实测：界面显

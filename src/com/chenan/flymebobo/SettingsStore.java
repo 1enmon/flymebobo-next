@@ -403,20 +403,13 @@ public class SettingsStore {
                     // ClassCastException（v482 同款坑）。
                     // v543: recallTtlMin（回看保留时长，分钟数）
                     // 也是字符串存的，同理按字符串恢复。
-                    // v549: queueDotPos（呼吸点位置 "L1" 之类）
-                    // 同样是字符串，同理。
                     // v555: filterWords（关键词过滤词表，换行分隔）
                     // 同样是字符串，同理按字符串恢复。
-                    // v556: collectDotPos / collectDotColor
-                    // （收纳点位置/颜色）同样是字符串，同理。
                     if ("bubbleSoundId".equals(key)
                             || "bubbleCustomName".equals(key)
                             || "bubbleCustomPath".equals(key)
                             || "recallTtlMin".equals(key)
-                            || "filterWords".equals(key)
-                            || "collectDotPos".equals(key)
-                            || "collectDotColor".equals(key)
-                            || "queueDotPos".equals(key)) {
+                            || "filterWords".equals(key)) {
                         fEd.putString(key, v);
                         fChanged = true;
                         continue;
