@@ -2927,7 +2927,7 @@ public class MainActivity extends Activity {
                 new LinearLayout.LayoutParams(0,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         1);
-        aiPickLp1.setMargins(0, dp(6), dp(4), 0);
+        aiPickLp1.setMargins(0, dp(6), dp(10), 0);
         aiPickRow.addView(aiPickSummary, aiPickLp1);
         TextView aiPickFast = buildWhitePillButton(
                 "选打标模型", L_ACCENT);
@@ -2935,7 +2935,7 @@ public class MainActivity extends Activity {
                 new LinearLayout.LayoutParams(0,
                         LinearLayout.LayoutParams.WRAP_CONTENT,
                         1);
-        aiPickLp2.setMargins(dp(4), dp(6), 0, 0);
+        aiPickLp2.setMargins(dp(10), dp(6), 0, 0);
         aiPickRow.addView(aiPickFast, aiPickLp2);
         body.addView(aiPickRow);
         aiPickSummary.setOnClickListener(
