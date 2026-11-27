@@ -120,17 +120,38 @@ public class BubbleWindow {
     private boolean sceneSuppressed;
     private final java.util.ArrayDeque<NotifData> suppressedQueue =
             new java.util.ArrayDeque<>();
+    // v555: 连发突破计数（安静规则三件套之一）——同一发送者
+    // （pkg + 会话标题）在 5 分钟滚动窗内的到达记录，按通知
+    // key 去重（同一条通知双投递只算一次）。窗内第 3 条起，
+    // 场景/静默闸门本要排队时改为突破直弹。记录在每次
+    // onNotification 到达时更新（含已弹的也算，见
+    // recordBurstHit）；过期条目随每次记录顺手清，发送者表
+    // 上限 64 个、空表即删，不留泄漏。
+    private static final long BURST_WINDOW_MS = 5 * 60 * 1000L;
+    private static final int BURST_THRESHOLD = 3;
+    private static final class BurstHit {
+        final String notifKey;
+        final long at;
+
+        BurstHit(String notifKey, long at) {
+            this.notifKey = notifKey;
+            this.at = at;
+        }
+    }
+    private final java.util.HashMap<String,
+            java.util.ArrayDeque<BurstHit>> burstHits =
+            new java.util.HashMap<>();
     // v539: 边缘回看胶囊（wei 2026-11-26 审预览拍板）。普通气泡
     // 被手动左滑消散时，快照进回看栈（头=最近，最多 5 条）；
     // 栈非空时屏幕左边缘出竖向小把手（↩ + 橙色角标 +「回看」
     // 竖字），点它逐个经 onNotification 原样重弹（照样过场景/
-    // 静默的门）。把手停 3 分钟无人点 → 清栈淡出。重弹的快照
+    // 静默的门）。把手停留时长无人点 → 清栈淡出（v543 起可调：
+    // FeatureFlags.recallTtlMin 分钟，默认 3）。重弹的快照
     // 打 recalled 标记，再划掉不入栈。开关 recallCapsule 默认
     // 关（主动开关）：关着不入栈、不出把手；开→关立即清栈。
     private final java.util.ArrayDeque<NotifData> recallStack =
             new java.util.ArrayDeque<>();
     private static final int RECALL_MAX = 5;
-    private static final long RECALL_TTL_MS = 3 * 60_000L;
     private FrameLayout recallRoot;
     private android.widget.TextView recallBadge;
     private WindowManager.LayoutParams recallParams;
@@ -145,6 +166,111 @@ public class BubbleWindow {
             hideRecallHandle();
         }
     };
+    // v546: 长按菜单（快捷回复）——通知动作暂存。NotifCollection
+    // Hook 在 SystemUI 里读到真实 Notification 时抽取（回复
+    // RemoteInput / 已读动作），按通知 key 存这里；胶囊长按时
+    // 按 key 取。只在 SystemUI 进程内流转，不进广播 extras。
+    // 胶囊消散 / 通知被移除时清掉对应条目。
+    private static final java.util.Map<String, NotifActions>
+            ACTIONS_BY_KEY = new java.util.HashMap<>();
+    // v546: 长按菜单窗口（一屏一菜单，根=全屏透明层，点别处
+    // 收起；面板挂在被长按胶囊的下方）。
+    private FrameLayout menuRoot;
+    private android.widget.LinearLayout menuPanel;
+    private android.widget.LinearLayout menuReplyBox;
+    private android.widget.EditText menuReplyInput;
+    private android.widget.TextView menuReplyError;
+    private WindowManager.LayoutParams menuParams;
+    private boolean menuWindowAdded;
+    private NotifData menuData;
+    // v547: 菜单正淡出关闭中——重复 dismiss 直接忽略；
+    // 新浮层打开走 closeOverlays 立即拆，不等动画。
+    private boolean menuClosing;
+    // v547: 菜单锚点（被长按胶囊的屏幕坐标与尺寸）和放置
+    // 方向；回复框展开后面板变高，按同一锚点重算位置。
+    private int menuAnchorX;
+    private int menuAnchorY;
+    private int menuAnchorW;
+    private int menuAnchorH;
+    private boolean menuPlacedAbove;
+    // v546: 稍后提醒——快照 + 10 分钟后重投的定时器（走本类
+    // handler，不新起服务）。key -> runnable，同 key 重设覆盖。
+    private final java.util.Map<String, Runnable> snoozeTimers =
+            new java.util.HashMap<>();
+    private static final long SNOOZE_DELAY_MS = 10 * 60_000L;
+    // v546: 排队呼吸点——suppressedQueue 里哪些 key 是场景门
+    // 排的（决定小点颜色：场景=橙、静默=紫、混合优先橙）。
+    private final java.util.HashSet<String> sceneQueuedKeys =
+            new java.util.HashSet<>();
+    private FrameLayout dotRoot;
+    private View dotView;
+    private WindowManager.LayoutParams dotParams;
+    private boolean dotWindowAdded;
+    private android.animation.ValueAnimator dotAnimator;
+    // v549: 呼吸点拖动状态（按住上下拖改高度档位，松手落盘；
+    // 拖动阈值内抬手算点击=瞄一眼）。rawY/起始 y 都记原始值。
+    private float dotDownRawY;
+    private int dotDragStartY;
+    private boolean dotDragging;
+    // v546: 排队瞄一眼面板（点小点展开；全屏透明层 + 左侧
+    // 小面板，点外面收起；只是看，不动队列）。
+    private FrameLayout queuePanelRoot;
+    private android.widget.LinearLayout queuePanelBox;
+    private WindowManager.LayoutParams queuePanelParams;
+    private boolean queuePanelAdded;
+    // v556: 收纳点（替代扇子，wei 定稿）——与排队呼吸点是
+    // 两个独立的东西：排队点临时（场景/静默排队，补弹完
+    // 消失），收纳点长存（开了替代开关就一直在边缘守着，
+    // 收进去的普通胶囊不过期、处理一条少一条）。本来要
+    // 进扇子（pile）的普通胶囊改收进 collectStack（头=
+    // 最新，最多 20 条，溢出最老转回看栈）。快照就是
+    // NotifData 本体（同回看栈的做法）。
+    private final java.util.ArrayDeque<NotifData> collectStack =
+            new java.util.ArrayDeque<>();
+    private static final int COLLECT_MAX = 20;
+    private FrameLayout cdotRoot;
+    private FrameLayout cdotBody;
+    private View cdotTab;
+    private android.widget.TextView cdotBadge;
+    private android.widget.LinearLayout cdotPeek;
+    private View cdotPeekDot;
+    private android.widget.TextView cdotPeekLabel;
+    private WindowManager.LayoutParams cdotParams;
+    private boolean cdotWindowAdded;
+    private android.animation.ValueAnimator cdotAnimator;
+    // 收纳点拖动状态（同呼吸点：阈值内抬手=点击开面板，
+    // 超阈值上下拖改高度档位，松手落盘）。
+    private float cdotDownRawY;
+    private int cdotDragStartY;
+    private boolean cdotDragging;
+    private boolean cdotPeeking;
+    private final Runnable cdotPeekEndRunnable = new Runnable() {
+        @Override
+        public void run() {
+            cdotPeeking = false;
+            if (cdotPeek != null) {
+                cdotPeek.setVisibility(View.GONE);
+            }
+            if (cdotTab != null) {
+                cdotTab.setVisibility(View.VISIBLE);
+            }
+            if (cdotBadge != null) {
+                cdotBadge.setVisibility(View.VISIBLE);
+            }
+            refreshCollectDot();
+        }
+    };
+    private final java.util.HashMap<String, String>
+            collectLabelCache = new java.util.HashMap<>();
+    private final java.util.HashMap<String, Integer>
+            collectColorCache = new java.util.HashMap<>();
+    // v556: 收纳面板（点小点展开；全屏透明层 + 贴小点一侧
+    // 的面板，点外面收起；能操作：点条目展开成胶囊、左滑
+    // 收进回看、顶部全部展开、行长按呼长按菜单）。
+    private FrameLayout collectPanelRoot;
+    private android.widget.LinearLayout collectPanelBox;
+    private WindowManager.LayoutParams collectPanelParams;
+    private boolean collectPanelAdded;
     /** v320: Amap bus live navigation state (no voice). Mode A
      * (waiting) shows real-time arrival from BusNaviHook; mode B
      * (on the bus) shows next stop / remaining stations, computed
@@ -545,6 +671,32 @@ public class BubbleWindow {
                     }
                 } catch (Throwable ignored) {
                 }
+                // v546: 呼吸点同样的屏幕守卫（亮屏重评、灭屏藏）。
+                try {
+                    if (on) {
+                        refreshQueueDot();
+                    } else {
+                        hideQueueDot();
+                        dismissQueuePanel();
+                        // v547: 长按菜单也别残留在息屏/锁屏上。
+                        // v557: 息屏走硬摘版——这种最该摘干净的
+                        // 时刻不走动画异步路径（动画收尾一旦被
+                        // 跳过，全屏层就漏在屏上吃触摸）。
+                        dismissMenuNow();
+                    }
+                } catch (Throwable ignored) {
+                }
+                // v556: 收纳点同样的屏幕守卫（亮屏重评、
+                // 灭屏藏点收面板）。
+                try {
+                    if (on) {
+                        refreshCollectDot();
+                    } else {
+                        hideCollectDot();
+                        dismissCollectPanel();
+                    }
+                } catch (Throwable ignored) {
+                }
             }
         });
     }
@@ -736,6 +888,14 @@ public class BubbleWindow {
         try {
             this.sceneGuard = new ImmersiveSceneGuard(this.app, this.handler);
             this.sceneGuard.setListener(new ImmersiveSceneGuard.Listener() {
+                @Override
+                public void onShellTopShown(String pkg, String cls) {
+                    // v557: 顶层切到桌面/最近任务——三个全屏
+                    // 浮层先收掉，别在概览里吃掉任务卡片的
+                    // 左右滑（2026-11-26 23:54 事故）。
+                    BubbleWindow.this.closeOverlays();
+                }
+
                 @Override
                 public void onSceneChanged(boolean immersive) {
                     BubbleWindow.this.sceneSuppressed = immersive;
@@ -1024,6 +1184,21 @@ public class BubbleWindow {
         if (data == null || app == null) {
             return;
         }
+        // v555: 安静规则突破判定（连发 / @我）——只影响下面
+        // 场景、静默两个排队闸门的决定：本要排队的，命中突破
+        // 就照常往下走直弹，并把该发送者已排队的旧条目一并
+        // 补弹（onGateBreakThrough，只触发一次）。不排队时
+        // （闸门没拦）这两个标志位不产生任何副作用。计数在
+        // recordBurstHit 里对每条到达的普通通知更新（含已弹
+        // 的也算——连发的语义是"这个人短时间发了很多条"，
+        // 不管前面的弹没弹）。
+        final boolean brkMention = FeatureFlags.mentionBreak
+                && isMentionHit(data);
+        final int burstCount = recordBurstHit(data);
+        final boolean brkBurst = FeatureFlags.burstBreak
+                && burstCount >= BURST_THRESHOLD;
+        final boolean brk = brkMention || brkBurst;
+        final boolean[] brkFired = new boolean[]{false};
         // Scene guard: in a landscape game/video scene, queue the
         // notification instead of popping it; flushed on scene exit
         // by flushSuppressedQueue(). This runs BEFORE the seen-key
@@ -1047,8 +1222,19 @@ public class BubbleWindow {
                 && this.sceneGuard != null
                 && this.sceneGuard.isSuppressed()
                 && !SceneExceptions.isExcepted(data.pkg)) {
-            enqueueSuppressed(data);
-            return;
+            // v555: 命中突破 → 不排队，照常往下走（静默门
+            // 同样放行，见 brk 的共用判定）。
+            if (brk) {
+                onGateBreakThrough(data, brkBurst, brkMention,
+                        brkFired);
+            } else {
+                // v546: 记住这条是场景门排的（呼吸点颜色口径）。
+                if (data.key != null) {
+                    sceneQueuedKeys.add(data.key);
+                }
+                enqueueSuppressed(data);
+                return;
+            }
         }
         // v525: temporary silence / DND linkage — while silenced
         // (timed silence running, or system DND on with the
@@ -1064,8 +1250,14 @@ public class BubbleWindow {
                     + " call=" + data.isCall
                     + " timed=" + TempSilence.isActive()
                     + " linkDnd=" + TempSilence.linkDnd);
-            enqueueSuppressed(data);
-            return;
+            // v555: 命中突破 → 不排队，直弹（同场景门）。
+            if (brk) {
+                onGateBreakThrough(data, brkBurst, brkMention,
+                        brkFired);
+            } else {
+                enqueueSuppressed(data);
+                return;
+            }
         }
         // v197: synchronous duplicate-delivery guard (see
         // seenNotifKeys). Both the hook and the broadcast funnel
@@ -1118,6 +1310,156 @@ public class BubbleWindow {
         });
     }
 
+    /** v555: 连发计数的发送者口径：pkg + 会话标题/发送者名
+     * （聊天通知的标题就是对方名字或群名）。 */
+    private static String burstSenderKey(NotifData data) {
+        String who = data.title == null ? "" : data.title.trim();
+        return data.pkg + "" + who;
+    }
+
+    /** v555: 突破只管普通通知——来电/音乐/下载/实况/导航/
+     * 公交各有自己的路，不参与连发计数与 @ 判定（它们本来
+     * 也基本不走这两个排队闸门）。回看/稍后重投的快照带
+     * recalled 标记，不重复计数。 */
+    private static boolean burstCountable(NotifData data) {
+        return data != null && data.pkg != null
+                && !data.isCall && !data.isMusic && !data.isDownload
+                && !data.isLive && !data.isNavi && !data.isBus
+                && !data.recalled;
+    }
+
+    /** v555: 记一次到达并返回该发送者 5 分钟窗内的计数。
+     * 按通知 key 去重：同一条通知被 Hook 和广播双投递、或
+     * 排队补弹时二次经过 onNotification，都只算一次。顺手
+     * 清过期记录和空表；发送者表超过 64 个时再全表扫一遍
+     * 扔掉全过期的。不合计数口径的返回 0。 */
+    private int recordBurstHit(NotifData data) {
+        if (!burstCountable(data)) {
+            return 0;
+        }
+        long now = System.currentTimeMillis();
+        String sender = burstSenderKey(data);
+        synchronized (burstHits) {
+            java.util.ArrayDeque<BurstHit> dq = burstHits.get(sender);
+            if (dq == null) {
+                dq = new java.util.ArrayDeque<>();
+                burstHits.put(sender, dq);
+            }
+            // 清窗外旧记录。
+            while (!dq.isEmpty()
+                    && now - dq.peekFirst().at > BURST_WINDOW_MS) {
+                dq.pollFirst();
+            }
+            // 同 key 已记过 = 同一条通知的重复投递，不重复计。
+            boolean dup = false;
+            if (data.key != null) {
+                for (BurstHit h : dq) {
+                    if (data.key.equals(h.notifKey)) {
+                        dup = true;
+                        break;
+                    }
+                }
+            }
+            if (!dup) {
+                dq.addLast(new BurstHit(data.key, now));
+            }
+            int count = dq.size();
+            // 表膨胀兜底：全表清一遍全过期的发送者。
+            if (burstHits.size() > 64) {
+                java.util.Iterator<java.util.Map.Entry<String,
+                        java.util.ArrayDeque<BurstHit>>> it =
+                        burstHits.entrySet().iterator();
+                while (it.hasNext()) {
+                    java.util.ArrayDeque<BurstHit> q =
+                            it.next().getValue();
+                    while (!q.isEmpty() && now - q.peekFirst().at
+                            > BURST_WINDOW_MS) {
+                        q.pollFirst();
+                    }
+                    if (q.isEmpty()) {
+                        it.remove();
+                    }
+                }
+            }
+            return count;
+        }
+    }
+
+    /** v555: @ 模式清单——标题+正文任一命中即算被 @。
+     * 「有人@我」被「@我」子串覆盖，列全只为可读。全角＠
+     * （U+FF20）变体一并认。NotifData 不带原始 extras，
+     * 没有标准 mention 标记可读；微信/QQ 的 @ 通知本来就
+     * 把「有人@我」写在正文里，文本模式即覆盖真实场景。 */
+    private static final String[] MENTION_PATTERNS = {
+            "@我", "＠我", "有人@我", "有人＠我",
+            "@了你", "＠了你", "@了我", "＠了我"};
+
+    private static boolean isMentionHit(NotifData data) {
+        if (!burstCountable(data)) {
+            return false;
+        }
+        String hay = (data.title == null ? "" : data.title)
+                + "\n" + (data.text == null ? "" : data.text);
+        for (String p : MENTION_PATTERNS) {
+            if (hay.contains(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** v555: 闸门处命中突破的统一动作（两个闸门共用，
+     * fired 保证一次到达只触发一次）：打日志，并把该发送者
+     * 已排队的旧条目一并补弹——从队列里摘出来直接走
+     * popCapsule（它们当初就是被闸门拦下的，突破的语义是
+     * 现在全放行；popCapsule 内部的应用规则/去重照常把关）。
+     * 触发条目本身不走这里——它由 onNotification 的主流程
+     * 继续往下弹。 */
+    private void onGateBreakThrough(NotifData data, boolean burst,
+            boolean mention, boolean[] fired) {
+        if (fired[0]) {
+            return;
+        }
+        fired[0] = true;
+        if (mention) {
+            FileLog.i("MentionBreak pkg=" + data.pkg);
+        }
+        if (burst) {
+            String who = data.title == null
+                    ? "" : data.title.trim();
+            FileLog.i("BurstBreak pkg=" + data.pkg + " who=" + who);
+        }
+        String sender = burstSenderKey(data);
+        java.util.ArrayList<NotifData> mine =
+                new java.util.ArrayList<>();
+        synchronized (this.suppressedQueue) {
+            java.util.Iterator<NotifData> it =
+                    this.suppressedQueue.iterator();
+            while (it.hasNext()) {
+                NotifData qd = it.next();
+                if (qd.pkg != null
+                        && sender.equals(burstSenderKey(qd))) {
+                    mine.add(qd);
+                    it.remove();
+                    if (qd.key != null) {
+                        sceneQueuedKeys.remove(qd.key);
+                    }
+                }
+            }
+        }
+        if (!mine.isEmpty()) {
+            refreshQueueDot();
+            for (final NotifData qd : mine) {
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        popCapsule(qd);
+                    }
+                });
+            }
+        }
+    }
+
     /** Queue a notification for later re-delivery (scene guard
      * and temporary silence share the queue). Same-key entries
      * are replaced so an update does not pop twice on flush;
@@ -1137,6 +1479,8 @@ public class BubbleWindow {
                 this.suppressedQueue.poll();
             }
         }
+        // v546: 队列增减 → 呼吸点跟着刷新。
+        refreshQueueDot();
     }
 
     // ---- v539: 边缘回看胶囊 ----
@@ -1186,8 +1530,21 @@ public class BubbleWindow {
     private void armRecallTimer() {
         handler.removeCallbacks(recallExpiryRunnable);
         if (!recallStack.isEmpty()) {
-            handler.postDelayed(recallExpiryRunnable, RECALL_TTL_MS);
+            // v543: 保留时长读设置（分钟），不再写死。
+            handler.postDelayed(recallExpiryRunnable,
+                    FeatureFlags.recallTtlMin * 60_000L);
         }
+    }
+
+    /** v543: 保留时长刚被改（广播到达，FeatureFlags 已更新）：
+     * 栈里还有条目时按新值重新计时（从现在起算）。 */
+    public void onRecallTtlChanged() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                armRecallTimer();
+            }
+        });
     }
 
     /** The switch flipped off: clear the stack and take the
@@ -1377,6 +1734,2255 @@ public class BubbleWindow {
             recallParams.setTitle("flymebobo-recall");
         } catch (Throwable ignored) {
         }
+    }
+
+    // ---- v546: 长按菜单（快捷回复） ----
+    // CapsuleView 的长按计时（400ms）触发后走这里。菜单项按
+    // 通知实际能力出现：有 RemoteInput 才有「回复」，有已读
+    // 动作才有「标为已读」，都没有就用「打开应用回复」兜底；
+    // 「稍后提醒 / 收进回看（回看开着时）/ 这个应用不再弹」
+    // 是自有能力。注：普通胶囊自 v193 起没有自动消散计时
+    // （常驻到用户处理），所以菜单开着期间不存在「计时到点
+    // 被消散」的问题——胶囊只会被用户动作或系统移除带走，
+    // 那两条路都会顺手把菜单收掉（dissipateOne /
+    // onNotificationRemoved 里有联动）。
+
+    /** Hook 侧抽到动作时暂存（SystemUI 进程内，静态）。 */
+    public static void stashActions(String key, String pkg,
+            android.app.Notification n) {
+        if (key == null || n == null) {
+            return;
+        }
+        NotifActions a = NotifActions.extract(n, pkg);
+        synchronized (ACTIONS_BY_KEY) {
+            if (a == null) {
+                ACTIONS_BY_KEY.remove(key);
+            } else {
+                if (ACTIONS_BY_KEY.size() > 300) {
+                    ACTIONS_BY_KEY.clear();
+                }
+                ACTIONS_BY_KEY.put(key, a);
+            }
+        }
+    }
+
+    private static NotifActions actionsFor(String key) {
+        if (key == null) {
+            return null;
+        }
+        synchronized (ACTIONS_BY_KEY) {
+            return ACTIONS_BY_KEY.get(key);
+        }
+    }
+
+    /** CapsuleView 长按触发点。资格细核：开关开 + 普通胶囊
+     * （音乐/下载/实况/导航/公交/来电不弹菜单）。 */
+    public void onCapsuleLongPress(final CapsuleView cap) {
+        if (cap == null || app == null || wm == null) {
+            return;
+        }
+        if (!FeatureFlags.longPressMenu) {
+            return;
+        }
+        final NotifData d = cap.getData();
+        if (d == null || d.isMusic || d.isDownload || d.isLive
+                || d.isNavi || d.isBus || d.isCall) {
+            return;
+        }
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                showCapsuleMenu(cap, d);
+            }
+        });
+    }
+
+    /** v556: 菜单动作（回复发送/标已读/稍后/收进回看/
+     * 不再弹/打开应用）执行后的「消费」这条通知：在屏胶囊
+     * 走 dissipateOne 老路；收纳面板里长按出来的菜单，
+     * 这条不在屏上，就从收纳栈里摘掉（连带清它的通知
+     * 动作暂存，同 dissipateOne 的收尾）。 */
+    private void menuConsume(NotifData d) {
+        if (d != null && collectRemove(d)) {
+            if (d.key != null) {
+                synchronized (ACTIONS_BY_KEY) {
+                    ACTIONS_BY_KEY.remove(d.key);
+                }
+            }
+            return;
+        }
+        dissipateOne(d);
+    }
+
+    private void showCapsuleMenu(CapsuleView cap, final NotifData d) {
+        if (cap == null) {
+            return;
+        }
+        int[] loc = new int[2];
+        cap.getLocationOnScreen(loc);
+        int capW = cap.getWidth() > 0 ? cap.getWidth() : dp(238);
+        showCapsuleMenuAt(loc[0], loc[1], capW, cap.getHeight(), d);
+    }
+
+    /** v556: 锚点版菜单入口——收纳面板的行长按没有胶囊
+     * 可锚，就拿行自己的屏幕坐标/尺寸当锚点，菜单本体、
+     * 定位、入场动画全与胶囊长按共用一份（showCapsuleMenu
+     * 也收敛到这里）。调用前要先把锚点坐标量好：本方法
+     * 一进来就 closeOverlays，锚点所在的面板会被拆掉。 */
+    private void showCapsuleMenuAt(int anchorX, int anchorY,
+            int anchorW, int anchorH, final NotifData d) {
+        // v547: 全局只许一个浮层——先把已开的（含正淡出中的
+        // 菜单）立即拆干净再开新的，杜绝叠层。
+        closeOverlays();
+        if (app == null || wm == null || d == null) {
+            return;
+        }
+        final NotifActions acts = actionsFor(d.key);
+        menuData = d;
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            rootL.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dismissMenu();
+                }
+            });
+            final android.widget.LinearLayout panel =
+                    new android.widget.LinearLayout(app);
+            panel.setOrientation(
+                    android.widget.LinearLayout.VERTICAL);
+            panel.setPadding(dp(8), dp(8), dp(8), dp(8));
+            GradientDrawable pbg = new GradientDrawable();
+            pbg.setColor(Color.argb(245, 24, 28, 40));
+            pbg.setCornerRadius(dp(20));
+            panel.setBackground(pbg);
+            // 面板内的点击不穿透到根（根一点就收起）。
+            panel.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                }
+            });
+            // v547: 记住锚点（胶囊/锚点视图的屏幕坐标与
+            // 尺寸）。面板先藏，addView 后由 placeMenuPanel
+            // 按锚点算准位置再亮出来（下方放不下整块就翻
+            // 到锚点上方）。
+            int capW = anchorW > 0 ? anchorW : dp(238);
+            menuAnchorX = anchorX;
+            menuAnchorY = anchorY;
+            menuAnchorW = capW;
+            menuAnchorH = anchorH;
+            FrameLayout.LayoutParams plp =
+                    new FrameLayout.LayoutParams(
+                            capW, FrameLayout.LayoutParams.WRAP_CONTENT,
+                            Gravity.TOP | Gravity.START);
+            plp.leftMargin = Math.max(dp(4), anchorX);
+            plp.topMargin = anchorY + anchorH + dp(6);
+            panel.setVisibility(View.INVISIBLE);
+            rootL.addView(panel, plp);
+            menuPanel = panel;
+
+            // 1) 回复（有 RemoteInput 才有）/ 打开应用回复（兜底）。
+            if (acts != null && acts.hasReply()) {
+                panel.addView(buildMenuRow("↩", "回复", "不用打开应用",
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                toggleMenuReplyBox();
+                            }
+                        }));
+                buildMenuReplyBox(panel, d, acts);
+            } else if (d.contentIntent != null) {
+                panel.addView(buildMenuRow("➤", "打开应用回复",
+                        "该应用不支持直接回复",
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                dismissMenu();
+                                openAppForReply(d);
+                            }
+                        }));
+            }
+            // 2) 标为已读（通知自带已读动作才有）。
+            if (acts != null && acts.hasMarkRead()) {
+                panel.addView(buildMenuRow("✓", "标为已读", null,
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                dismissMenu();
+                                try {
+                                    acts.markReadIntent.send();
+                                    FileLog.i("MarkRead sent pkg="
+                                            + d.pkg);
+                                } catch (Throwable t) {
+                                    FileLog.i("MarkRead fail pkg="
+                                            + d.pkg + " err=" + t);
+                                }
+                                menuConsume(d);
+                            }
+                        }));
+            }
+            // 3) 稍后提醒（自有能力，固定有）。
+            panel.addView(buildMenuRow("◷", "稍后提醒", "10 分钟后",
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            snoozeNotif(d);
+                            menuConsume(d);
+                        }
+                    }));
+            // 4) 收进回看（回看开关关着就不出现，保持菜单干净）。
+            if (FeatureFlags.recallCapsule) {
+                panel.addView(buildMenuRow("↩", "收进回看", null,
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                dismissMenu();
+                                pushRecall(d);
+                                menuConsume(d);
+                            }
+                        }));
+            }
+            // 5) 这个应用不再弹（走 AppRules 单一数据源：广播
+            // 给 App 进程落盘 + 回广播刷新 SystemUI 的规则表）。
+            panel.addView(buildMenuRow("✕", "这个应用不再弹", null,
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissMenu();
+                            try {
+                                android.content.Intent ri =
+                                        new android.content.Intent(
+                                                NotificationService
+                                                        .ACTION_SET_APP_RULE);
+                                ri.setPackage("com.chenan.flymebobo");
+                                ri.putExtra("pkg", d.pkg);
+                                ri.putExtra("mode",
+                                        AppRules.VALUE_NEVER);
+                                app.sendBroadcast(ri);
+                                FileLog.i("QuickMenu never pkg="
+                                        + d.pkg);
+                            } catch (Throwable ignored) {
+                            }
+                            menuConsume(d);
+                        }
+                    }));
+
+            menuRoot = rootL;
+            // v547: 窗口类型从 TYPE_APPLICATION_OVERLAY 换成
+            // TYPE_SYSTEM_ERROR——与胶囊窗口（dock/pile）同型。
+            // 实测（wei 截图 4441）：OVERLAY 层在 Flyme 上被
+            // SYSTEM_ERROR 的胶囊窗口压住，菜单上半截被盖。
+            // 同型后菜单后加，在胶囊之上。窗口保持可聚焦
+            // （不加 NOT_FOCUSABLE），回复输入框才能拿焦点
+            // 弹输入法；根是全屏透明层，点面板外落在根上
+            // 即收起。
+            menuParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS
+                            | WindowManager.LayoutParams
+                                    .FLAG_SHOW_WHEN_LOCKED,
+                    PixelFormat.TRANSLUCENT);
+            menuParams.gravity = Gravity.TOP | Gravity.START;
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                menuParams.layoutInDisplayCutoutMode = WindowManager
+                        .LayoutParams
+                        .LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                try {
+                    menuParams.setFitInsetsTypes(0);
+                } catch (Throwable ignored) {
+                }
+            }
+            menuParams.setTitle("flymebobo-menu");
+            wm.addView(menuRoot, menuParams);
+            menuWindowAdded = true;
+            FileLog.i("Overlay add name=menu");
+            // v547: 面板定位 + 入场动画（贴胶囊下方；放不下
+            // 整块就翻到胶囊上方；整块必须可见）。旧版在这
+            // 里用 translation 回拉，面板顶边仍压在下方胶囊
+            // 的位置上，再叠加层级被压，就是截图 4441 里
+            // 菜单上半截被胶囊盖住的样子。
+            panel.post(new Runnable() {
+                @Override
+                public void run() {
+                    placeMenuPanel(panel, true);
+                }
+            });
+            FileLog.i("QuickMenu show pkg=" + d.pkg
+                    + " reply=" + (acts != null && acts.hasReply())
+                    + " markRead="
+                    + (acts != null && acts.hasMarkRead()));
+        } catch (Throwable t) {
+            FileLog.i("QuickMenu show fail err=" + t);
+            menuData = null;
+        }
+    }
+
+    /** v547: 菜单面板定位。优先贴在被长按胶囊下方（面板
+     * 顶边 = 胶囊底边 + 6dp）；下方放不下整块面板，就翻到
+     * 胶囊上方（面板底边 = 胶囊顶边 - 6dp）；两边都紧张时
+     * 钳进屏内——任何情况整块面板必须完整可见，不再压在
+     * 别的胶囊身上。animate=true 时顺带播入场动画：以胶囊
+     * 那条边为轴轻微放大 + 淡入（0.92→1 / 200ms，模块里
+     * 胶囊入场同款 DecelerateInterpolator）。 */
+    private void placeMenuPanel(
+            final android.widget.LinearLayout panel,
+            final boolean animate) {
+        if (panel == null || app == null) {
+            return;
+        }
+        try {
+            int pw = panel.getWidth();
+            int ph = panel.getHeight();
+            if (pw <= 0 || ph <= 0) {
+                panel.setVisibility(View.VISIBLE);
+                return;
+            }
+            android.util.DisplayMetrics dm =
+                    app.getResources().getDisplayMetrics();
+            int screenW = dm.widthPixels;
+            int screenH = dm.heightPixels;
+            int gap = dp(6);
+            int edge = dp(8);
+            int left = Math.max(edge,
+                    Math.min(menuAnchorX, screenW - pw - edge));
+            int belowTop = menuAnchorY + menuAnchorH + gap;
+            int top;
+            if (belowTop + ph <= screenH - edge) {
+                top = belowTop;
+                menuPlacedAbove = false;
+            } else {
+                int aboveTop = menuAnchorY - gap - ph;
+                if (aboveTop >= edge) {
+                    top = aboveTop;
+                    menuPlacedAbove = true;
+                } else {
+                    // 上下都放不满：贴屏底钳制，整块优先。
+                    top = Math.max(edge, screenH - edge - ph);
+                    menuPlacedAbove = top < menuAnchorY;
+                }
+            }
+            FrameLayout.LayoutParams lp =
+                    (FrameLayout.LayoutParams)
+                            panel.getLayoutParams();
+            lp.leftMargin = left;
+            lp.topMargin = top;
+            panel.setLayoutParams(lp);
+            // 放大轴心：贴着胶囊的那条边、横向对胶囊中心。
+            float pivotX = menuAnchorX + menuAnchorW / 2f - left;
+            panel.setPivotX(Math.max(0, Math.min(pw, pivotX)));
+            panel.setPivotY(menuPlacedAbove ? ph : 0);
+            panel.setVisibility(View.VISIBLE);
+            if (animate) {
+                panel.setAlpha(0f);
+                panel.setScaleX(0.92f);
+                panel.setScaleY(0.92f);
+                panel.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                        .setDuration(200)
+                        .setInterpolator(
+                                new android.view.animation
+                                        .DecelerateInterpolator())
+                        .start();
+            }
+        } catch (Throwable ignored) {
+            try {
+                panel.setVisibility(View.VISIBLE);
+            } catch (Throwable ignored2) {
+            }
+        }
+    }
+
+    /** 菜单行：符号 + 标题 + 右侧小字（照定稿预览）。 */
+    private android.widget.LinearLayout buildMenuRow(String glyph,
+            String label, String sub, View.OnClickListener onClick) {
+        android.widget.LinearLayout row =
+                new android.widget.LinearLayout(app);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(10), dp(10), dp(10), dp(10));
+        // v548: 行宽 MATCH_PARENT——权重分配要有确定的总宽
+        // 可分，否则行按内容宽（WRAP_CONTENT）量，label 会被
+        // 长 sub 挤没（见下面 label 的注释）。
+        row.setLayoutParams(new android.widget.LinearLayout
+                .LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT));
+        android.widget.TextView g = new android.widget.TextView(app);
+        g.setText(glyph);
+        g.setTextColor(Color.WHITE);
+        g.setTextSize(15);
+        g.setGravity(Gravity.CENTER);
+        row.addView(g, new android.widget.LinearLayout.LayoutParams(
+                dp(26), android.widget.LinearLayout.LayoutParams
+                        .WRAP_CONTENT));
+        android.widget.TextView t = new android.widget.TextView(app);
+        t.setText(label);
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(14);
+        // v548: 必须 singleLine + ellipsize。原来 label 没设
+        // singleLine：sub 先按期望宽占位（如「该应用不支持
+        // 直接回复」10 个字），label+sub 期望宽超过面板内宽
+        // 时，带权重的 label 在二次分配里被压到约一个字宽，
+        // 中文逐字换行就竖成了一列（wei 截图 4443）。设了
+        // 单行省略后，最坏情况是 label 尾部省略，绝不竖排。
+        t.setSingleLine(true);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        android.widget.LinearLayout.LayoutParams tlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        row.addView(t, tlp);
+        if (sub != null) {
+            android.widget.TextView s =
+                    new android.widget.TextView(app);
+            s.setText(sub);
+            s.setTextColor(Color.argb(115, 255, 255, 255));
+            s.setTextSize(11.5f);
+            s.setSingleLine(true);
+            s.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            row.addView(s, new android.widget.LinearLayout
+                    .LayoutParams(
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT,
+                            android.widget.LinearLayout.LayoutParams
+                                    .WRAP_CONTENT));
+        }
+        row.setOnClickListener(onClick);
+        return row;
+    }
+
+    /** 回复输入区（挂在「回复」行下面，初始收起）。 */
+    private void buildMenuReplyBox(
+            android.widget.LinearLayout panel, final NotifData d,
+            final NotifActions acts) {
+        final android.widget.LinearLayout box =
+                new android.widget.LinearLayout(app);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        box.setPadding(dp(8), dp(8), dp(8), dp(8));
+        GradientDrawable bbg = new GradientDrawable();
+        bbg.setColor(Color.argb(24, 255, 255, 255));
+        bbg.setCornerRadius(dp(14));
+        box.setBackground(bbg);
+        android.widget.LinearLayout.LayoutParams blp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        blp.leftMargin = dp(2);
+        blp.rightMargin = dp(2);
+        blp.topMargin = dp(4);
+        blp.bottomMargin = dp(2);
+        box.setLayoutParams(blp);
+        box.setVisibility(View.GONE);
+
+        android.widget.LinearLayout inRow =
+                new android.widget.LinearLayout(app);
+        inRow.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        inRow.setGravity(Gravity.CENTER_VERTICAL);
+        final android.widget.EditText input =
+                new android.widget.EditText(app);
+        input.setHint("输入回复…");
+        input.setHintTextColor(Color.argb(128, 255, 255, 255));
+        input.setTextColor(Color.WHITE);
+        input.setTextSize(13.5f);
+        input.setSingleLine(true);
+        GradientDrawable ibg = new GradientDrawable();
+        ibg.setColor(Color.argb(36, 255, 255, 255));
+        ibg.setCornerRadius(dp(999));
+        input.setBackground(ibg);
+        input.setPadding(dp(13), dp(8), dp(13), dp(8));
+        inRow.addView(input, new android.widget.LinearLayout
+                .LayoutParams(0, android.widget.LinearLayout
+                        .LayoutParams.WRAP_CONTENT, 1f));
+        android.widget.TextView send =
+                new android.widget.TextView(app);
+        send.setText("发送");
+        send.setTextColor(Color.WHITE);
+        send.setTextSize(13);
+        send.setTypeface(send.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        send.setGravity(Gravity.CENTER);
+        GradientDrawable sbg = new GradientDrawable();
+        sbg.setColor(Color.rgb(34, 197, 94));
+        sbg.setCornerRadius(dp(999));
+        send.setBackground(sbg);
+        send.setPadding(dp(16), dp(9), dp(16), dp(9));
+        android.widget.LinearLayout.LayoutParams slp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        slp.leftMargin = dp(8);
+        inRow.addView(send, slp);
+        box.addView(inRow);
+
+        final android.widget.TextView err =
+                new android.widget.TextView(app);
+        err.setTextColor(Color.rgb(248, 113, 113));
+        err.setTextSize(12);
+        err.setPadding(dp(4), dp(6), dp(4), 0);
+        err.setVisibility(View.GONE);
+        box.addView(err);
+
+        send.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                CharSequence txt = input.getText();
+                String text = txt == null ? "" : txt.toString().trim();
+                if (text.isEmpty()) {
+                    return;
+                }
+                try {
+                    android.os.Bundle results = new android.os.Bundle();
+                    results.putCharSequence(
+                            acts.remoteInput.getResultKey(), text);
+                    android.content.Intent clip =
+                            new android.content.Intent();
+                    android.app.RemoteInput.addResultsToIntent(
+                            new android.app.RemoteInput[]{
+                                    acts.remoteInput}, clip, results);
+                    acts.replyIntent.send(app, 0, clip);
+                    FileLog.i("QuickReply sent pkg=" + d.pkg);
+                    dismissMenu();
+                    menuConsume(d);
+                } catch (Throwable t) {
+                    FileLog.i("QuickReply fail pkg=" + d.pkg
+                            + " err=" + t);
+                    err.setText("发送失败，再试一次或打开应用回复");
+                    err.setVisibility(View.VISIBLE);
+                }
+            }
+        });
+        menuReplyBox = box;
+        menuReplyInput = input;
+        menuReplyError = err;
+        panel.addView(box);
+    }
+
+    private void toggleMenuReplyBox() {
+        if (menuReplyBox == null) {
+            return;
+        }
+        boolean show = menuReplyBox.getVisibility() != View.VISIBLE;
+        menuReplyBox.setVisibility(show ? View.VISIBLE : View.GONE);
+        // v547: 回复框展开/收起后面板高度变了，按同一锚点
+        // 重算位置（不播动画，整块仍须可见）。
+        if (menuPanel != null) {
+            menuPanel.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (menuPanel != null) {
+                        placeMenuPanel(menuPanel, false);
+                    }
+                }
+            });
+        }
+        if (show && menuReplyInput != null) {
+            menuReplyInput.requestFocus();
+            try {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                app.getSystemService(
+                                        Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.showSoftInput(menuReplyInput,
+                            android.view.inputmethod
+                                    .InputMethodManager.SHOW_IMPLICIT);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 「打开应用回复」：走卡片同款的打开通道；打开成功后按
+     * 卡片的老规矩撤销原通知（音乐除外——菜单只对普通胶囊
+     * 出现，这里恒为普通通知，仍照规矩判断一次）。 */
+    private void openAppForReply(NotifData d) {
+        boolean ok = false;
+        try {
+            ok = openPendingIntent(d.contentIntent, d.pkg,
+                    FeatureFlags.miniwindow);
+        } catch (Throwable ignored) {
+        }
+        if (!ok) {
+            try {
+                android.content.Intent li = app.getPackageManager()
+                        .getLaunchIntentForPackage(d.pkg);
+                if (li != null) {
+                    ok = openIntent(li, FeatureFlags.miniwindow);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        FileLog.i("QuickMenu openApp pkg=" + d.pkg + " ok=" + ok);
+        if (ok && !d.isMusic) {
+            try {
+                android.content.Intent di = new android.content.Intent(
+                        NotificationService.ACTION_DISMISS);
+                di.putExtra("key", d.key);
+                app.sendBroadcast(di);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (ok) {
+            menuConsume(d);
+        }
+    }
+
+    /** v547: 统一浮层管理点——长按菜单与呼吸点瞄一眼面板
+     * 全局同时只许一个在屏。两个 show 入口打开前都先调它：
+     * 已开的浮层（包括正淡出动画中的菜单）立即拆干净，
+     * 不等动画、不残留透明层挡触摸或叠暗。 */
+    private void closeOverlays() {
+        dismissMenuNow();
+        dismissQueuePanel();
+        // v556: 收纳面板也归全局单浮层管——开任何新浮层
+        // 前先把它拆掉，反之亦然（showCollectPanel 入口
+        // 也走 closeOverlays）。
+        dismissCollectPanel();
+    }
+
+    /** v557: 长按菜单开关被关（FEATURE_TOGGLE 分发调用）——
+     * 正开着的菜单立即硬摘。旧版 FEATURE_TOGGLE 漏了
+     * longPressMenu 分支，关开关收不掉开着的菜单。 */
+    public void onLongPressMenuDisabled() {
+        dismissMenuNow();
+    }
+
+    /** v557: 通知气泡总开关被关（FEATURE_TOGGLE 分发
+     * 调用）——三个全屏浮层一并收掉，别留透明层在屏上。 */
+    public void onNotifMasterDisabled() {
+        closeOverlays();
+    }
+
+    /** v557: 菜单锚在场校验——整组消散 / 场景 flush 这类
+     * 批量路径走完后调一次：锚数据还在 dock 胶囊里、组
+     * 数据里或收纳栈里任一处就算在场；都不在了说明锚是
+     * 被批量路径顺带清掉的（dissipateOne/onNotificationRemoved
+     * 的按 key 跟随关闭覆盖不到），菜单立即硬摘，别留一块
+     * 冲着空气的全屏层。 */
+    private void dismissMenuIfAnchorGone() {
+        if (menuRoot == null || menuData == null) {
+            return;
+        }
+        NotifData anchor = menuData;
+        boolean present = false;
+        if (dock != null) {
+            for (int i = 0; i < dock.getChildCount() && !present;
+                    i++) {
+                View v = dock.getChildAt(i);
+                if (v instanceof CapsuleView) {
+                    NotifData cd = ((CapsuleView) v).getData();
+                    if (cd == anchor || (cd != null
+                            && anchor.key != null
+                            && anchor.key.equals(cd.key))) {
+                        present = true;
+                    }
+                }
+            }
+        }
+        if (!present) {
+            for (NotifGroup g : groups) {
+                if (g == null) {
+                    continue;
+                }
+                for (NotifData gd : g.items) {
+                    if (gd == anchor || (gd != null
+                            && anchor.key != null
+                            && anchor.key.equals(gd.key))) {
+                        present = true;
+                        break;
+                    }
+                }
+                if (present) {
+                    break;
+                }
+            }
+        }
+        if (!present) {
+            for (NotifData sd : collectStack) {
+                if (sd == anchor || (sd != null
+                        && anchor.key != null
+                        && anchor.key.equals(sd.key))) {
+                    present = true;
+                    break;
+                }
+            }
+        }
+        if (!present) {
+            FileLog.i("QuickMenu anchor gone -> dismiss");
+            dismissMenuNow();
+        }
+    }
+
+    private void hideMenuIme() {
+        if (menuReplyInput != null) {
+            try {
+                android.view.inputmethod.InputMethodManager imm =
+                        (android.view.inputmethod.InputMethodManager)
+                                app.getSystemService(
+                                        Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.hideSoftInputFromWindow(
+                            menuReplyInput.getWindowToken(), 0);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** v557: 全屏浮层统一摘除口——removeViewImmediate 同步
+     * 摘，成功才允许调用方清标志/置 null；失败打日志并返回
+     * false，调用方保留句柄下次再试。事故复盘（2026-11-26
+     * 23:54）：旧写法 removeView 失败被吞、句柄却无条件扔
+     * 掉，窗口还挂在 WindowManager 里再没人能摘，全屏透明
+     * 层吃掉最近任务的左右滑，只能靠 LSPosed 禁用/启用
+     * 模块（进程级清理）才恢复。 */
+    private boolean removeOverlayView(View root, String name) {
+        if (root == null || wm == null) {
+            return true;
+        }
+        try {
+            wm.removeViewImmediate(root);
+            FileLog.i("Overlay remove name=" + name);
+            return true;
+        } catch (Throwable t) {
+            FileLog.i("Overlay remove FAIL name=" + name
+                    + " err=" + t);
+            return false;
+        }
+    }
+
+    /** v547: 立即拆菜单（无动画）：窗口从 WindowManager
+     * 彻底移除、字段全清。closeOverlays 与淡出动画的收尾
+     * 都走这里，保证任何路径关完都不留层。 */
+    private void dismissMenuNow() {
+        hideMenuIme();
+        if (menuPanel != null) {
+            try {
+                menuPanel.animate().cancel();
+            } catch (Throwable ignored) {
+            }
+        }
+        if (menuRoot != null && menuWindowAdded) {
+            // v557: 摘失败保留句柄（不清标志、不置 null），
+            // 等下一次 closeOverlays/守卫再试，别把窗口弄丢；
+            // menuClosing 复位，让用户主动关闭还能再走一遍。
+            if (!removeOverlayView(menuRoot, "menu")) {
+                menuClosing = false;
+                return;
+            }
+        }
+        menuWindowAdded = false;
+        menuClosing = false;
+        menuRoot = null;
+        menuPanel = null;
+        menuReplyBox = null;
+        menuReplyInput = null;
+        menuReplyError = null;
+        menuData = null;
+    }
+
+    /** 关菜单：面板先淡出（约 150ms）再彻底移除窗口。
+     * 重复调用安全：正淡出时直接忽略；收尾按根视图身份
+     * 核对，不会误拆淡出期间新打开的菜单。 */
+    public void dismissMenu() {
+        if (menuRoot == null) {
+            menuClosing = false;
+            return;
+        }
+        if (menuClosing) {
+            return;
+        }
+        hideMenuIme();
+        if (menuPanel == null || !menuWindowAdded) {
+            dismissMenuNow();
+            return;
+        }
+        menuClosing = true;
+        final FrameLayout rootRef = menuRoot;
+        menuPanel.animate()
+                .alpha(0f).scaleX(0.96f).scaleY(0.96f)
+                .setDuration(150)
+                .setInterpolator(
+                        new android.view.animation
+                                .DecelerateInterpolator())
+                .withEndAction(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (menuRoot == rootRef) {
+                            dismissMenuNow();
+                        }
+                    }
+                })
+                .start();
+        // 兜底：动画收尾动作万一没跑到，260ms 后按身份收尾。
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (menuRoot == rootRef) {
+                    dismissMenuNow();
+                }
+            }
+        }, 260);
+    }
+
+    /** 稍后提醒：快照留住，10 分钟后经 onNotification 重投
+     * （打 recalled 标记绕过去重；场景/静默闸门照常过）。 */
+    private void snoozeNotif(final NotifData d) {
+        if (d == null) {
+            return;
+        }
+        if (d.key != null) {
+            Runnable old = snoozeTimers.remove(d.key);
+            if (old != null) {
+                handler.removeCallbacks(old);
+            }
+        }
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                if (d.key != null) {
+                    snoozeTimers.remove(d.key);
+                }
+                d.recalled = true;
+                if (d.key != null) {
+                    synchronized (seenNotifKeys) {
+                        seenNotifKeys.remove(d.key);
+                    }
+                }
+                FileLog.i("Snooze fire pkg=" + d.pkg);
+                onNotification(d);
+            }
+        };
+        if (d.key != null) {
+            snoozeTimers.put(d.key, r);
+        }
+        handler.postDelayed(r, SNOOZE_DELAY_MS);
+        FileLog.i("Snooze set pkg=" + d.pkg + " delayMin=10");
+    }
+
+    // ---- v546: 排队呼吸点 ----
+    // 数据源就是场景/静默共用的 suppressedQueue 本体（不另建
+    // 队列）：enqueueSuppressed / flushSuppressedQueue 的增减
+    // 时机调 refreshQueueDot。守卫与回看把手同款：屏幕亮 +
+    // 已解锁才显示（场景中恰恰要显示，所以不查 sceneSuppressed）。
+    // 小点窗口只占小点本身（10×26dp），其余区域天然穿透。
+
+    public void refreshQueueDot() {
+        if (app == null || wm == null) {
+            return;
+        }
+        if (android.os.Looper.myLooper()
+                != android.os.Looper.getMainLooper()) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    refreshQueueDot();
+                }
+            });
+            return;
+        }
+        boolean has;
+        synchronized (suppressedQueue) {
+            has = !suppressedQueue.isEmpty();
+        }
+        if (!FeatureFlags.queueDot || !has) {
+            hideQueueDot();
+            dismissQueuePanel();
+            return;
+        }
+        if (!isScreenInteractive() || isKeyguardLocked()) {
+            hideQueueDot();
+            return;
+        }
+        ensureQueueDot();
+        if (dotRoot == null || dotView == null) {
+            return;
+        }
+        // 颜色：队列里有场景门排的 → 橙；纯静默 → 紫。
+        boolean scene = false;
+        synchronized (suppressedQueue) {
+            for (NotifData qd : suppressedQueue) {
+                if (qd.key != null
+                        && sceneQueuedKeys.contains(qd.key)) {
+                    scene = true;
+                    break;
+                }
+            }
+        }
+        GradientDrawable dbg = new GradientDrawable();
+        dbg.setColor(scene ? Color.rgb(255, 176, 77)
+                : Color.rgb(167, 139, 250));
+        float r = dp(8);
+        // v549: 圆角朝屏幕内侧——贴左边时右两角圆，贴右边
+        // 时镜像（左两角圆）。
+        if (FeatureFlags.queueDotRight()) {
+            dbg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
+        } else {
+            dbg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+        }
+        dotView.setBackground(dbg);
+        // v549: 位置按设置走（贴边+高度档位）——设置页改了
+        // 或拖动落盘回广播都会走到这，已挂着的窗口当场挪位。
+        applyDotPos();
+        if (!dotWindowAdded) {
+            try {
+                wm.addView(dotRoot, dotParams);
+                dotWindowAdded = true;
+            } catch (Throwable ignored) {
+                return;
+            }
+        } else {
+            try {
+                wm.updateViewLayout(dotRoot, dotParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        dotRoot.setVisibility(View.VISIBLE);
+        startDotBreathing();
+        if (queuePanelAdded) {
+            rebuildQueuePanelRows();
+        }
+    }
+
+    private void startDotBreathing() {
+        if (dotView == null) {
+            return;
+        }
+        if (dotAnimator != null && dotAnimator.isRunning()) {
+            return;
+        }
+        // 约 3.2 秒一个呼吸周期（去 1.6s + 回 1.6s）。
+        dotAnimator = android.animation.ValueAnimator.ofFloat(
+                0.25f, 1f);
+        dotAnimator.setDuration(1600);
+        dotAnimator.setRepeatCount(
+                android.animation.ValueAnimator.INFINITE);
+        dotAnimator.setRepeatMode(
+                android.animation.ValueAnimator.REVERSE);
+        dotAnimator.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        if (dotView != null) {
+                            dotView.setAlpha(
+                                    (Float) a.getAnimatedValue());
+                        }
+                    }
+                });
+        dotAnimator.start();
+    }
+
+    private void hideQueueDot() {
+        // v549: 拖到一半被收点（队列空了/灭屏）也要复位，
+        // 不然 dotDragging 卡住 applyDotPos 永远跳过。
+        dotDragging = false;
+        if (dotAnimator != null) {
+            try {
+                dotAnimator.cancel();
+            } catch (Throwable ignored) {
+            }
+            dotAnimator = null;
+        }
+        if (dotRoot != null && dotWindowAdded && wm != null) {
+            try {
+                wm.removeView(dotRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        dotWindowAdded = false;
+    }
+
+    /** v549: 把设置里的位置（贴边+高度档位）落到小点窗口
+     * 参数上。拖动进行中不套（不然队列一刷新就把正拖着的
+     * 点拽回档位上）。 */
+    private void applyDotPos() {
+        if (dotParams == null || app == null || dotDragging) {
+            return;
+        }
+        dotParams.gravity = (FeatureFlags.queueDotRight()
+                ? Gravity.END : Gravity.START) | Gravity.TOP;
+        android.util.DisplayMetrics dm =
+                app.getResources().getDisplayMetrics();
+        float frac = FeatureFlags.queueDotYFrac();
+        // v556: 与收纳点同贴边同档位时，收纳点占位（它
+        // 长存），排队点自动偏移一档（往下让，到底档就
+        // 往上让），别叠在一起。收纳栈空着（点没出）时
+        // 不让。
+        if (FeatureFlags.collectDot && !collectStack.isEmpty()
+                && FeatureFlags.queueDotRight()
+                        == FeatureFlags.collectDotRight()
+                && FeatureFlags.queueDotBand()
+                        == FeatureFlags.collectDotBand()) {
+            int band = FeatureFlags.queueDotBand();
+            int shifted = band < 2 ? band + 1 : band - 1;
+            frac = FeatureFlags.posYFrac(shifted);
+        }
+        dotParams.y = (int) (dm.heightPixels * frac);
+    }
+
+    /** v549: 拖动结束——高度落成最近的档位，贴边不变；先
+     * 本地换上（手感即时），再广播给 App 进程落盘（prefs +
+     * 文件镜像，单一数据源，同 ACTION_SET_APP_RULE 路子），
+     * App 落盘后会回广播 FEATURE_TOGGLE 对齐各进程标志。 */
+    private void persistDotPosFromDrag(int band) {
+        String side = FeatureFlags.queueDotRight() ? "R" : "L";
+        String pos = FeatureFlags.parseQueueDotPos(
+                side + band);
+        if (!pos.equals(FeatureFlags.queueDotPos)) {
+            FeatureFlags.queueDotPos = pos;
+            try {
+                android.content.Intent ri =
+                        new android.content.Intent(
+                                NotificationService
+                                        .ACTION_SET_QUEUE_DOT_POS);
+                ri.setPackage("com.chenan.flymebobo");
+                ri.putExtra("pos", pos);
+                app.sendBroadcast(ri);
+            } catch (Throwable ignored) {
+            }
+            FileLog.i("QueueDotPos drag -> " + pos);
+        }
+        refreshQueueDot();
+    }
+
+    private void ensureQueueDot() {
+        if (dotRoot != null || app == null || wm == null) {
+            return;
+        }
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            View dot = new View(app);
+            rootL.addView(dot, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+            // v549: 点击/拖动二合一——阈值（8dp）内抬手算
+            // 点击（瞄一眼面板）；超过阈值上下拖改高度，
+            // 松手落成最近档位并落盘。左右贴边只能在设置
+            // 里改，拖动只管高度。
+            rootL.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v,
+                        android.view.MotionEvent e) {
+                    if (dotParams == null) {
+                        return false;
+                    }
+                    switch (e.getActionMasked()) {
+                        case android.view.MotionEvent.ACTION_DOWN:
+                            dotDownRawY = e.getRawY();
+                            dotDragStartY = dotParams.y;
+                            dotDragging = false;
+                            return true;
+                        case android.view.MotionEvent.ACTION_MOVE: {
+                            float dy = e.getRawY() - dotDownRawY;
+                            if (!dotDragging
+                                    && Math.abs(dy) > dp(8)) {
+                                dotDragging = true;
+                                dismissQueuePanel();
+                            }
+                            if (dotDragging && wm != null
+                                    && dotWindowAdded) {
+                                android.util.DisplayMetrics dm =
+                                        app.getResources()
+                                                .getDisplayMetrics();
+                                int maxY = dm.heightPixels - dp(26);
+                                int ny = dotDragStartY + (int) dy;
+                                if (ny < 0) {
+                                    ny = 0;
+                                }
+                                if (ny > maxY) {
+                                    ny = maxY;
+                                }
+                                dotParams.y = ny;
+                                try {
+                                    wm.updateViewLayout(
+                                            dotRoot, dotParams);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            return true;
+                        }
+                        case android.view.MotionEvent.ACTION_UP:
+                        case android.view.MotionEvent.ACTION_CANCEL: {
+                            boolean wasDrag = dotDragging;
+                            dotDragging = false;
+                            if (!wasDrag) {
+                                showQueuePanel();
+                            } else {
+                                android.util.DisplayMetrics dm =
+                                        app.getResources()
+                                                .getDisplayMetrics();
+                                float centerFrac =
+                                        (dotParams.y + dp(13))
+                                                / (float) dm.heightPixels;
+                                int band = centerFrac < 0.31f ? 0
+                                        : centerFrac < 0.59f ? 1 : 2;
+                                persistDotPosFromDrag(band);
+                            }
+                            return true;
+                        }
+                        default:
+                            return false;
+                    }
+                }
+            });
+            dotRoot = rootL;
+            dotView = dot;
+            dotParams = new WindowManager.LayoutParams(
+                    dp(10), dp(26),
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            // v549: 初始位置按设置（默认 L1 = 左 + 46%，同 v546）。
+            applyDotPos();
+            dotParams.setTitle("flymebobo-queuedot");
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 点小点：瞄一眼排队中的通知。只是看——不移除、不标记，
+     * 静默/场景结束后照常补弹。 */
+    private void showQueuePanel() {
+        // v547: 同长按菜单——打开前走统一浮层管理点，
+        // 已开的菜单/面板先立即拆干净，全局只留一个浮层。
+        closeOverlays();
+        if (app == null || wm == null) {
+            return;
+        }
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            rootL.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dismissQueuePanel();
+                }
+            });
+            // v557: 根上补触摸关闭——ACTION_DOWN 落在内容盒
+            // 之外即收（滑动起手也能关层，不必等 click 抬手；
+            // 事故里就是滑动关不掉、全屏根一直吃触摸）。盒内
+            // 触摸由盒子自己消费，走不到根这里；落在盒外才
+            // dismiss 并消费，盒内/未命中返回 false 不干扰
+            // 原点击关闭。
+            rootL.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v,
+                        android.view.MotionEvent e) {
+                    if (e.getAction()
+                            == android.view.MotionEvent.ACTION_DOWN
+                            && queuePanelBox != null) {
+                        int[] loc = new int[2];
+                        queuePanelBox.getLocationOnScreen(loc);
+                        float x = e.getRawX();
+                        float y = e.getRawY();
+                        if (x < loc[0]
+                                || x > loc[0] + queuePanelBox.getWidth()
+                                || y < loc[1]
+                                || y > loc[1]
+                                        + queuePanelBox.getHeight()) {
+                            dismissQueuePanel();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            });
+            android.widget.LinearLayout box =
+                    new android.widget.LinearLayout(app);
+            box.setOrientation(
+                    android.widget.LinearLayout.VERTICAL);
+            box.setPadding(dp(10), dp(10), dp(10), dp(10));
+            GradientDrawable bbg = new GradientDrawable();
+            bbg.setColor(Color.argb(240, 20, 24, 38));
+            bbg.setCornerRadius(dp(18));
+            box.setBackground(bbg);
+            box.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                }
+            });
+            // v549: 面板跟着小点走——小点贴右边时面板从右侧
+            // 出，高度跟小点的档位（原来写死左侧 46%）。
+            boolean dotRight = FeatureFlags.queueDotRight();
+            FrameLayout.LayoutParams blp =
+                    new FrameLayout.LayoutParams(
+                            dp(232), FrameLayout.LayoutParams
+                                    .WRAP_CONTENT,
+                            Gravity.TOP | (dotRight
+                                    ? Gravity.END : Gravity.START));
+            if (dotRight) {
+                blp.rightMargin = dp(14);
+            } else {
+                blp.leftMargin = dp(14);
+            }
+            android.util.DisplayMetrics dm =
+                    app.getResources().getDisplayMetrics();
+            blp.topMargin = Math.max(dp(48),
+                    (int) (dm.heightPixels
+                            * FeatureFlags.queueDotYFrac()) - dp(30));
+            rootL.addView(box, blp);
+            queuePanelRoot = rootL;
+            queuePanelBox = box;
+            // v547: 与长按菜单对齐——窗口类型同样换成
+            // TYPE_SYSTEM_ERROR（与胶囊窗口同型，层级口径
+            // 一致，别再出现 OVERLAY 被 SYSTEM_ERROR 压住）。
+            queuePanelParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            queuePanelParams.gravity = Gravity.TOP | Gravity.START;
+            queuePanelParams.setTitle("flymebobo-queuepanel");
+            wm.addView(queuePanelRoot, queuePanelParams);
+            queuePanelAdded = true;
+            FileLog.i("Overlay add name=queuepanel");
+            rebuildQueuePanelRows();
+            // v547: 轻淡入——面板从小点一侧微微放大 + 淡入
+            // （约 180ms），与长按菜单入场同风格。
+            box.setAlpha(0f);
+            box.setScaleX(0.96f);
+            box.setScaleY(0.96f);
+            box.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // v549: 放大锚点在小点那一侧（右贴边时
+                        // 锚到面板右缘）。
+                        box.setPivotX(FeatureFlags.queueDotRight()
+                                ? box.getWidth() : 0);
+                        box.setPivotY(box.getHeight() / 2f);
+                        box.animate().alpha(1f).scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(180)
+                                .setInterpolator(
+                                        new android.view.animation
+                                                .DecelerateInterpolator())
+                                .start();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void rebuildQueuePanelRows() {
+        if (queuePanelBox == null || app == null) {
+            return;
+        }
+        queuePanelBox.removeAllViews();
+        android.widget.TextView head =
+                new android.widget.TextView(app);
+        head.setText("排队中 · 结束后补弹");
+        head.setTextColor(Color.argb(140, 255, 255, 255));
+        head.setTextSize(12);
+        head.setPadding(dp(6), dp(2), dp(6), dp(8));
+        queuePanelBox.addView(head);
+        java.util.ArrayList<NotifData> snap;
+        synchronized (suppressedQueue) {
+            snap = new java.util.ArrayList<>(suppressedQueue);
+        }
+        int show = Math.min(5, snap.size());
+        for (int i = 0; i < show; i++) {
+            queuePanelBox.addView(buildQueueRow(snap.get(i)));
+        }
+        if (snap.size() > show) {
+            android.widget.TextView more =
+                    new android.widget.TextView(app);
+            more.setText("还有 " + (snap.size() - show) + " 条");
+            more.setTextColor(Color.argb(140, 255, 255, 255));
+            more.setTextSize(12);
+            more.setPadding(dp(6), dp(6), dp(6), dp(2));
+            queuePanelBox.addView(more);
+        }
+        if (snap.isEmpty()) {
+            dismissQueuePanel();
+            hideQueueDot();
+        }
+    }
+
+    private android.widget.LinearLayout buildQueueRow(NotifData d) {
+        android.widget.LinearLayout row =
+                new android.widget.LinearLayout(app);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(6), dp(7), dp(6), dp(7));
+        android.widget.ImageView iv =
+                new android.widget.ImageView(app);
+        try {
+            android.graphics.drawable.Drawable dr =
+                    app.getPackageManager().getApplicationIcon(d.pkg);
+            if (dr != null) {
+                iv.setImageDrawable(dr);
+            } else if (d.icon != null) {
+                iv.setImageBitmap(d.icon);
+            }
+        } catch (Throwable ignored) {
+            if (d.icon != null) {
+                iv.setImageBitmap(d.icon);
+            }
+        }
+        row.addView(iv, new android.widget.LinearLayout.LayoutParams(
+                dp(28), dp(28)));
+        String line = (d.title == null ? "" : d.title)
+                + ((d.text != null && !d.text.isEmpty())
+                        ? "：" + d.text : "");
+        android.widget.TextView tx =
+                new android.widget.TextView(app);
+        tx.setText(line);
+        tx.setTextColor(Color.argb(224, 255, 255, 255));
+        tx.setTextSize(13);
+        tx.setSingleLine(true);
+        tx.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        android.widget.LinearLayout.LayoutParams tlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(8);
+        row.addView(tx, tlp);
+        android.widget.TextView tm =
+                new android.widget.TextView(app);
+        tm.setText(agoText(d.postTime));
+        tm.setTextColor(Color.argb(102, 255, 255, 255));
+        tm.setTextSize(11);
+        android.widget.LinearLayout.LayoutParams mlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        mlp.leftMargin = dp(6);
+        row.addView(tm, mlp);
+        return row;
+    }
+
+    private static String agoText(long postTime) {
+        if (postTime <= 0) {
+            return "";
+        }
+        long diff = System.currentTimeMillis() - postTime;
+        if (diff < 60_000L) {
+            return "刚刚";
+        }
+        if (diff < 3600_000L) {
+            return (diff / 60_000L) + "分钟前";
+        }
+        return (diff / 3600_000L) + "小时前";
+    }
+
+    public void dismissQueuePanel() {
+        if (queuePanelRoot != null && queuePanelAdded) {
+            // v557: 摘失败保留句柄（不清标志、不置 null），
+            // 等下一次再试，别把窗口弄丢（同菜单的口径）。
+            if (!removeOverlayView(queuePanelRoot, "queuepanel")) {
+                return;
+            }
+        }
+        queuePanelAdded = false;
+        queuePanelRoot = null;
+        queuePanelBox = null;
+    }
+
+    // ---- v556: 收纳点（替代扇子） ----
+    // 与排队呼吸点分工：排队点管「被闸门拦下、等着补弹」
+    // 的队列（临时的）；收纳点管「本来要进扇子、被用户
+    // 收起来慢慢处理」的普通胶囊（长存的）。改道点：
+    // pileIntoFan（只贴边/关键词）、dockOneCapsule（收纳
+    // 手势）、dockGroup（整组收）、dismissOpenCard（关
+    // 大卡片）、dissipateAllOneByOne 收尾（fanOrCollect）。
+    // 小点窗口只占小点本身，其余区域天然穿透；守卫与
+    // 排队点同款：屏幕亮 + 已解锁才显示。
+
+    /** 收纳资格：只有普通通知。音乐/下载/实况/导航/
+     * 公交/来电各有自己的位置，永远不收。 */
+    private static boolean isOrdinaryForCollect(NotifData d) {
+        return d != null && d.pkg != null
+                && !d.isMusic && !d.isDownload && !d.isLive
+                && !d.isNavi && !d.isBus && !d.isCall;
+    }
+
+    /** 收一条进收纳栈（头=最新；同 key 替换；满 20 条
+     * 最老一条转进回看栈，回看关着 pushRecall 自己会
+     * 拒绝、等于直接丢弃）。 */
+    public void collectPush(final NotifData d) {
+        if (d == null) {
+            return;
+        }
+        if (android.os.Looper.myLooper()
+                != android.os.Looper.getMainLooper()) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    collectPush(d);
+                }
+            });
+            return;
+        }
+        if (!FeatureFlags.collectDot
+                || !isOrdinaryForCollect(d)) {
+            return;
+        }
+        if (d.key != null) {
+            java.util.Iterator<NotifData> it =
+                    collectStack.iterator();
+            while (it.hasNext()) {
+                NotifData o = it.next();
+                if (o != null && d.key.equals(o.key)) {
+                    it.remove();
+                }
+            }
+        }
+        collectStack.addFirst(d);
+        FileLog.i("Collect in pkg=" + d.pkg
+                + " n=" + collectStack.size());
+        while (collectStack.size() > COLLECT_MAX) {
+            NotifData old = collectStack.removeLast();
+            FileLog.i("Collect overflow pkg=" + old.pkg);
+            pushRecall(old);
+        }
+        refreshCollectDot();
+        flashCollectPeek(d);
+        if (collectPanelAdded) {
+            rebuildCollectPanelRows();
+        }
+    }
+
+    /** 从收纳栈摘掉一条（菜单消费/面板操作共用）。
+     * 摘到了返回 true 并刷新小点与面板。 */
+    private boolean collectRemove(NotifData d) {
+        if (d == null) {
+            return false;
+        }
+        boolean removed = false;
+        java.util.Iterator<NotifData> it =
+                collectStack.iterator();
+        while (it.hasNext()) {
+            NotifData o = it.next();
+            if (o == d || (d.key != null && o != null
+                    && d.key.equals(o.key))) {
+                it.remove();
+                removed = true;
+                break;
+            }
+        }
+        if (removed) {
+            FileLog.i("Collect out pkg=" + d.pkg
+                    + " n=" + collectStack.size());
+            refreshCollectDot();
+            if (collectPanelAdded) {
+                rebuildCollectPanelRows();
+            }
+        }
+        return removed;
+    }
+
+    public void refreshCollectDot() {
+        if (app == null || wm == null) {
+            return;
+        }
+        if (android.os.Looper.myLooper()
+                != android.os.Looper.getMainLooper()) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    refreshCollectDot();
+                }
+            });
+            return;
+        }
+        if (!FeatureFlags.collectDot || collectStack.isEmpty()) {
+            hideCollectDot();
+            dismissCollectPanel();
+            // 收纳点没了，排队点的避让也随之解除。
+            refreshQueueDot();
+            return;
+        }
+        if (!isScreenInteractive() || isKeyguardLocked()) {
+            hideCollectDot();
+            return;
+        }
+        ensureCollectDot();
+        if (cdotRoot == null || cdotTab == null) {
+            return;
+        }
+        layoutCollectChildren();
+        // 签的颜色跟随设置（角标恒红，不跟随）。
+        GradientDrawable tbg = new GradientDrawable();
+        tbg.setColor(FeatureFlags.collectDotColorValue());
+        float r = dp(9);
+        if (FeatureFlags.collectDotRight()) {
+            tbg.setCornerRadii(new float[]{r, r, 0, 0, 0, 0, r, r});
+        } else {
+            tbg.setCornerRadii(new float[]{0, 0, r, r, r, r, 0, 0});
+        }
+        cdotTab.setBackground(tbg);
+        if (cdotBadge != null) {
+            int n = collectStack.size();
+            cdotBadge.setText(n > 9 ? "9+" : String.valueOf(n));
+        }
+        applyCollectDotPos();
+        if (!cdotWindowAdded) {
+            try {
+                wm.addView(cdotRoot, cdotParams);
+                cdotWindowAdded = true;
+            } catch (Throwable ignored) {
+                return;
+            }
+        } else {
+            try {
+                wm.updateViewLayout(cdotRoot, cdotParams);
+            } catch (Throwable ignored) {
+            }
+        }
+        cdotRoot.setVisibility(View.VISIBLE);
+        startCollectBreathing();
+        if (collectPanelAdded) {
+            rebuildCollectPanelRows();
+        }
+        // 收纳点出现/挪位，排队点重算避让。
+        refreshQueueDot();
+    }
+
+    private void startCollectBreathing() {
+        if (cdotBody == null) {
+            return;
+        }
+        if (cdotAnimator != null && cdotAnimator.isRunning()) {
+            return;
+        }
+        // 与排队点同节奏：约 3.2 秒一个呼吸周期。
+        cdotAnimator = android.animation.ValueAnimator.ofFloat(
+                0.25f, 1f);
+        cdotAnimator.setDuration(1600);
+        cdotAnimator.setRepeatCount(
+                android.animation.ValueAnimator.INFINITE);
+        cdotAnimator.setRepeatMode(
+                android.animation.ValueAnimator.REVERSE);
+        cdotAnimator.addUpdateListener(
+                new android.animation.ValueAnimator
+                        .AnimatorUpdateListener() {
+                    @Override
+                    public void onAnimationUpdate(
+                            android.animation.ValueAnimator a) {
+                        if (cdotBody != null) {
+                            cdotBody.setAlpha(
+                                    (Float) a.getAnimatedValue());
+                        }
+                    }
+                });
+        cdotAnimator.start();
+    }
+
+    private void hideCollectDot() {
+        cdotDragging = false;
+        cdotPeeking = false;
+        if (handler != null) {
+            handler.removeCallbacks(cdotPeekEndRunnable);
+        }
+        if (cdotAnimator != null) {
+            try {
+                cdotAnimator.cancel();
+            } catch (Throwable ignored) {
+            }
+            cdotAnimator = null;
+        }
+        if (cdotRoot != null && cdotWindowAdded && wm != null) {
+            try {
+                wm.removeView(cdotRoot);
+            } catch (Throwable ignored) {
+            }
+        }
+        cdotWindowAdded = false;
+    }
+
+    /** 收纳点位置落到窗口参数上（拖动中不套，同排队点）。 */
+    private void applyCollectDotPos() {
+        if (cdotParams == null || app == null || cdotDragging) {
+            return;
+        }
+        cdotParams.gravity = (FeatureFlags.collectDotRight()
+                ? Gravity.END : Gravity.START) | Gravity.TOP;
+        android.util.DisplayMetrics dm =
+                app.getResources().getDisplayMetrics();
+        cdotParams.y = (int) (dm.heightPixels
+                * FeatureFlags.collectDotYFrac());
+    }
+
+    /** 签/角标/探头胶囊在 body 里的贴边方向（贴右边时
+     * 全部镜像到右缘）。refresh 时按当前设置重排。 */
+    private void layoutCollectChildren() {
+        if (cdotTab == null) {
+            return;
+        }
+        boolean right = FeatureFlags.collectDotRight();
+        int side = right ? Gravity.END : Gravity.START;
+        FrameLayout.LayoutParams tlp =
+                new FrameLayout.LayoutParams(dp(13), dp(38));
+        tlp.gravity = Gravity.CENTER_VERTICAL | side;
+        cdotTab.setLayoutParams(tlp);
+        if (cdotBadge != null) {
+            FrameLayout.LayoutParams blp =
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            dp(15));
+            blp.gravity = Gravity.TOP | side;
+            if (right) {
+                blp.rightMargin = dp(6);
+            } else {
+                blp.leftMargin = dp(6);
+            }
+            blp.topMargin = dp(2);
+            cdotBadge.setLayoutParams(blp);
+        }
+        if (cdotPeek != null) {
+            FrameLayout.LayoutParams plp =
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.WRAP_CONTENT,
+                            FrameLayout.LayoutParams.WRAP_CONTENT);
+            plp.gravity = Gravity.CENTER_VERTICAL | side;
+            cdotPeek.setLayoutParams(plp);
+        }
+    }
+
+    /** 拖动结束：高度落成最近档位（同排队点的口径），
+     * 本地先换上，再广播给 App 进程落盘。 */
+    private void persistCollectPosFromDrag(int band) {
+        String side = FeatureFlags.collectDotRight() ? "R" : "L";
+        String pos = FeatureFlags.parseCollectDotPos(
+                side + band);
+        if (!pos.equals(FeatureFlags.collectDotPos)) {
+            FeatureFlags.collectDotPos = pos;
+            try {
+                android.content.Intent ri =
+                        new android.content.Intent(
+                                NotificationService
+                                        .ACTION_SET_COLLECT_DOT_POS);
+                ri.setPackage("com.chenan.flymebobo");
+                ri.putExtra("pos", pos);
+                app.sendBroadcast(ri);
+            } catch (Throwable ignored) {
+            }
+            FileLog.i("CollectDotPos drag -> " + pos);
+        }
+        refreshCollectDot();
+    }
+
+    private void ensureCollectDot() {
+        if (cdotRoot != null || app == null || wm == null) {
+            return;
+        }
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            FrameLayout body = new FrameLayout(app);
+            rootL.addView(body, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT, dp(38)));
+            View tab = new View(app);
+            body.addView(tab);
+            android.widget.TextView badge =
+                    new android.widget.TextView(app);
+            badge.setTextSize(9);
+            badge.setTextColor(Color.WHITE);
+            badge.setTypeface(badge.getTypeface(),
+                    android.graphics.Typeface.BOLD);
+            badge.setGravity(Gravity.CENTER);
+            badge.setPadding(dp(3), 0, dp(3), 0);
+            badge.setMinWidth(dp(15));
+            GradientDrawable bbg = new GradientDrawable();
+            bbg.setShape(GradientDrawable.OVAL);
+            bbg.setColor(Color.rgb(239, 68, 68));
+            badge.setBackground(bbg);
+            body.addView(badge);
+            // 探头小胶囊：应用色圆点 + 应用名，默认收起。
+            android.widget.LinearLayout peek =
+                    new android.widget.LinearLayout(app);
+            peek.setOrientation(
+                    android.widget.LinearLayout.HORIZONTAL);
+            peek.setGravity(Gravity.CENTER_VERTICAL);
+            peek.setPadding(dp(8), dp(5), dp(10), dp(5));
+            GradientDrawable pbg = new GradientDrawable();
+            pbg.setColor(Color.argb(240, 20, 24, 38));
+            pbg.setCornerRadius(dp(999));
+            peek.setBackground(pbg);
+            View pdot = new View(app);
+            android.widget.LinearLayout.LayoutParams dlp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            dp(8), dp(8));
+            dlp.rightMargin = dp(5);
+            peek.addView(pdot, dlp);
+            android.widget.TextView plabel =
+                    new android.widget.TextView(app);
+            plabel.setTextColor(Color.WHITE);
+            plabel.setTextSize(11);
+            plabel.setSingleLine(true);
+            plabel.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+            plabel.setMaxWidth(dp(110));
+            peek.addView(plabel);
+            peek.setVisibility(View.GONE);
+            body.addView(peek);
+            // 点击/拖动二合一（同排队点）：阈值内抬手=
+            // 开面板；超阈值上下拖改高度，松手落档落盘。
+            rootL.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v,
+                        android.view.MotionEvent e) {
+                    if (cdotParams == null) {
+                        return false;
+                    }
+                    switch (e.getActionMasked()) {
+                        case android.view.MotionEvent.ACTION_DOWN:
+                            cdotDownRawY = e.getRawY();
+                            cdotDragStartY = cdotParams.y;
+                            cdotDragging = false;
+                            return true;
+                        case android.view.MotionEvent.ACTION_MOVE: {
+                            float dy = e.getRawY() - cdotDownRawY;
+                            if (!cdotDragging
+                                    && Math.abs(dy) > dp(8)) {
+                                cdotDragging = true;
+                                dismissCollectPanel();
+                            }
+                            if (cdotDragging && wm != null
+                                    && cdotWindowAdded) {
+                                android.util.DisplayMetrics dm =
+                                        app.getResources()
+                                                .getDisplayMetrics();
+                                int maxY = dm.heightPixels - dp(38);
+                                int ny = cdotDragStartY + (int) dy;
+                                if (ny < 0) {
+                                    ny = 0;
+                                }
+                                if (ny > maxY) {
+                                    ny = maxY;
+                                }
+                                cdotParams.y = ny;
+                                try {
+                                    wm.updateViewLayout(
+                                            cdotRoot, cdotParams);
+                                } catch (Throwable ignored) {
+                                }
+                            }
+                            return true;
+                        }
+                        case android.view.MotionEvent.ACTION_UP:
+                        case android.view.MotionEvent.ACTION_CANCEL: {
+                            boolean wasDrag = cdotDragging;
+                            cdotDragging = false;
+                            if (!wasDrag) {
+                                showCollectPanel();
+                            } else {
+                                android.util.DisplayMetrics dm =
+                                        app.getResources()
+                                                .getDisplayMetrics();
+                                float centerFrac =
+                                        (cdotParams.y + dp(19))
+                                                / (float) dm.heightPixels;
+                                int band = centerFrac < 0.31f ? 0
+                                        : centerFrac < 0.59f ? 1 : 2;
+                                persistCollectPosFromDrag(band);
+                            }
+                            return true;
+                        }
+                        default:
+                            return false;
+                    }
+                }
+            });
+            cdotRoot = rootL;
+            cdotBody = body;
+            cdotTab = tab;
+            cdotBadge = badge;
+            cdotPeek = peek;
+            cdotPeekDot = pdot;
+            cdotPeekLabel = plabel;
+            cdotParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT, dp(38),
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            applyCollectDotPos();
+            cdotParams.setTitle("flymebobo-collectdot");
+            layoutCollectChildren();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String collectAppLabel(String pkg) {
+        if (pkg == null) {
+            return "";
+        }
+        String cached = collectLabelCache.get(pkg);
+        if (cached != null) {
+            return cached;
+        }
+        String label = pkg;
+        try {
+            android.content.pm.ApplicationInfo ai =
+                    app.getPackageManager().getApplicationInfo(
+                            pkg, 0);
+            CharSequence cs = app.getPackageManager()
+                    .getApplicationLabel(ai);
+            if (cs != null) {
+                label = cs.toString();
+            }
+        } catch (Throwable ignored) {
+        }
+        collectLabelCache.put(pkg, label);
+        return label;
+    }
+
+    /** 探头胶囊的圆点色：通知图标的平均色（1×1 缩放
+     * 取色），取不到回退收纳点主题色。按包名缓存。 */
+    private int collectAppColor(NotifData d) {
+        if (d == null || d.pkg == null) {
+            return FeatureFlags.collectDotColorValue();
+        }
+        Integer cached = collectColorCache.get(d.pkg);
+        if (cached != null) {
+            return cached;
+        }
+        int color = FeatureFlags.collectDotColorValue();
+        try {
+            if (d.icon != null && !d.icon.isRecycled()) {
+                android.graphics.Bitmap one =
+                        android.graphics.Bitmap.createScaledBitmap(
+                                d.icon, 1, 1, true);
+                if (one != null) {
+                    int px = one.getPixel(0, 0);
+                    if (android.graphics.Color.alpha(px) >= 32) {
+                        color = px;
+                    }
+                    if (one != d.icon) {
+                        one.recycle();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        collectColorCache.put(d.pkg, color);
+        return color;
+    }
+
+    /** 新条目收进时小点探头：签暂让位给一颗小胶囊
+     * （应用色圆点 + 应用名）约 1.2 秒，再缩回签形态。
+     * 是小点自己窗口内的形态变化，不开新浮层。 */
+    private void flashCollectPeek(NotifData d) {
+        if (cdotRoot == null || cdotPeek == null
+                || !cdotWindowAdded) {
+            return;
+        }
+        try {
+            cdotPeekLabel.setText(collectAppLabel(d.pkg));
+            GradientDrawable dotBg = new GradientDrawable();
+            dotBg.setShape(GradientDrawable.OVAL);
+            dotBg.setColor(collectAppColor(d));
+            cdotPeekDot.setBackground(dotBg);
+            cdotPeeking = true;
+            cdotTab.setVisibility(View.GONE);
+            if (cdotBadge != null) {
+                cdotBadge.setVisibility(View.GONE);
+            }
+            cdotPeek.setVisibility(View.VISIBLE);
+            try {
+                wm.updateViewLayout(cdotRoot, cdotParams);
+            } catch (Throwable ignored) {
+            }
+            handler.removeCallbacks(cdotPeekEndRunnable);
+            handler.postDelayed(cdotPeekEndRunnable, 1200);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 点小点：收纳面板。和瞄一眼面板不同——这里能
+     * 操作：点条目展开成胶囊、左滑收进回看、顶部全部
+     * 展开、行长按呼长按菜单。 */
+    private void showCollectPanel() {
+        // 全局单浮层：打开前先拆已开的浮层（同长按菜单）。
+        closeOverlays();
+        if (app == null || wm == null
+                || collectStack.isEmpty()) {
+            return;
+        }
+        try {
+            FrameLayout rootL = new FrameLayout(app);
+            rootL.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    dismissCollectPanel();
+                }
+            });
+            // v557: 根上补触摸关闭——ACTION_DOWN 落在内容盒
+            // 之外即收（滑动起手也能关层，同瞄一眼面板的修法）。
+            rootL.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v,
+                        android.view.MotionEvent e) {
+                    if (e.getAction()
+                            == android.view.MotionEvent.ACTION_DOWN
+                            && collectPanelBox != null) {
+                        int[] loc = new int[2];
+                        collectPanelBox.getLocationOnScreen(loc);
+                        float x = e.getRawX();
+                        float y = e.getRawY();
+                        if (x < loc[0]
+                                || x > loc[0] + collectPanelBox.getWidth()
+                                || y < loc[1]
+                                || y > loc[1]
+                                        + collectPanelBox.getHeight()) {
+                            dismissCollectPanel();
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            });
+            final android.widget.LinearLayout box =
+                    new android.widget.LinearLayout(app);
+            box.setOrientation(
+                    android.widget.LinearLayout.VERTICAL);
+            box.setPadding(dp(10), dp(10), dp(10), dp(10));
+            GradientDrawable bbg = new GradientDrawable();
+            bbg.setColor(Color.argb(240, 20, 24, 38));
+            bbg.setCornerRadius(dp(18));
+            box.setBackground(bbg);
+            box.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                }
+            });
+            // 面板跟着小点走：贴右边时从右侧出，高度跟档位。
+            boolean dotRight = FeatureFlags.collectDotRight();
+            FrameLayout.LayoutParams blp =
+                    new FrameLayout.LayoutParams(
+                            dp(264), FrameLayout.LayoutParams
+                                    .WRAP_CONTENT,
+                            Gravity.TOP | (dotRight
+                                    ? Gravity.END : Gravity.START));
+            if (dotRight) {
+                blp.rightMargin = dp(14);
+            } else {
+                blp.leftMargin = dp(14);
+            }
+            android.util.DisplayMetrics dm =
+                    app.getResources().getDisplayMetrics();
+            blp.topMargin = Math.max(dp(48),
+                    (int) (dm.heightPixels
+                            * FeatureFlags.collectDotYFrac()) - dp(30));
+            rootL.addView(box, blp);
+            collectPanelRoot = rootL;
+            collectPanelBox = box;
+            // 层级与长按菜单同档（TYPE_SYSTEM_ERROR）。
+            collectPanelParams = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_IN_SCREEN
+                            | WindowManager.LayoutParams
+                                    .FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT);
+            collectPanelParams.gravity = Gravity.TOP | Gravity.START;
+            collectPanelParams.setTitle("flymebobo-collectpanel");
+            wm.addView(collectPanelRoot, collectPanelParams);
+            collectPanelAdded = true;
+            FileLog.i("Overlay add name=collectpanel");
+            rebuildCollectPanelRows();
+            // 入场：从小点一侧微微放大 + 淡入（同瞄一眼面板）。
+            box.setAlpha(0f);
+            box.setScaleX(0.96f);
+            box.setScaleY(0.96f);
+            box.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        box.setPivotX(FeatureFlags.collectDotRight()
+                                ? box.getWidth() : 0);
+                        box.setPivotY(box.getHeight() / 2f);
+                        box.animate().alpha(1f).scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(180)
+                                .setInterpolator(
+                                        new android.view.animation
+                                                .DecelerateInterpolator())
+                                .start();
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void rebuildCollectPanelRows() {
+        if (collectPanelBox == null || app == null) {
+            return;
+        }
+        collectPanelBox.removeAllViews();
+        android.widget.LinearLayout head =
+                new android.widget.LinearLayout(app);
+        head.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(6), dp(2), dp(6), dp(8));
+        android.widget.TextView title =
+                new android.widget.TextView(app);
+        title.setText("收纳 " + collectStack.size() + " 条");
+        title.setTextColor(Color.argb(140, 255, 255, 255));
+        title.setTextSize(12);
+        head.addView(title, new android.widget.LinearLayout
+                .LayoutParams(0, android.widget.LinearLayout
+                        .LayoutParams.WRAP_CONTENT, 1f));
+        android.widget.TextView all =
+                new android.widget.TextView(app);
+        all.setText("全部展开");
+        all.setTextColor(Color.rgb(147, 197, 253));
+        all.setTextSize(12.5f);
+        all.setPadding(dp(8), dp(2), dp(2), dp(2));
+        all.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                expandAllCollect();
+            }
+        });
+        head.addView(all);
+        collectPanelBox.addView(head);
+        // 新 → 旧（栈头最新，ArrayDeque 迭代就是头→尾）。
+        for (NotifData d : collectStack) {
+            collectPanelBox.addView(buildCollectRow(d));
+        }
+        if (collectStack.isEmpty()) {
+            dismissCollectPanel();
+            hideCollectDot();
+        }
+    }
+
+    private android.widget.LinearLayout buildCollectRow(
+            final NotifData d) {
+        final android.widget.LinearLayout row =
+                new android.widget.LinearLayout(app);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(6), dp(7), dp(6), dp(7));
+        android.widget.ImageView iv =
+                new android.widget.ImageView(app);
+        try {
+            android.graphics.drawable.Drawable dr =
+                    app.getPackageManager().getApplicationIcon(d.pkg);
+            if (dr != null) {
+                iv.setImageDrawable(dr);
+            } else if (d.icon != null) {
+                iv.setImageBitmap(d.icon);
+            }
+        } catch (Throwable ignored) {
+            if (d.icon != null) {
+                iv.setImageBitmap(d.icon);
+            }
+        }
+        row.addView(iv, new android.widget.LinearLayout.LayoutParams(
+                dp(28), dp(28)));
+        android.widget.LinearLayout texts =
+                new android.widget.LinearLayout(app);
+        texts.setOrientation(android.widget.LinearLayout.VERTICAL);
+        android.widget.LinearLayout.LayoutParams tlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(8);
+        android.widget.TextView t1 =
+                new android.widget.TextView(app);
+        t1.setText(d.title == null ? collectAppLabel(d.pkg)
+                : d.title);
+        t1.setTextColor(Color.argb(224, 255, 255, 255));
+        t1.setTextSize(13);
+        t1.setSingleLine(true);
+        t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(t1);
+        if (d.text != null && !d.text.isEmpty()
+                && !d.text.equals(d.title)) {
+            android.widget.TextView t2 =
+                    new android.widget.TextView(app);
+            t2.setText(d.text);
+            t2.setTextColor(Color.argb(150, 255, 255, 255));
+            t2.setTextSize(11.5f);
+            t2.setSingleLine(true);
+            t2.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            texts.addView(t2);
+        }
+        row.addView(texts, tlp);
+        android.widget.TextView tm =
+                new android.widget.TextView(app);
+        tm.setText(agoText(d.postTime));
+        tm.setTextColor(Color.argb(102, 255, 255, 255));
+        tm.setTextSize(11);
+        android.widget.LinearLayout.LayoutParams mlp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        mlp.leftMargin = dp(6);
+        row.addView(tm, mlp);
+        // 手势三合一：点=展开成胶囊；左滑=收进回看；
+        // 长按=呼长按菜单（锚点先量好再开菜单——菜单一开
+        // 面板就被 closeOverlays 拆了）。
+        row.setOnTouchListener(new View.OnTouchListener() {
+            private float downX;
+            private float downY;
+            private boolean swiping;
+            private boolean lpFired;
+            private final Runnable lpRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (!FeatureFlags.longPressMenu) {
+                        return;
+                    }
+                    int[] loc = new int[2];
+                    row.getLocationOnScreen(loc);
+                    int w = row.getWidth();
+                    int h = row.getHeight();
+                    lpFired = true;
+                    showCapsuleMenuAt(loc[0], loc[1], w, h, d);
+                }
+            };
+
+            @Override
+            public boolean onTouch(View v,
+                    android.view.MotionEvent e) {
+                switch (e.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        downX = e.getRawX();
+                        downY = e.getRawY();
+                        swiping = false;
+                        lpFired = false;
+                        handler.postDelayed(lpRunnable, 450);
+                        return true;
+                    case android.view.MotionEvent.ACTION_MOVE: {
+                        float dx = e.getRawX() - downX;
+                        float dy = e.getRawY() - downY;
+                        if (!swiping && dx < -dp(10)
+                                && Math.abs(dx) > Math.abs(dy)) {
+                            swiping = true;
+                            handler.removeCallbacks(lpRunnable);
+                        }
+                        if (swiping) {
+                            row.setTranslationX(Math.min(0, dx));
+                        } else if (Math.abs(dx) > dp(10)
+                                || Math.abs(dy) > dp(10)) {
+                            handler.removeCallbacks(lpRunnable);
+                        }
+                        return true;
+                    }
+                    case android.view.MotionEvent.ACTION_UP:
+                    case android.view.MotionEvent.ACTION_CANCEL: {
+                        handler.removeCallbacks(lpRunnable);
+                        if (swiping) {
+                            float dx = e.getRawX() - downX;
+                            if (dx < -dp(56)) {
+                                collectToRecall(d);
+                            } else {
+                                row.animate().translationX(0)
+                                        .setDuration(150).start();
+                            }
+                        } else if (!lpFired) {
+                            collectPopOut(d);
+                        }
+                        return true;
+                    }
+                    default:
+                        return false;
+                }
+            }
+        });
+        return row;
+    }
+
+    /** 面板点条目：从收纳栈摘下，经 onNotification 按
+     * 正常路径弹出（打 recalled 标记绕开三层去重，同
+     * 回看重弹的口径；场景/静默闸门与应用规则照常把关）。 */
+    private void collectPopOut(NotifData d) {
+        dismissCollectPanel();
+        if (!collectRemove(d)) {
+            return;
+        }
+        d.recalled = true;
+        if (d.key != null) {
+            synchronized (seenNotifKeys) {
+                seenNotifKeys.remove(d.key);
+            }
+        }
+        FileLog.i("Collect pop pkg=" + d.pkg);
+        onNotification(d);
+    }
+
+    /** 面板左滑：收进回看栈（回看关着 pushRecall 自己
+     * 拒绝，等于直接移除）。 */
+    private void collectToRecall(NotifData d) {
+        if (!collectRemove(d)) {
+            return;
+        }
+        if (FeatureFlags.recallCapsule) {
+            pushRecall(d);
+            FileLog.i("Collect toRecall pkg=" + d.pkg);
+        } else {
+            FileLog.i("Collect drop pkg=" + d.pkg
+                    + " (recall off)");
+        }
+    }
+
+    /** 全部展开：按旧→新顺序逐条经 onNotification 弹出
+     * （应用规则/闸门在 popCapsule 里照常把关），然后
+     * 清空收纳栈、收面板。 */
+    private void expandAllCollect() {
+        java.util.ArrayList<NotifData> items =
+                new java.util.ArrayList<>(collectStack);
+        collectStack.clear();
+        dismissCollectPanel();
+        refreshCollectDot();
+        FileLog.i("Collect expandAll n=" + items.size());
+        for (int i = items.size() - 1; i >= 0; i--) {
+            NotifData d = items.get(i);
+            d.recalled = true;
+            if (d.key != null) {
+                synchronized (seenNotifKeys) {
+                    seenNotifKeys.remove(d.key);
+                }
+            }
+            onNotification(d);
+        }
+    }
+
+    public void dismissCollectPanel() {
+        if (collectPanelRoot != null && collectPanelAdded) {
+            // v557: 摘失败保留句柄（不清标志、不置 null），
+            // 等下一次再试，别把窗口弄丢（同菜单的口径）。
+            if (!removeOverlayView(collectPanelRoot,
+                    "collectpanel")) {
+                return;
+            }
+        }
+        collectPanelAdded = false;
+        collectPanelRoot = null;
+        collectPanelBox = null;
     }
 
     // ---- v525: temporary silence flush plumbing ----
@@ -1899,9 +4505,15 @@ public class BubbleWindow {
         if (!copy.isEmpty()) {
             FileLog.i("SceneFlush n=" + copy.size());
         }
+        // v546: 队列已清空——场景标记一并清，呼吸点随之刷新
+        // （重投时若再被门拦下，enqueue 会重新标记/刷新）。
+        sceneQueuedKeys.clear();
+        refreshQueueDot();
         for (NotifData d : copy) {
             onNotification(d);
         }
+        // v557: flush 完校验一次菜单锚还在不在场。
+        dismissMenuIfAnchorGone();
         return copy.size();
     }
 
@@ -2728,6 +5340,13 @@ public class BubbleWindow {
         if (key == null || app == null) {
             return;
         }
+        // v546: 通知被移除——动作暂存清掉，冲它开的菜单收起。
+        synchronized (ACTIONS_BY_KEY) {
+            ACTIONS_BY_KEY.remove(key);
+        }
+        if (menuData != null && key.equals(menuData.key)) {
+            dismissMenu();
+        }
         handler.post(new Runnable() {
             @Override
             public void run() {
@@ -2955,6 +5574,33 @@ public class BubbleWindow {
         }
     }
 
+    /** v555: 不弹、直接收进扇子的共用落点——原是 AppRules
+     * 「只贴边」（EDGE）待遇的内联代码：同 key 旧条目先从
+     * 已停靠的组里摘掉（防重复堆叠），再整组走
+     * addPileIconForGroup 进扇子，点扇子能原样展开。关键词
+     * 过滤命中时复用同一落点，不另造路径。 */
+    private void pileIntoFan(NotifData data) {
+        // v556: 收纳模式开着时，普通通知不进扇子，改收进
+        // 收纳点（「只贴边」规则与关键词过滤共用这个落点，
+        // 一并改道，保持一致）。
+        if (FeatureFlags.collectDot && isOrdinaryForCollect(data)) {
+            collectPush(data);
+            return;
+        }
+        NotifGroup stored = dockedGroups.get(data.pkg);
+        if (stored != null && data.key != null) {
+            for (int i = stored.items.size() - 1; i >= 0; i--) {
+                NotifData old = stored.items.get(i);
+                if (old != null && data.key.equals(old.key)) {
+                    stored.items.remove(i);
+                }
+            }
+        }
+        NotifGroup dg = new NotifGroup(data.pkg);
+        dg.add(data);
+        addPileIconForGroup(dg);
+    }
+
     private void popCapsule(NotifData data) {
         if (dock == null) {
             return;
@@ -2978,20 +5624,7 @@ public class BubbleWindow {
             if (rule == AppRules.EDGE
                     && !data.isDownload && !data.isLive
                     && !data.isNavi && !data.isBus) {
-                NotifGroup stored = dockedGroups.get(data.pkg);
-                if (stored != null && data.key != null) {
-                    for (int i = stored.items.size() - 1; i >= 0;
-                            i--) {
-                        NotifData old = stored.items.get(i);
-                        if (old != null
-                                && data.key.equals(old.key)) {
-                            stored.items.remove(i);
-                        }
-                    }
-                }
-                NotifGroup dg = new NotifGroup(data.pkg);
-                dg.add(data);
-                addPileIconForGroup(dg);
+                pileIntoFan(data);
                 return;
             }
         }
@@ -3027,6 +5660,29 @@ public class BubbleWindow {
                 if (data.isPickupCode) {
                     data.cabinet =
                             extractCabinet(data.title, data.text);
+                }
+            }
+        }
+        // v555: 关键词过滤（安静规则三件套）——位置在应用
+        // 规则之后、真正弹出之前（验证码识别已在上面做完，
+        // data.code 非空即豁免）。仅普通通知：音乐/下载/
+        // 实况/导航/公交/来电/验证码/取件码一律不碰。命中
+        // 任一词 → 不弹，走「只贴边」同款落点收进扇子
+        // （pileIntoFan）。「永不弹」的在上面应用规则处已
+        // return，与本功能无关。
+        if (FeatureFlags.keywordFilter && data != null
+                && data.pkg != null
+                && !data.isCall && !data.isMusic && !data.isDownload
+                && !data.isLive && !data.isNavi && !data.isBus
+                && data.code == null) {
+            String hay = (data.title == null ? "" : data.title)
+                    + "\n" + (data.text == null ? "" : data.text);
+            for (String w : FeatureFlags.filterWordList()) {
+                if (!w.isEmpty() && hay.contains(w)) {
+                    FileLog.i("KeywordFilter hit pkg=" + data.pkg
+                            + " word=" + w);
+                    pileIntoFan(data);
+                    return;
                 }
             }
         }
@@ -6909,6 +9565,13 @@ public class BubbleWindow {
                 if (destroy) {
                     return;
                 }
+                // v556: 收纳模式开着时，关掉的大卡片（普通
+                // 通知）不进扇子，改收进收纳点。
+                if (FeatureFlags.collectDot
+                        && isOrdinaryForCollect(removed)) {
+                    collectPush(removed);
+                    return;
+                }
                 NotifGroup docked = new NotifGroup(pkg);
                 docked.add(removed);
                 addPileIconForGroup(docked);
@@ -7974,6 +10637,30 @@ public class BubbleWindow {
                 || !dockingGroups.add(target)) {
             return;
         }
+        // v556: 收纳模式开着且整组都是普通通知 → 不进扇子，
+        // 整组收进收纳点（旧→新序入栈，最新落在栈顶）。
+        // 混了特殊类型的组（音乐/下载等）照旧走扇子。
+        if (FeatureFlags.collectDot && !target.items.isEmpty()) {
+            boolean allOrdinary = true;
+            for (NotifData d : target.items) {
+                if (!isOrdinaryForCollect(d)) {
+                    allOrdinary = false;
+                    break;
+                }
+            }
+            if (allOrdinary) {
+                java.util.ArrayList<NotifData> items =
+                        new java.util.ArrayList<>(target.items);
+                groups.remove(target);
+                dockingGroups.remove(target);
+                holdWindowHeight = true;
+                rebuildDock();
+                for (int i = items.size() - 1; i >= 0; i--) {
+                    collectPush(items.get(i));
+                }
+                return;
+            }
+        }
         // Old tops of the surviving capsules, by key, so they can
         // slide up one by one to fill the position.
         int rowTop = 0;
@@ -8019,6 +10706,45 @@ public class BubbleWindow {
         }, 300);
     }
 
+    /** v556: dockOneCapsule 的收纳改道版——同一套收纳
+     * 手势、同一个压扁进边缘的动画，只是 300ms 后不落
+     * 扇子图标，而是把这条通知摘下、收进收纳栈。调用前
+     * dockingKeys 已占位（dockOneCapsule 的守卫）。 */
+    private void collectOneCapsule(final CapsuleView cap,
+            final NotifData d, final NotifGroup group) {
+        // 存活胶囊的旧顶边，摘完后依次上顶补位（同
+        // dockOneCapsule 的做法）。
+        final Map<String, Integer> oldTops = new HashMap<>();
+        for (int i = 0; i < dock.getChildCount(); i++) {
+            View v = dock.getChildAt(i);
+            if (v instanceof CapsuleView) {
+                CapsuleView c = (CapsuleView) v;
+                if (c != cap && c.getData() != null
+                        && c.getData().key != null) {
+                    oldTops.put(c.getData().key, (int) v.getY());
+                }
+            }
+        }
+        cap.setPivotX(0f);
+        cap.animate().translationX(0f).scaleX(0f).setDuration(240)
+                .setInterpolator(
+                        new android.view.animation
+                                .DecelerateInterpolator())
+                .withLayer()
+                .start();
+        dock.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                removeNotifByKey(d.key);
+                dockingKeys.remove(d.key);
+                holdWindowHeight = true;
+                rebuildDock();
+                slideSurvivorsUp(oldTops);
+                collectPush(d);
+            }
+        }, 300);
+    }
+
     /** v363: 大卡片模式重左滑——只缩被滑的那一张，全缩进扇子图标
      * （用户 “左滑轻滑钉住，重滑缩小” + “只缩被滑的那一张，其他的
      * 留着” + “全缩 / 别只缩一半”）。轻滑仍走 onSwipeRight 钉住；
@@ -8031,6 +10757,13 @@ public class BubbleWindow {
             final NotifGroup group) {
         if (cap == null || d == null || d.key == null || group == null
                 || dock == null || !dockingKeys.add(d.key)) {
+            return;
+        }
+        // v556: 收纳模式开着时，普通胶囊的收纳手势不进
+        // 扇子，改收进收纳点（动画同款：横向压扁进左边缘，
+        // 只是落点从扇子图标换成收纳栈）。
+        if (FeatureFlags.collectDot && isOrdinaryForCollect(d)) {
+            collectOneCapsule(cap, d, group);
             return;
         }
         // Old tops of the surviving capsules, by key, so they can
@@ -8441,6 +11174,17 @@ public class BubbleWindow {
     public void dissipateOne(final NotifData data) {
         if (data == null || dock == null) {
             return;
+        }
+        // v546: 胶囊没了，它那份通知动作暂存也清掉；正开着的
+        // 长按菜单若是冲着这条开的，一并收起。
+        if (data.key != null) {
+            synchronized (ACTIONS_BY_KEY) {
+                ACTIONS_BY_KEY.remove(data.key);
+            }
+        }
+        if (menuData != null && (menuData == data
+                || (data.key != null && data.key.equals(menuData.key)))) {
+            dismissMenu();
         }
         // v362: 右滑消散的放大胶囊可能正拖着拖尾（手动右拖）——
         // 拖尾和胶囊一起消散，别让它残留到 310ms 后的 rebuild。
@@ -9298,6 +12042,37 @@ public class BubbleWindow {
     }
 
 
+    /** v556: 一组通知「进扇子」的统一落点分流——收纳模式
+     * 关着时原样走 addPileIconForGroup；开着时普通通知逐条
+     * 改收进收纳点（旧→新序入栈，最新落在栈顶），特殊类型
+     * （音乐/下载/实况/导航/公交/来电）仍留在扇子里。
+     * dissipateAllOneByOne 的收尾（钉住组的溢出 + 整组
+     * 汇聚）走这里，别的扇子入口各自在源头改道。 */
+    private void fanOrCollect(NotifGroup g) {
+        if (g == null || g.items.isEmpty()) {
+            return;
+        }
+        if (!FeatureFlags.collectDot) {
+            addPileIconForGroup(g);
+            return;
+        }
+        NotifGroup special = null;
+        for (int i = g.items.size() - 1; i >= 0; i--) {
+            NotifData d = g.items.get(i);
+            if (isOrdinaryForCollect(d)) {
+                collectPush(d);
+            } else if (d != null) {
+                if (special == null) {
+                    special = new NotifGroup(g.pkg);
+                }
+                special.add(d);
+            }
+        }
+        if (special != null && !special.items.isEmpty()) {
+            addPileIconForGroup(special);
+        }
+    }
+
     /**
      * Dissipate everything ONE BY ONE (user 2026-11-18 "你整个一条
      * 一条消散的"): the non-pinned notifications below the anchor
@@ -9552,16 +12327,18 @@ public class BubbleWindow {
                 // Pinned groups' docked icons first (they pop in
                 // below the pinned notification), then the rest.
                 for (NotifGroup docked : pinnedDocked) {
-                    addPileIconForGroup(docked);
+                    fanOrCollect(docked);
                 }
                 for (NotifGroup g : queue) {
                     // v457: 自动销毁——组里全被撤销了就没图标可弹了。
                     if (!g.pinned && !g.items.isEmpty()) {
-                        addPileIconForGroup(g);
+                        fanOrCollect(g);
                     }
                 }
                 updatePileWindow();
                 isDissipatingAll = false;
+                // v557: 整组消散完校验一次菜单锚还在不在场。
+                dismissMenuIfAnchorGone();
                 if (pile != null) {
                     for (int i = 0; i < pile.getChildCount(); i++) {
                         View v = pile.getChildAt(i);

@@ -156,6 +156,11 @@ public final class NotifCollectionHook {
         if (isCall(sbn, n)) {
             return;
         }
+        // v546: 长按菜单的动作暂存——趁手里有真实 Notification，
+        // 把回复（RemoteInput）/已读动作抽出来按 key 存进
+        // BubbleWindow（SystemUI 进程内）。放在所有 return 之前：
+        // 就算这条最后走广播路径弹出，暂存也已经在了。
+        BubbleWindow.stashActions(sbn.getKey(), pkg, n);
         boolean ongoing = (n.flags & Notification.FLAG_ONGOING_EVENT) != 0
                 || (n.flags & Notification.FLAG_FOREGROUND_SERVICE) != 0;
         int progress = extras != null ? extras.getInt("android.progress", 0) : 0;

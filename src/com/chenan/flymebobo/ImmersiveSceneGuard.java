@@ -41,6 +41,11 @@ public class ImmersiveSceneGuard {
     public interface Listener {
         /** @param immersive true = 进入游戏/视频场景, 气泡应隐藏; false = 退出, 应恢复 */
         void onSceneChanged(boolean immersive);
+
+        /** v557: 顶层切到桌面 / 最近任务（概览）时回调。
+         * 全屏浮层（长按菜单、瞄一眼/收纳面板）在概览里会
+         * 吃掉任务卡片的左右滑，一进壳界面就先把它们收掉。 */
+        void onShellTopShown(String pkg, String cls);
     }
 
     private static final boolean DEBUG_LOG = true;
@@ -177,6 +182,8 @@ public class ImmersiveSceneGuard {
     private String lastTopCls;
     private int lastCat = -999;
     private String peekedPkg;
+    // v557: 壳界面（桌面/概览）监测的上次顶层（pkg/cls 拼串）。
+    private String lastShellTop;
 
     private final Runnable pollTask = new Runnable() {
         @Override
@@ -243,6 +250,7 @@ public class ImmersiveSceneGuard {
 
     /** 立即重算一次场景, 变化时回调 Listener。可在主线程安全调用。 */
     public synchronized void refresh() {
+        peekShellTop();
         boolean now = detect();
         // v510 diagnostics: one line per foreground-app change,
         // so the next detection miss is self-explaining.
@@ -284,6 +292,41 @@ public class ImmersiveSceneGuard {
             }
         }
         if (listener != null) listener.onSceneChanged(now);
+    }
+
+    /** v557: 壳界面监测——借 refresh 的 800ms 轮询这条现成
+     * 的链，不另起监测。detect() 只在横屏跑、还会被场景判定
+     * 短路，最近任务多为竖屏，所以这里单独 peek 一次顶层：
+     * 顶层（pkg/cls）变化且新顶层是桌面或最近任务/概览时，
+     * 回调监听者收起全屏浮层。拿不准的宁可多收——收浮层
+     * 没有副作用。 */
+    private void peekShellTop() {
+        try {
+            ComponentName top = topActivity();
+            if (top == null) {
+                return;
+            }
+            String pkg = top.getPackageName();
+            String cls = top.getClassName();
+            if (pkg == null) {
+                return;
+            }
+            String flat = pkg + "/" + cls;
+            if (flat.equals(lastShellTop)) {
+                return;
+            }
+            lastShellTop = flat;
+            String clsLow = cls == null ? ""
+                    : cls.toLowerCase(java.util.Locale.US);
+            boolean shell = clsLow.contains("recents")
+                    || clsLow.contains("overview")
+                    || isLauncher(pkg);
+            if (shell && listener != null) {
+                FileLog.i("ShellTop pkg=" + pkg + " cls=" + cls);
+                listener.onShellTopShown(pkg, cls);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     // ------------------------------------------------------------------

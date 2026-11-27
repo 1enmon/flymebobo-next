@@ -797,6 +797,22 @@ public class CapsuleView extends FrameLayout {
     private OnCardDragListener onCardDragListener;
     private float downX;
     private float downY;
+    // v546: 长按菜单——按下不动约 0.4 秒触发（走自己的计时，
+    // 不用系统长按：时间可控，且能在触发后吞掉这次 UP 的
+    // 点击）。资格在 BubbleWindow.onCapsuleLongPress 里再核
+    // 一遍（开关 + 普通胶囊 + 非卡片形态）。
+    private final android.os.Handler lpHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private boolean lpFired;
+    private Runnable lpRunnable;
+
+    /** v546: 撤掉待触发的长按计时（滑动/抬手/取消时调）。 */
+    private void cancelLpTimer() {
+        if (lpRunnable != null) {
+            lpHandler.removeCallbacks(lpRunnable);
+            lpRunnable = null;
+        }
+    }
     // v444: 锚点拖动用——长按开始拖时手指的起点 Y（DOWN 的 rawY）。
     public float getDownY() {
         return downY;
@@ -1619,6 +1635,28 @@ public class CapsuleView extends FrameLayout {
                         downY = e.getRawY();
                         swiping = false;
                         dragStartLogged = false;
+                        // v546: 长按菜单计时——按下不动 400ms
+                        // 触发；滑动（MOVE 过阈值）/抬手/取消
+                        // 都撤。展开卡片形态不触发（卡片有自己
+                        // 的按钮）；资格细核在 BubbleWindow。
+                        lpFired = false;
+                        cancelLpTimer();
+                        if (!cardExpanded && data != null
+                                && FeatureFlags.longPressMenu) {
+                            final CapsuleView self = CapsuleView.this;
+                            lpRunnable = new Runnable() {
+                                @Override
+                                public void run() {
+                                    lpFired = true;
+                                    BubbleWindow bw =
+                                            BubbleWindow.getInstance();
+                                    if (bw != null) {
+                                        bw.onCapsuleLongPress(self);
+                                    }
+                                }
+                            };
+                            lpHandler.postDelayed(lpRunnable, 400);
+                        }
                         // v409: a fresh touch cancels a running
                         // spring-back tail so the new drag never
                         // fights the tail retraction.
@@ -1637,6 +1675,11 @@ public class CapsuleView extends FrameLayout {
                         }
                         float dx = e.getRawX() - downX;
                         float dy = e.getRawY() - downY;
+                        // v546: 手指动过阈值 = 在滑，不是长按。
+                        if (Math.abs(dx) > dp(24)
+                                || Math.abs(dy) > dp(24)) {
+                            cancelLpTimer();
+                        }
                         // Horizontal-only slide (user 2026-11-19 "胶囊
                         // 全屏拖动取消"): the free full-screen drag is
                         // removed; the capsule only slides left/right.
@@ -1767,6 +1810,14 @@ public class CapsuleView extends FrameLayout {
                         BubbleWindow ubw = BubbleWindow.getInstance();
                         if (ubw != null && ubw.isAnchorDragActive()) {
                             ubw.endAnchorDrag();
+                            return true;
+                        }
+                        // v546: 长按菜单已触发——这次 UP 只收尾：
+                        // 不触发点击（onTap 会展开卡片）、不走
+                        // 滑动判定，直接吞掉。
+                        cancelLpTimer();
+                        if (lpFired) {
+                            lpFired = false;
                             return true;
                         }
                         // v386: the drag is over — shrink the right
@@ -1916,6 +1967,9 @@ public class CapsuleView extends FrameLayout {
                         break;
                     }
                     case android.view.MotionEvent.ACTION_CANCEL:
+                        // v546: 长按计时一并撤掉。
+                        cancelLpTimer();
+                        lpFired = false;
                         // v444: 锚点拖动被打断——同样落盘收尾。
                         BubbleWindow cbw = BubbleWindow.getInstance();
                         if (cbw != null && cbw.isAnchorDragActive()) {
@@ -1971,6 +2025,9 @@ public class CapsuleView extends FrameLayout {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        // v546: 视图被摘掉时撤掉长按计时，别对着空气弹菜单。
+        cancelLpTimer();
+        lpFired = false;
         // v329: stop the music motion so nothing keeps ticking
         // after the capsule is gone (the particle / volume views
         // also stop themselves, but the breathing animators live

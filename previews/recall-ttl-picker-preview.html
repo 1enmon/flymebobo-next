@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>回看保留时长 · 风格修正预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  .card { width:100%; max-width:392px; background:#fff; border-radius:20px; box-shadow:0 4px 16px rgba(30,40,60,.08); padding:6px 0 10px; overflow:hidden; }
+  .card-h { display:flex; align-items:center; gap:10px; padding:12px 16px 8px; }
+  .card-h .ic { width:34px; height:34px; border-radius:50%; background:#3b82f6; color:#fff; display:flex; align-items:center; justify-content:center; font-size:15px; }
+  .card-h .t { font-size:16px; font-weight:700; }
+  .row { display:flex; align-items:center; gap:10px; padding:10px 16px; }
+  .row .ic { width:30px; height:30px; border-radius:50%; background:#eef2f7; display:flex; align-items:center; justify-content:center; font-size:13px; flex:none; }
+  .row .tt { flex:1; min-width:0; }
+  .row .t1 { font-size:14.5px; font-weight:600; }
+  .row .t2 { font-size:12px; color:#7a8699; margin-top:1px; }
+  .sw { width:46px; height:27px; border-radius:999px; background:#22c55e; position:relative; flex:none; }
+  .sw::after { content:''; position:absolute; top:3px; right:3px; width:21px; height:21px; border-radius:50%; background:#fff; }
+  .val { font-size:13.5px; color:#3b82f6; font-weight:600; }
+  .chev { color:#b6bfcc; font-size:15px; transition:transform .25s; }
+  .chev.open { transform:rotate(90deg); }
+  .panel { max-height:0; overflow:hidden; transition:max-height .3s ease; }
+  .panel.open { max-height:170px; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; padding:4px 16px 4px 56px; }
+  .chip { border:1.5px solid #dbe2ec; background:#f6f8fb; color:#33415c; font-size:13.5px; font-weight:600; padding:7px 15px; border-radius:999px; cursor:pointer; }
+  .chip.on { background:#3b82f6; border-color:#3b82f6; color:#fff; }
+  .custom { display:none; align-items:center; gap:8px; padding:8px 16px 2px 56px; }
+  .custom.show { display:flex; }
+  .custom input { width:76px; border:1.5px solid #dbe2ec; border-radius:10px; padding:7px 9px; font-size:14px; outline:none; }
+  .custom input:focus { border-color:#3b82f6; }
+  .custom .unit { font-size:13px; color:#7a8699; }
+  .custom button { border:none; background:#1c2434; color:#fff; font-size:13px; font-weight:600; padding:8px 16px; border-radius:999px; cursor:pointer; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 回看保留时长 · 选时间改成咱们自己的风格<br>不用系统弹窗 — 点行就地展开，胶囊小药丸选时间</div>
+
+  <div class="card">
+    <div class="card-h"><div class="ic">泡</div><div class="t">通知气泡</div></div>
+    <div class="row">
+      <div class="ic">↩</div>
+      <div class="tt"><div class="t1">回看胶囊</div><div class="t2">划掉的气泡留个边缘入口，可重新弹出</div></div>
+      <div class="sw"></div>
+    </div>
+    <div class="row" id="ttlRow" style="cursor:pointer">
+      <div class="ic">时</div>
+      <div class="tt"><div class="t1">回看保留时长</div><div class="t2">划掉的气泡在边缘留多久</div></div>
+      <div class="val" id="val">3 分钟</div>
+      <div class="chev open" id="chev">›</div>
+    </div>
+    <div class="panel open" id="panel">
+      <div class="chips" id="chips">
+        <div class="chip" data-m="1">1 分钟</div>
+        <div class="chip on" data-m="3">3 分钟</div>
+        <div class="chip" data-m="5">5 分钟</div>
+        <div class="chip" data-m="10">10 分钟</div>
+        <div class="chip" data-m="custom">自定义</div>
+      </div>
+      <div class="custom" id="customRow">
+        <input type="number" id="customIn" placeholder="1–120" min="1" max="120">
+        <span class="unit">分钟</span>
+        <button id="okBtn">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="note"><b>改法：</b>① 点「回看保留时长」行，选项<b>在卡内就地展开</b>（跟安静规则、提示音展开卡一个路子），不再弹系统 AlertDialog；② 预设做成咱们的<b>胶囊小药丸</b>，选中变蓝填充，点一下即生效、右侧数值同步；③ 选「自定义」才在下面滑出一行输入框 + 确定按钮，还是卡内完成；④ 点行收起。点上面的药丸可以试。</div>
+
+<script>
+  var panel = document.getElementById('panel'), chev = document.getElementById('chev');
+  var val = document.getElementById('val'), customRow = document.getElementById('customRow');
+  document.getElementById('ttlRow').addEventListener('click', function () {
+    panel.classList.toggle('open'); chev.classList.toggle('open');
+  });
+  document.getElementById('chips').addEventListener('click', function (e) {
+    var c = e.target.closest('.chip'); if (!c) return;
+    document.querySelectorAll('.chip').forEach(function (x) { x.classList.remove('on'); });
+    c.classList.add('on');
+    if (c.dataset.m === 'custom') { customRow.classList.add('show'); document.getElementById('customIn').focus(); }
+    else { customRow.classList.remove('show'); val.textContent = c.dataset.m + ' 分钟'; }
+  });
+  document.getElementById('okBtn').addEventListener('click', function () {
+    var v = parseInt(document.getElementById('customIn').value, 10);
+    if (!v) return;
+    v = Math.max(1, Math.min(120, v));
+    val.textContent = v + ' 分钟';
+    customRow.classList.remove('show');
+  });
+</script>
+</body>
+</html>

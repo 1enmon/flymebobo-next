@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>排队呼吸点 · 预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  h3 { width:100%; max-width:392px; font-size:15px; margin:14px 0 8px; }
+  h3 span { color:#7a8699; font-weight:400; font-size:12.5px; }
+  .stage { position:relative; width:100%; max-width:392px; height:430px; border-radius:26px; overflow:hidden; box-shadow:0 10px 30px rgba(30,40,60,.22); background:linear-gradient(200deg,#23304d 0%,#141b2e 55%,#0b0f1c 100%); }
+  .game { position:absolute; top:56px; left:0; right:0; text-align:center; color:rgba(255,255,255,.55); font-size:14px; line-height:2; }
+  .game .big { font-size:44px; }
+  .statebar { position:absolute; top:16px; left:0; right:0; text-align:center; color:rgba(255,255,255,.85); font-size:13px; }
+  .statebar b { color:#ffd479; }
+  /* breathing dot */
+  .dot { position:absolute; left:0; top:46%; width:10px; height:26px; border-radius:0 8px 8px 0; background:#ffb04d; cursor:pointer; animation:breathe 3.2s ease-in-out infinite; box-shadow:0 0 12px 2px rgba(255,176,77,.55); }
+  @keyframes breathe { 0%,100% { opacity:.28; } 50% { opacity:1; } }
+  .dot .n { position:absolute; left:13px; top:50%; transform:translateY(-50%); color:#ffcf8a; font-size:11.5px; white-space:nowrap; opacity:0; transition:opacity .25s; }
+  .dot:hover .n, .dot.peek .n { opacity:1; }
+  /* queue peek panel */
+  .peek { position:absolute; left:14px; top:38%; width:230px; border-radius:18px; background:rgba(20,24,38,.94); box-shadow:0 14px 34px rgba(0,0,0,.45); padding:10px; color:#fff; opacity:0; pointer-events:none; transform:translateX(-8px); transition:all .25s; }
+  .peek.show { opacity:1; pointer-events:auto; transform:none; }
+  .peek .ph { font-size:12px; color:rgba(255,255,255,.55); padding:2px 6px 8px; }
+  .qi { display:flex; align-items:center; gap:8px; padding:7px 6px; border-radius:10px; font-size:13px; }
+  .qi .ic { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; flex:none; }
+  .qi .tx { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:rgba(255,255,255,.88); }
+  .qi .tm { font-size:11px; color:rgba(255,255,255,.4); }
+  .hint { position:absolute; left:0; right:0; bottom:14px; text-align:center; color:rgba(255,255,255,.75); font-size:12.5px; padding:0 22px; line-height:1.7; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 排队呼吸点 · 设计预览<br>静默/场景里有消息压着时，边缘只留一个慢慢呼吸的小点</div>
+
+  <h3>示范 <span>点左边那个小点试试</span></h3>
+  <div class="stage">
+    <div class="statebar">🎮 游戏场景中 · 已排队 <b>3 条</b></div>
+    <div class="game"><div class="big">🎮</div>游戏画面照常打<br>气泡一条都不弹</div>
+    <div class="dot" id="dot"><span class="n">3 条排队中</span></div>
+    <div class="peek" id="peek">
+      <div class="ph">排队中 · 场景结束后补弹</div>
+      <div class="qi"><div class="ic" style="background:#22c55e">微</div><div class="tx">微信 · 小陈：在吗？</div><div class="tm">2分钟前</div></div>
+      <div class="qi"><div class="ic" style="background:#f97316">淘</div><div class="tx">淘宝：包裹已到驿站</div><div class="tm">5分钟前</div></div>
+      <div class="qi"><div class="ic" style="background:#3b82f6">信</div><div class="tx">短信：验证码 ••••••</div><div class="tm">刚刚</div></div>
+    </div>
+    <div class="hint">小点贴左边缘中段，3 秒一个呼吸周期<br>不弹、不响、不亮屏；点它瞄一眼队列，松手就收</div>
+  </div>
+
+  <div class="note"><b>规则：</b>① 只在<b>有消息排队</b>时出现（临时静默、场景模式、勿扰降级都算），队列清空自动消失；② 颜色跟当前状态走：场景=橙、静默=紫（示意色可调）；③ 点小点只是<b>瞄一眼</b>，不算处理，消息仍按原规则在静默/场景结束后补弹；④ 没有排队时它完全不在，不占地方；⑤ 带开关，老规矩。</div>
+
+<script>
+  var dot = document.getElementById('dot'), peek = document.getElementById('peek');
+  dot.addEventListener('click', function () {
+    peek.classList.toggle('show');
+    dot.classList.toggle('peek');
+  });
+</script>
+</body>
+</html>

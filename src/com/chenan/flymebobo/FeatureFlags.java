@@ -130,6 +130,257 @@ public class FeatureFlags {
     // 查这个开关）。取件码本来就不自动复制，不归它管。
     // 开关嵌在「验证码与隐私」卡里（parent=code）。
     public static volatile boolean autoCopyCode = true;
+    // v546: 长按菜单——长按普通胶囊约 0.4 秒弹出菜单（快捷
+    // 回复为核心，菜单项按通知实际能力自适应出现）。默认开
+    // （= 新功能即生效；关掉时长按无反应——v454 起长按本来
+    // 就无动作）。开关嵌在「通知气泡」卡里（parent=notif）。
+    public static volatile boolean longPressMenu = true;
+    // v546: 排队呼吸点——场景/静默排队队列非空时，左边缘
+    // 中段一个呼吸小点（场景=橙、静默=紫），点开瞄队列。
+    // 默认开。开关嵌在「通知气泡」卡里（parent=notif）。
+    public static volatile boolean queueDot = true;
+    // v549: 呼吸点位置——wei 要求可自定义。存字符串
+    // "queueDotPos"：首字 L/R=贴左边/右边，尾数 0/1/2=
+    // 靠上/中间/靠下，默认 "L1"（= v546 现状左边缘 46%）。
+    // 与 recallTtlMin 同路：字符串 prefs + 文件镜像通道
+    // （fileOrPrefsString，v545 教训），SettingsStore 恢复
+    // 按字符串回。改位置走两条即时通道：设置页广播
+    // FEATURE_TOGGLE 带 pos extra；小点上直接拖动则由
+    // SystemUI 广播 ACTION_SET_QUEUE_DOT_POS 给 App 落盘。
+    public static volatile String queueDotPos = "L1";
+
+    /** v549: 呼吸点位置规范化：只认 [LR][0-2]，坏值回 "L1"。 */
+    public static String parseQueueDotPos(String raw) {
+        if (raw != null) {
+            String s = raw.trim().toUpperCase(
+                    java.util.Locale.US);
+            if (s.length() == 2
+                    && (s.charAt(0) == 'L' || s.charAt(0) == 'R')
+                    && s.charAt(1) >= '0' && s.charAt(1) <= '2') {
+                return s;
+            }
+        }
+        return "L1";
+    }
+
+    /** v549: 呼吸点贴右边？ */
+    public static boolean queueDotRight() {
+        return queueDotPos != null && queueDotPos.startsWith("R");
+    }
+
+    /** v549: 呼吸点高度档位：0=靠上、1=中间、2=靠下。 */
+    public static int queueDotBand() {
+        String p = parseQueueDotPos(queueDotPos);
+        return p.charAt(1) - '0';
+    }
+
+    /** v549: 档位 → 小点顶边占屏高的比例（1 档 = v546 的 46%）。 */
+    public static float queueDotYFrac() {
+        return posYFrac(queueDotBand());
+    }
+
+    /** v556: 档位 → 顶边占屏高的比例（排队点/收纳点共用
+     * 同一刻度，避让计算也按这个换算）。 */
+    public static float posYFrac(int band) {
+        switch (band) {
+            case 0:
+                return 0.16f;
+            case 2:
+                return 0.72f;
+            default:
+                return 0.46f;
+        }
+    }
+    // v556: 收纳点（替代扇子）——wei 定：与排队呼吸点是两个
+    // 独立的东西。排队点是临时的（只活在场景/静默排队里，
+    // 补弹完就消失）；收纳点是长存的：开了替代开关，普通
+    // 胶囊不再进扇子（pile），改收进这个边缘小点（最多
+    // 20 条，满了最老的转进回看栈），点开面板能操作（点
+    // 条目展开成胶囊/左滑收进回看/全部展开）。默认关
+    // （扇子是招牌样子，不能默认没了）。开关嵌在「通知
+    // 气泡」卡里（parent=notif），挨着排队呼吸点行。
+    public static volatile boolean collectDot = false;
+    // v556: 收纳点位置——与 queueDotPos 同格式同通道
+    // （字符串 prefs + 文件镜像，fileOrPrefsString）：
+    // 首字 L/R=贴左边/右边，尾数 0/1/2=靠上/中间/靠下，
+    // 默认 "L0"（左·靠上——原扇子展开的位置）。改位置走
+    // FEATURE_TOGGLE 带 pos extra；小点上直接拖动则由
+    // SystemUI 广播 ACTION_SET_COLLECT_DOT_POS 给 App 落盘。
+    public static volatile String collectDotPos = "L0";
+
+    /** v556: 收纳点位置规范化：只认 [LR][0-2]，坏值回 "L0"。 */
+    public static String parseCollectDotPos(String raw) {
+        if (raw != null) {
+            String s = raw.trim().toUpperCase(
+                    java.util.Locale.US);
+            if (s.length() == 2
+                    && (s.charAt(0) == 'L' || s.charAt(0) == 'R')
+                    && s.charAt(1) >= '0' && s.charAt(1) <= '2') {
+                return s;
+            }
+        }
+        return "L0";
+    }
+
+    /** v556: 收纳点贴右边？ */
+    public static boolean collectDotRight() {
+        return collectDotPos != null && collectDotPos.startsWith("R");
+    }
+
+    /** v556: 收纳点高度档位：0=靠上、1=中间、2=靠下。 */
+    public static int collectDotBand() {
+        return parseCollectDotPos(collectDotPos).charAt(1) - '0';
+    }
+
+    /** v556: 收纳点顶边占屏高的比例（与排队点共用刻度）。 */
+    public static float collectDotYFrac() {
+        return posYFrac(collectDotBand());
+    }
+    // v556: 收纳点颜色——wei 定可自定义（排队点的橙/紫是
+    // 语义色，不在自定义范围）。存字符串 id（blue/orange/
+    // purple/green/pink/cyan），默认 blue。同样走字符串
+    // prefs + 文件镜像通道，改色走 FEATURE_TOGGLE 带
+    // color extra 即时生效。角标恒红底白字，不跟随。
+    public static volatile String collectDotColor = "blue";
+
+    /** v556: 收纳点颜色 id 规范化，坏值回 "blue"。 */
+    public static String parseCollectDotColor(String raw) {
+        if (raw != null) {
+            String s = raw.trim().toLowerCase(
+                    java.util.Locale.US);
+            if ("blue".equals(s) || "orange".equals(s)
+                    || "purple".equals(s) || "green".equals(s)
+                    || "pink".equals(s) || "cyan".equals(s)) {
+                return s;
+            }
+        }
+        return "blue";
+    }
+
+    /** v556: 收纳点颜色 id → 实际色值。 */
+    public static int collectDotColorValue() {
+        String c = parseCollectDotColor(collectDotColor);
+        if ("orange".equals(c)) {
+            return android.graphics.Color.rgb(245, 158, 11);
+        }
+        if ("purple".equals(c)) {
+            return android.graphics.Color.rgb(167, 139, 250);
+        }
+        if ("green".equals(c)) {
+            return android.graphics.Color.rgb(34, 197, 94);
+        }
+        if ("pink".equals(c)) {
+            return android.graphics.Color.rgb(236, 72, 153);
+        }
+        if ("cyan".equals(c)) {
+            return android.graphics.Color.rgb(6, 182, 212);
+        }
+        return android.graphics.Color.rgb(59, 130, 246);
+    }
+    // v555: 安静规则三件套（wei 定：整合进安静规则卡，不另开
+    // 卡片）——连发突破 / @我突破 / 关键词过滤。三个开关都只
+    // 影响场景/静默两个排队闸门的决定（关键词过滤影响弹出
+    // 前的落点），别的路径一律不碰。
+    // 连发突破：同一发送者（pkg + 会话标题）5 分钟内连发到
+    // 第 3 条时，本要排队的改为直接弹，并把该发送者已排队
+    // 的旧条目一并补弹。默认开。计数在 BubbleWindow（SystemUI
+    // 侧滚动时间窗，按通知 key 去重防双投递重复计数）。
+    public static volatile boolean burstBreak = true;
+    // @我突破：通知标题+正文命中 @ 模式（@我/有人@我/@了你
+    // 等，含全角＠）时，本要排队的直接弹。默认开。
+    public static volatile boolean mentionBreak = true;
+    // 关键词过滤：普通通知标题+正文命中词表任一词 → 不弹，
+    // 直接收进扇子（同 AppRules「只贴边」的落点）。默认关
+    // （词表是用户自己的口径，得他自己开）。特殊类型（音乐/
+    // 下载/实况/导航/来电/验证码/取件码）一律不碰。
+    public static volatile boolean keywordFilter = false;
+    // 关键词词表：字符串 prefs "filterWords"，换行分隔（词里
+    // 可能有标点，换行最稳）。与 recallTtlMin 同路：字符串
+    // prefs + 文件镜像通道（fileOrPrefsString，v545 教训），
+    // SettingsStore 恢复按字符串回。改词表走 FEATURE_TOGGLE
+    // 广播带 words extra 即时生效（XposedEntry）。
+    public static final String DEFAULT_FILTER_WORDS =
+            "促销\n秒杀\n领券\n限时抢购\n返现\n优惠券";
+    public static volatile String filterWords = DEFAULT_FILTER_WORDS;
+
+    /** v555: 词表解析：按换行切，trim、去空、去重，保持顺序。 */
+    public static java.util.List<String> filterWordList() {
+        return parseFilterWords(filterWords);
+    }
+
+    /** v555: 同上，解析任意原始字符串（App 侧读 prefs 用——
+     * App 进程里的静态字段没被 load 过，不能直接调
+     * filterWordList）。 */
+    public static java.util.List<String> parseFilterWords(
+            String raw) {
+        java.util.ArrayList<String> out =
+                new java.util.ArrayList<>();
+        if (raw == null) {
+            return out;
+        }
+        for (String w : raw.split("\n")) {
+            String t = w == null ? "" : w.trim();
+            if (!t.isEmpty() && !out.contains(t)) {
+                out.add(t);
+            }
+        }
+        return out;
+    }
+
+    /** v555: 词表拼回存储格式（换行分隔）。 */
+    public static String joinFilterWords(
+            java.util.List<String> words) {
+        StringBuilder sb = new StringBuilder();
+        if (words != null) {
+            for (String w : words) {
+                if (w == null) {
+                    continue;
+                }
+                String t = w.trim();
+                if (t.isEmpty()) {
+                    continue;
+                }
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                sb.append(t);
+            }
+        }
+        return sb.toString();
+    }
+
+    // v543: 回看保留时长（分钟）——回看栈/边缘把手没人点时
+    // 保留多久自动清掉。v539 时写死 3 分钟，wei 要求可自定义。
+    // 存 flymebobo_features prefs 的 "recallTtlMin"（字符串，
+    // 与 bubbleSoundId 同路：SettingsStore 恢复按字符串回，
+    // 不混布尔恢复防 ClassCast）。默认 3（= v539 现状），
+    // 范围 1–120，所有写入/读入都过 clampRecallTtlMin。
+    public static final int RECALL_TTL_MIN_DEFAULT = 3;
+    public static final int RECALL_TTL_MIN_FLOOR = 1;
+    public static final int RECALL_TTL_MIN_CEIL = 120;
+    public static volatile int recallTtlMin = RECALL_TTL_MIN_DEFAULT;
+
+    /** v543: 回看保留时长夹紧到 1–120 分钟。 */
+    public static int clampRecallTtlMin(int minutes) {
+        if (minutes < RECALL_TTL_MIN_FLOOR) {
+            return RECALL_TTL_MIN_FLOOR;
+        }
+        if (minutes > RECALL_TTL_MIN_CEIL) {
+            return RECALL_TTL_MIN_CEIL;
+        }
+        return minutes;
+    }
+
+    /** v543: 解析 prefs 里的回看保留时长字符串；坏值回默认 3。 */
+    public static int parseRecallTtlMin(String raw) {
+        if (raw != null) {
+            try {
+                return clampRecallTtlMin(Integer.parseInt(raw.trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return RECALL_TTL_MIN_DEFAULT;
+    }
 
     public static void set(String key, boolean enabled) {
         if (key == null) {
@@ -194,6 +445,24 @@ public class FeatureFlags {
         } else if ("autoCopyCode".equals(key)) {
             autoCopyCode = enabled;
             FileLog.i("AutoCopyCode -> " + (enabled ? "on" : "off"));
+        } else if ("longPressMenu".equals(key)) {
+            longPressMenu = enabled;
+            FileLog.i("LongPressMenu -> " + (enabled ? "on" : "off"));
+        } else if ("queueDot".equals(key)) {
+            queueDot = enabled;
+            FileLog.i("QueueDot -> " + (enabled ? "on" : "off"));
+        } else if ("collectDot".equals(key)) {
+            collectDot = enabled;
+            FileLog.i("CollectDot -> " + (enabled ? "on" : "off"));
+        } else if ("burstBreak".equals(key)) {
+            burstBreak = enabled;
+            FileLog.i("BurstBreak -> " + (enabled ? "on" : "off"));
+        } else if ("mentionBreak".equals(key)) {
+            mentionBreak = enabled;
+            FileLog.i("MentionBreak -> " + (enabled ? "on" : "off"));
+        } else if ("keywordFilter".equals(key)) {
+            keywordFilter = enabled;
+            FileLog.i("KeywordFilter -> " + (enabled ? "on" : "off"));
         }
         // v345: qqFree 开关已去掉，永远打开，不再接受拨动。
     }
@@ -248,17 +517,59 @@ public class FeatureFlags {
             recallCapsule = fileOrPrefsBool("recallCapsule", prefs, false);
             // v540: 自动复制验证码——默认开（= v244 起的老行为）。
             autoCopyCode = fileOrPrefsBool("autoCopyCode", prefs, true);
+            // v546: 长按菜单 / 排队呼吸点——默认开。
+            longPressMenu = fileOrPrefsBool("longPressMenu", prefs, true);
+            queueDot = fileOrPrefsBool("queueDot", prefs, true);
+            // v555: 安静规则三件套——连发/@我突破默认开，
+            // 关键词过滤默认关。
+            burstBreak = fileOrPrefsBool("burstBreak", prefs, true);
+            mentionBreak = fileOrPrefsBool("mentionBreak", prefs, true);
+            keywordFilter = fileOrPrefsBool("keywordFilter", prefs, false);
+            // v555: 关键词词表（字符串，默认六个促销词）——
+            // 与 recallTtlMin 同路走文件优先（v545 教训）。
+            filterWords = fileOrPrefsString("filterWords", prefs,
+                    DEFAULT_FILTER_WORDS);
+            FileLog.i("FilterWords load -> "
+                    + filterWordList().size() + " words");
+            // v549: 呼吸点位置（字符串，默认 "L1" 左+中）——
+            // 与 recallTtlMin 同路走文件优先（v545 教训）。
+            queueDotPos = parseQueueDotPos(
+                    fileOrPrefsString("queueDotPos", prefs, "L1"));
+            FileLog.i("QueueDotPos load -> " + queueDotPos);
+            // v556: 收纳点——默认关；位置/颜色是字符串，
+            // 与 queueDotPos 同路走文件优先（v545 教训）。
+            collectDot = fileOrPrefsBool("collectDot", prefs, false);
+            collectDotPos = parseCollectDotPos(
+                    fileOrPrefsString("collectDotPos", prefs, "L0"));
+            collectDotColor = parseCollectDotColor(
+                    fileOrPrefsString("collectDotColor", prefs,
+                            "blue"));
+            FileLog.i("CollectDot load -> "
+                    + (collectDot ? "on" : "off")
+                    + " pos=" + collectDotPos
+                    + " color=" + collectDotColor);
+            // v543: 回看保留时长（字符串 prefs，默认 "3" 分钟）。
+            // v545: 跟布尔开关同路改走文件优先——只读 prefs 时
+            // SystemUI 重启后读到的是旧快照（wei 实测：界面显
+            // 示 1 分钟、实际按默认 3 分钟过期）。
+            recallTtlMin = parseRecallTtlMin(
+                    fileOrPrefsString("recallTtlMin", prefs, "3"));
             // v534: 当前音效 id（字符串 prefs，默认 "soft" 轻木）。
             // v535: 自定义文件路径/名也是字符串——三个字符串键都
             // 走逐键安全读：某个键万一被旧备份写坏成别的类型，
             // 只丢它自己，不连累整张开关表（load 外层还有兜底
             // try，但那会把所有开关一起重置，能免则免）。
-            String sid = stringPref(prefs, "bubbleSoundId", "soft");
+            // v545: 三个键同样改走文件优先、prefs 兜底。
+            String sid = fileOrPrefsString(
+                    "bubbleSoundId", prefs, "soft");
             bubbleSoundId = sid.isEmpty() ? "soft" : sid;
-            bubbleCustomPath = stringPref(
-                    prefs, "bubbleCustomPath", "");
-            bubbleCustomName = stringPref(
-                    prefs, "bubbleCustomName", "");
+            bubbleCustomPath = fileOrPrefsString(
+                    "bubbleCustomPath", prefs, "");
+            bubbleCustomName = fileOrPrefsString(
+                    "bubbleCustomName", prefs, "");
+            // v545: 载入值打一行日志，下轮日志核对重启后读对没。
+            FileLog.i("RecallTtl load -> " + recallTtlMin
+                    + " min");
         } catch (Throwable ignored) {
             // Defaults (all on) stand.
         }
@@ -284,5 +595,16 @@ public class FeatureFlags {
             return v;
         }
         return prefs.getBoolean(key, def);
+    }
+
+    /** v545: 字符串键的文件优先版（与 fileOrPrefsBool 同路）：
+     * 文件里有原始字符串就用文件的，没有再逐键安全读 prefs。 */
+    private static String fileOrPrefsString(String key,
+            SharedPreferences prefs, String def) {
+        String v = SettingsStore.fileFeatureString(key);
+        if (v != null) {
+            return v;
+        }
+        return stringPref(prefs, key, def);
     }
 }

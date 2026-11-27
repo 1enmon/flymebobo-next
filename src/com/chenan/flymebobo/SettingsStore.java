@@ -401,9 +401,22 @@ public class SettingsStore {
                     // 自定义文件名/公开路径），必须按字符串恢复
                     // ——混进布尔恢复的话，下次 getString 直接
                     // ClassCastException（v482 同款坑）。
+                    // v543: recallTtlMin（回看保留时长，分钟数）
+                    // 也是字符串存的，同理按字符串恢复。
+                    // v549: queueDotPos（呼吸点位置 "L1" 之类）
+                    // 同样是字符串，同理。
+                    // v555: filterWords（关键词过滤词表，换行分隔）
+                    // 同样是字符串，同理按字符串恢复。
+                    // v556: collectDotPos / collectDotColor
+                    // （收纳点位置/颜色）同样是字符串，同理。
                     if ("bubbleSoundId".equals(key)
                             || "bubbleCustomName".equals(key)
-                            || "bubbleCustomPath".equals(key)) {
+                            || "bubbleCustomPath".equals(key)
+                            || "recallTtlMin".equals(key)
+                            || "filterWords".equals(key)
+                            || "collectDotPos".equals(key)
+                            || "collectDotColor".equals(key)
+                            || "queueDotPos".equals(key)) {
                         fEd.putString(key, v);
                         fChanged = true;
                         continue;
@@ -544,6 +557,18 @@ public class SettingsStore {
                 return null;
             }
             return Integer.parseInt(v);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** v545: 从文件里取一个功能字符串的原始值（SystemUI 的
+     * load() 用）——回看时长、音效 id、自定义音效路径/名这类
+     * 字符串开关跟布尔开关同路：文件里没有返回 null（调用方
+     * 再读 prefs）。 */
+    public static String fileFeatureString(String key) {
+        try {
+            return readAll().get(PREFIX_FEATURE + key);
         } catch (Throwable ignored) {
             return null;
         }

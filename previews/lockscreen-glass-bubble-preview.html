@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>锁屏液态玻璃气泡 · 预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  h3 { width:100%; max-width:392px; font-size:15px; margin:14px 0 8px; }
+  h3 span { color:#7a8699; font-weight:400; font-size:12.5px; }
+  .stage { position:relative; width:100%; max-width:392px; height:520px; border-radius:26px; overflow:hidden; box-shadow:0 10px 30px rgba(30,40,60,.22);
+    background:linear-gradient(165deg,#5d7a43 0%,#48663c 22%,#6d8455 40%,#3f6034 58%,#7a7a48 78%,#4c5c33 100%); }
+  .stage::before { content:''; position:absolute; inset:0; background:radial-gradient(ellipse 90% 30% at 50% 34%, rgba(214,228,196,.35), transparent 70%),radial-gradient(ellipse 70% 22% at 30% 72%, rgba(178,120,80,.30), transparent 70%),radial-gradient(ellipse 60% 18% at 70% 88%, rgba(120,90,60,.35), transparent 70%); }
+  .carrier { position:absolute; top:14px; left:16px; color:rgba(255,255,255,.9); font-size:12px; }
+  .date { position:absolute; top:104px; left:22px; color:rgba(255,255,255,.92); font-size:15px; letter-spacing:2px; }
+  .clock { position:absolute; top:126px; left:14px; color:rgba(255,255,255,.34); font-size:150px; font-weight:800; line-height:.94; letter-spacing:-2px; text-shadow:0 0 1px rgba(255,255,255,.5); -webkit-text-stroke:1.5px rgba(255,255,255,.45); }
+  .fp { position:absolute; left:50%; bottom:118px; transform:translateX(-50%); width:44px; height:44px; border-radius:50%; border:2px solid rgba(255,255,255,.55); background:rgba(255,255,255,.10); }
+  .shortcut { position:absolute; bottom:26px; width:44px; height:44px; border-radius:50%; background:rgba(20,26,18,.28); display:flex; align-items:center; justify-content:center; color:#fff; font-size:19px; }
+  .shortcut.l { left:22px; } .shortcut.r { right:22px; }
+  /* liquid glass bubble */
+  .glass { position:absolute; left:50%; transform:translateX(-50%); bottom:22px; width:238px; min-height:56px; border-radius:28px;
+    background:linear-gradient(135deg, rgba(255,255,255,.34), rgba(255,255,255,.14) 55%, rgba(255,255,255,.22));
+    -webkit-backdrop-filter:blur(14px) saturate(1.5); backdrop-filter:blur(14px) saturate(1.5);
+    border:1px solid rgba(255,255,255,.55);
+    box-shadow:0 10px 28px rgba(10,20,10,.35), inset 0 1px 0 rgba(255,255,255,.65), inset 0 -8px 16px rgba(255,255,255,.10);
+    display:flex; align-items:center; gap:9px; padding:8px 14px 8px 8px; color:#fff; }
+  .glass .ic { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; box-shadow:inset 0 0 0 1px rgba(255,255,255,.35); }
+  .glass .tt { flex:1; min-width:0; }
+  .glass .t1 { font-size:13.5px; font-weight:700; text-shadow:0 1px 4px rgba(20,40,20,.35); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .glass .t2 { font-size:12px; color:rgba(255,255,255,.88); text-shadow:0 1px 4px rgba(20,40,20,.35); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .glass.behind { bottom:88px; transform:translateX(-50%) scale(.92); opacity:.65; }
+  .glass.behind2 { bottom:146px; transform:translateX(-50%) scale(.84); opacity:.4; }
+  .peek { position:absolute; left:50%; transform:translateX(-50%); bottom:82px; width:214px; height:12px; border-radius:12px 12px 0 0; background:linear-gradient(180deg, rgba(255,255,255,.30), rgba(255,255,255,.12)); border:1px solid rgba(255,255,255,.4); border-bottom:none; }
+  .badge { position:absolute; top:-7px; right:-7px; background:#ff7847; color:#fff; font-size:11px; font-weight:700; border-radius:999px; padding:2px 7px; box-shadow:0 3px 8px rgba(0,0,0,.3); }
+  .tag { position:absolute; right:12px; font-size:11px; color:rgba(255,255,255,.92); background:rgba(0,0,0,.32); padding:4px 9px; border-radius:999px; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 锁屏液态玻璃气泡 · 设计预览<br>锁屏时通知改走底部中央的玻璃气泡，在手电筒和相机中间</div>
+
+  <h3>单条 <span>亮屏那一刻，底部中央浮一个</span></h3>
+  <div class="stage">
+    <div class="carrier">中国联通|中国联通</div>
+    <div class="date">11月26日 周四</div>
+    <div class="clock">15<br>29</div>
+    <div class="fp"></div>
+    <div class="shortcut l">🔦</div>
+    <div class="shortcut r">📷</div>
+    <div class="glass">
+      <div class="ic" style="background:rgba(34,197,94,.85)">微</div>
+      <div class="tt"><div class="t1">微信 · 小陈</div><div class="t2">在吗？文件发我一下</div></div>
+    </div>
+    <div class="tag" style="bottom:96px">液态玻璃质感，跟锁屏时钟一个语言</div>
+  </div>
+
+  <h3>多条 <span>不往上叠，只露最新一条 + 计数角标</span></h3>
+  <div class="stage">
+    <div class="carrier">中国联通|中国联通</div>
+    <div class="date">11月26日 周四</div>
+    <div class="clock">15<br>29</div>
+    <div class="fp"></div>
+    <div class="shortcut l">🔦</div>
+    <div class="shortcut r">📷</div>
+    <div class="peek"></div>
+    <div class="glass">
+      <div class="badge">+2</div>
+      <div class="ic" style="background:rgba(34,197,94,.85)">微</div>
+      <div class="tt"><div class="t1">微信 · 小陈</div><div class="t2">在吗？文件发我一下</div></div>
+    </div>
+    <div class="tag" style="bottom:96px">只露最新一条，角标 +2 表示还有两条</div>
+  </div>
+
+  <div class="note"><b>设计要点：</b>① 只在<b>锁屏</b>时这样显示 — 解锁回桌面还是原来的左边缘胶囊，两套互不干扰；② 位置固定在锁屏底部中央、手电筒与相机图标之间，<b>不遮挡指纹、不遮挡两个快捷键</b>，多条时也不往上叠盖，只在气泡后露一条细边 + 角标计数；③ 质感照你锁屏时钟那种液态玻璃：半透明白 + 背景模糊 + 顶部高光边，壁纸透出来；④ 点气泡走正常解锁流程进应用；⑤ 敏感内容照旧打码（短信那条就是打码态）；⑥ 带开关（锁屏玻璃气泡，默认关还是开你定）。</div>
+</body>
+</html>

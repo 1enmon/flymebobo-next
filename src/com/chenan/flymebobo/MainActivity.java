@@ -127,14 +127,59 @@ public class MainActivity extends Activity {
             // v539: 回看胶囊——嵌进「通知气泡」卡片里。默认关
             // （wei 定：主动开关，用户自己开启才有这功能）。
             // 开着时手动左滑消散的普通气泡收进屏幕左边缘的
-            // 回看栈（最多最近 5 条、停 3 分钟），点边缘把手
+            // 回看栈（最多最近 5 条、停留时长可调，v543），点边缘把手
             // 逐个原样重弹；自动消散、点开、被新气泡顶掉的不
             // 收，音乐/下载/实况/导航/来电不收。重弹照样过
             // 场景/静默的门（排队），不绕过；重弹的再划掉不
             // 再入栈。实现在 BubbleWindow（回看栈 + 把手窗）。
             new Feature("recallCapsule", "回看胶囊", "划掉的气泡留个边缘入口，可重新弹出",
-                    "默认关，自己开启才生效。\n开着时，手动划掉（左滑消散）的普通气泡会收进屏幕左边缘的回看胶囊：最多留最近 5 条，停 3 分钟没人点就自动清掉。\n点边缘把手，划掉的气泡逐个原样重新弹出；重弹的气泡再划掉不会再收。\n自动消散、点开、被新气泡顶掉的不收；音乐、下载、实况、导航、来电不收。",
+                    "默认关，自己开启才生效。\n开着时，手动划掉（左滑消散）的普通气泡会收进屏幕左边缘的回看胶囊：最多留最近 5 条，停留时长没人点就自动清掉（默认 3 分钟，可在下面「回看保留时长」里改）。\n点边缘把手，划掉的气泡逐个原样重新弹出；重弹的气泡再划掉不会再收。\n自动消散、点开、被新气泡顶掉的不收；音乐、下载、实况、导航、来电不收。",
                     Color.rgb(59, 130, 246), "回", false, "notif"),
+            // v546: 长按菜单——长按普通胶囊约 0.4 秒出菜单，
+            // 核心是快捷回复（通知自带 RemoteInput 才有）；
+            // 菜单项按通知实际能力出现，绝不放死按钮。默认开。
+            // v549 注：v546 当时只加了字段/联动/搜索索引，漏了
+            // 这三条 Feature 条目，设置里根本没这两行（dex 里
+            // 只有搜索字符串）——v549 一并补上，行才真的出来。
+            new Feature("longPressMenu", "长按菜单", "长按胶囊出菜单，能直接回复",
+                    "开着（默认）：长按普通胶囊约 0.4 秒弹出菜单。\n通知自带回复动作的（短信、Telegram 等）能直接在菜单里回复；微信/QQ 不支持的，第一项换成「打开应用回复」，不放死按钮。\n固定有：稍后提醒（10 分钟后重弹）、收进回看（回看开着才有）、这个应用不再弹。\n关掉后长按无反应。",
+                    Color.rgb(59, 130, 246), "按", true, "notif"),
+            // v546: 排队呼吸点——场景/静默排队时左边缘呼吸
+            // 小点，点开瞄队列。默认开。v549: 位置可自定义
+            // （下面「呼吸点位置」行：贴边左右 × 高度三档；
+            // 也能直接按住小点上下拖）。
+            new Feature("queueDot", "排队呼吸点", "排队时边缘有个呼吸小点",
+                    "开着（默认）：临时静默/场景模式把消息排队时，屏幕边缘有个呼吸小点（场景=橙、静默=紫）。\n点它瞄一眼排队中的消息，只是看，不算处理，结束后照常补弹；队列空了小点自己消失。\n位置在下面「呼吸点位置」里改，也能直接按住小点上下拖。",
+                    Color.rgb(59, 130, 246), "点", true, "notif"),
+            // v556: 收纳点替代扇子——本来要进扇子的普通
+            // 胶囊改收进边缘小点（长存、可点开操作），默认
+            // 关。下面两行是它的「收纳点位置」「收纳点颜色」。
+            new Feature("collectDot", "收纳点替代扇子", "溢出的胶囊收进边缘小点",
+                    "关着（默认）：胶囊照旧收进扇子。\n开着：第一条普通胶囊照常弹出，之后本来要进扇子的都收进屏幕边缘的收纳点（最多 20 条，满了最老的转进回看）。\n点小点打开面板：点条目展开成胶囊、左滑收进回看、长按出快捷菜单，顶部可以全部展开。音乐、下载、实况、导航、来电不收。",
+                    Color.rgb(59, 130, 246), "纳", false, "notif"),
+            // v557: 胶囊长相三行从外观卡迁入「通知气泡」卡
+            // （wei 指示：这几个岂不是可以放到气泡通知里面）。
+            // 键名、默认值、行为逻辑全不动，只换 parent 归属；
+            // 在通知气泡卡里排在收纳点之后、「胶囊长相」分区
+            // 下，行下说明在通用建卡循环里随行挂上，联动改挂
+            // 通知气泡总开关（refreshNotifSubLinkage）。
+            // v465: 胶囊自动取色——开着（默认）：胶囊底色取 App 图标
+            // 的主色（半透明 80%），每个 App 的胶囊颜色都不一样；
+            // 关着：全部用默认白色 + 黑色描边，不跟图标走。
+            // 来电胶囊不受管（本来就是绿/红）。拨动立即生效，不用重启。
+            // v467: 用户 2026-11-23 “反了”“默认开启”——默认开。
+            new Feature("autoTint", "胶囊自动取色", "底色跟 App 图标主色走",
+                    "开着（默认）：胶囊底色取 App 图标的主色，\n每个 App 的胶囊颜色都不一样。\n关掉后全部用默认白色底+黑描边。\n来电胶囊不受影响。拨动立即生效，不用重启。",
+                    Color.rgb(16, 185, 129), "色", true, "notif"),
+            new Feature("scroll", "胶囊滚动", "内容太长时滚动显示",
+                    "胶囊里的标题和正文太长时会左右滚动显示完整内容。\n关掉后超长内容以 … 截断。",
+                    Color.rgb(217, 70, 239), "滚", true, "notif"),
+            // v459: 扇子自动变淡——扇子出现后 5 秒没点，自动变半透明
+            // （省得挡着屏幕）；点一下扇子恢复不透明并照常展开。
+            // 默认开。关掉后扇子一直不透明。
+            new Feature("fanAutoDim", "扇子自动变淡", "扇子闲置 5 秒变半透明",
+                    "扇子出现后 5 秒没人点，自动变半透明，不挡屏幕。\n点一下扇子恢复并展开。关掉后一直不透明。",
+                    Color.rgb(99, 102, 241), "淡", true, "notif"),
             // v536: 提示音升为「通知气泡」卡下面的一张独立展开
             // 卡（buildSoundCard 手工挂，parent 记 "soundcard"
             // 只为不占顶层行、也不被任何顶层卡按 parent 自动
@@ -202,6 +247,19 @@ public class MainActivity extends Activity {
             new Feature("sceneMode", "场景模式", "游戏、视频全屏时，通知先排队",
                     "开着（默认）：进游戏、看视频全屏时，普通通知先排队，\n退出场景再补弹；名单里设了「突破」的应用照常弹。\n关掉：全屏里通知也照常弹，场景例外同时失效。",
                     Color.rgb(99, 102, 241), "景", true, "quiet"),
+            // v555: 安静规则三件套（wei 定：整合进安静规则卡、
+            // 应用名单下方，不另开卡片）——连发突破 / @我突破 /
+            // 关键词过滤。parent 同 sceneMode 记 "quiet"，手工
+            // 挂进 buildQuietRulesCard；颜色同卡的 QUIET_INDIGO。
+            new Feature("burstBreak", "连发突破", "同一人连发 3 条，第 3 条突破排队",
+                    "开着（默认）：同一个人（同一会话）5 分钟内连发消息，\n到第 3 条时如果正赶上场景/静默排队，就直接弹出来，\n前面排队的也一并补弹。连发多半是真有急事。\n关掉：连发也照常排队。",
+                    Color.rgb(99, 102, 241), "连", true, "quiet"),
+            new Feature("mentionBreak", "@我突破", "群聊里被 @ 时突破排队",
+                    "开着（默认）：群聊消息里带「@我」「有人@我」这类字样，\n赶上场景/静默排队时直接弹出来；普通群消息照旧排队。\n关掉：被 @ 也照常排队。",
+                    Color.rgb(99, 102, 241), "@", true, "quiet"),
+            new Feature("keywordFilter", "关键词过滤", "命中关键词的通知不弹、进扇子",
+                    "开着时：普通通知的标题或正文命中下面词表里的词，\n就不弹胶囊，直接收进扇子（点扇子还能看）。\n词表可增删；默认关。\n音乐、下载、实况、导航、来电、验证码、取件码不归它管。",
+                    Color.rgb(99, 102, 241), "词", false, "quiet"),
             new Feature("live", "来电", "接听 · 挂断 · 扬声器",
                     "来电有专属胶囊：接听、挂断、\n扬声器切换都在上面。\n来电永不自动消散。",
                     Color.rgb(139, 92, 246), "电"),
@@ -230,27 +288,9 @@ public class MainActivity extends Activity {
             new Feature("bigCard", "大卡片模式", "通知一来就是大卡片",
                     "呈现形式三模式之一：通知一来就是大卡片依次排列。\n音乐出播放器卡片，来电仍是胶囊。",
                     Color.rgb(99, 102, 241), "大", false, "openway"),
-            // v459: 扇子自动变淡——扇子出现后 5 秒没点，自动变半透明
-            // （省得挡着屏幕）；点一下扇子恢复不透明并照常展开。
-            // 默认开。关掉后扇子一直不透明。
-            // v527: 扇子自动变淡迁进外观卡（parent "appearance"），
-            // 在 buildAppearanceCard 里手工挂到卡内顶部。
-            new Feature("fanAutoDim", "扇子自动变淡", "扇子闲置 5 秒变半透明",
-                    "扇子出现后 5 秒没人点，自动变半透明，不挡屏幕。\n点一下扇子恢复并展开。关掉后一直不透明。",
-                    Color.rgb(99, 102, 241), "淡", true, "appearance"),
-            // v465: 胶囊自动取色——开着（默认）：胶囊底色取 App 图标
-            // 的主色（半透明 80%），每个 App 的胶囊颜色都不一样；
-            // 关着：全部用默认白色 + 黑色描边，不跟图标走。
-            // 来电胶囊不受管（本来就是绿/红）。拨动立即生效，不用重启。
-            // v467: 用户 2026-11-23 “反了”“默认开启”——默认开。
-            // v527: 胶囊自动取色迁进外观卡（parent "appearance"）。
-            new Feature("autoTint", "胶囊自动取色", "底色跟 App 图标主色走",
-                    "开着（默认）：胶囊底色取 App 图标的主色，\n每个 App 的胶囊颜色都不一样。\n关掉后全部用默认白色底+黑描边。\n来电胶囊不受影响。拨动立即生效，不用重启。",
-                    Color.rgb(16, 185, 129), "色", true, "appearance"),
-            // v527: 胶囊滚动迁进外观卡（parent "appearance"）。
-            new Feature("scroll", "胶囊滚动", "内容太长时滚动显示",
-                    "胶囊里的标题和正文太长时会左右滚动显示完整内容。\n关掉后超长内容以 … 截断。",
-                    Color.rgb(217, 70, 239), "滚", true, "appearance"),
+            // v557: 扇子自动变淡 / 胶囊自动取色 / 胶囊滚动三行
+            // 已迁进「通知气泡」卡（wei 指示）——定义挪到
+            // collectDot 后面、parent 改 "notif"，此处不再留。
             // v527: miniwindow 迁进「打开方式」卡，变成「点卡片打开
             // App」的单选（小窗/全屏），parent "openway"，标志位不变。
             new Feature("miniwindow", "点卡片打开 App", "点展开的卡片时，用哪种方式打开",
@@ -443,6 +483,94 @@ public class MainActivity extends Activity {
     // 总开关（code）关时置灰联动（refreshCodeLinkage）。
     private View autoCopyCodeRow;
     private View autoCopyCodeSwitch;
+    // v546: 「通知气泡」子行引用（长按菜单 / 排队呼吸点）——
+    // 随通知气泡总开关联动置灰（refreshNotifSubLinkage）。
+    private View longPressMenuRow;
+    private View longPressMenuSwitch;
+    private View queueDotRow;
+    private View queueDotSwitch;
+    // v549: 「呼吸点位置」行与卡内展开选择区（照 v544 回看
+    // 时长的路子：行 + chips 面板）——呼吸点关（或通知气泡
+    // 总开关关）时置灰收起（refreshQueueDotPosLinkage）。
+    private View queueDotPosRow;
+    private TextView queueDotPosValue;
+    private TextView queueDotPosChev;
+    private LinearLayout queueDotPosPanel;
+    private final Map<String, TextView> queueDotPosSideChips =
+            new HashMap<>();
+    private final Map<Integer, TextView> queueDotPosHeightChips =
+            new HashMap<>();
+    private boolean queueDotPosExpanded;
+    // v556: 收纳点开关行（随通知气泡总开关联动置灰，
+    // refreshNotifSubLinkage）。
+    private View collectDotRow;
+    private View collectDotSwitch;
+    // v557: 胶囊长相三行（从外观卡迁入通知气泡卡）的行、
+    // 开关与行下说明——随通知气泡总开关联动置灰
+    // （refreshNotifSubLinkage）。
+    private View autoTintRow;
+    private View autoTintSwitch;
+    private View autoTintDesc;
+    private View scrollRow;
+    private View scrollSwitch;
+    private View scrollDesc;
+    private View fanAutoDimRow;
+    private View fanAutoDimSwitch;
+    private View fanAutoDimDesc;
+    // v556: 「收纳点位置」行与卡内展开选择区（照 v549
+    // 呼吸点位置的路子：行 + chips 面板）——收纳点关
+    // （或通知气泡总开关关）时置灰收起
+    // （refreshCollectDotLinkage）。
+    private View collectDotPosRow;
+    private TextView collectDotPosValue;
+    private TextView collectDotPosChev;
+    private LinearLayout collectDotPosPanel;
+    private final Map<String, TextView> collectDotPosSideChips =
+            new HashMap<>();
+    private final Map<Integer, TextView> collectDotPosHeightChips =
+            new HashMap<>();
+    private boolean collectDotPosExpanded;
+    // v556: 「收纳点颜色」行与卡内展开的六色 chips 面板
+    // （同 refreshCollectDotLinkage 置灰收起）。
+    private View collectDotColorRow;
+    private TextView collectDotColorValue;
+    private TextView collectDotColorChev;
+    private LinearLayout collectDotColorPanel;
+    private final Map<String, TextView> collectDotColorChips =
+            new HashMap<>();
+    private boolean collectDotColorExpanded;
+    // v555: 安静规则三件套（连发突破 / @我突破 / 关键词过滤）
+    // 的行与开关——随通知气泡总开关联动置灰
+    // （refreshQuietGateLinkage，同 refreshNotifSubLinkage
+    // 的路子）。关键词词表面板挂在关键词过滤行下面，开关
+    // 关时收起（refreshKeywordPanel）。
+    private View burstBreakRow;
+    private View burstBreakSwitch;
+    private View mentionBreakRow;
+    private View mentionBreakSwitch;
+    private View keywordFilterRow;
+    private View keywordFilterSwitch;
+    private View quietBurstAnchor;
+    private View quietMentionAnchor;
+    private View quietKeywordAnchor;
+    private LinearLayout keywordPanel;
+    private LinearLayout keywordChipsBox;
+    private LinearLayout keywordAddRow;
+    private EditText keywordAddInput;
+    // v543: 「回看保留时长」行与右侧值——回看胶囊开关
+    // （recallCapsule）关时置灰联动（refreshRecallLinkage）。
+    private View recallTtlRow;
+    private TextView recallTtlValue;
+    // v544: 时长行尾的统一「›」箭头、卡内展开选择区（药丸
+    // chips + 自定义输入行）与展开状态。
+    private TextView recallTtlChev;
+    private LinearLayout recallTtlPanel;
+    private LinearLayout recallTtlCustomRow;
+    private EditText recallTtlCustomInput;
+    private TextView recallTtlCustomChip;
+    private final Map<Integer, TextView> recallTtlChips =
+            new HashMap<>();
+    private boolean recallTtlExpanded;
     // v534: 气泡提示音开关（通知气泡总开关联动置灰用）。
     // v537: 开关在展开区第一行（buildSoundMasterRow），
     // 还是这个引用。
@@ -1812,13 +1940,300 @@ public class MainActivity extends Activity {
         quietCountText.setLayoutParams(ctLp);
         body.addView(quietCountText);
 
+        // ================= 突破与过滤区（v555） =================
+        // wei 定：连发突破 / @我突破 / 关键词过滤整合进这张
+        // 卡、排在应用名单下方，不另开卡片。行构建全走
+        // buildSubSwitch（与场景模式行同款：同底色/图标盘/
+        // 开关/字号），关键词药丸复用回看时长的 chips 画法
+        // （buildRecallTtlChip / paintRecallTtlChip），添加
+        // 输入行复用回看时长的自定义输入行形态。
+        body.addView(buildZoneLabel("突破与过滤"));
+        Feature burstFeature = featureFor("burstBreak");
+        if (burstFeature != null) {
+            View bRow = buildSubSwitch(burstFeature);
+            subRowViews.put(burstFeature.key, bRow);
+            quietBurstAnchor = bRow;
+            body.addView(bRow);
+        }
+        Feature mentionFeature = featureFor("mentionBreak");
+        if (mentionFeature != null) {
+            View mRow = buildSubSwitch(mentionFeature);
+            subRowViews.put(mentionFeature.key, mRow);
+            quietMentionAnchor = mRow;
+            body.addView(mRow);
+        }
+        Feature keywordFeature = featureFor("keywordFilter");
+        if (keywordFeature != null) {
+            View kRow = buildSubSwitch(keywordFeature);
+            subRowViews.put(keywordFeature.key, kRow);
+            quietKeywordAnchor = kRow;
+            body.addView(kRow);
+        }
+        keywordPanel = buildKeywordPanel();
+        body.addView(keywordPanel);
+        refreshKeywordPanel();
+        refreshQuietGateLinkage();
+
         body.addView(cardDesc("判定顺序：先看应用名单"
-                + "（永不弹一票否决）→ 再看场景（不在突破名单"
+                + "（永不弹一票否决）→ 再看关键词过滤（命中"
+                + "不弹、收进扇子）→ 再看场景（不在突破名单"
                 + "就排队）→ 最后临时静默（静默中一律排队、"
-                + "到点补弹）。"));
+                + "到点补弹）；排队时连发满 3 条、或被 @，"
+                + "可突破直弹。"));
 
         refreshQuietSilence();
         return card;
+    }
+
+    // ================= v555 关键词词表面板 =================
+
+    /** v555: 读关键词词表。存字符串 prefs（与 recallTtlMin
+     * 同路，备份恢复按字符串回）；没存过回默认六词，读坏了
+     * 回默认并清掉坏键，不崩。 */
+    private java.util.List<String> filterWordsValue() {
+        try {
+            String v = prefs.getString("filterWords", null);
+            if (v != null) {
+                return FeatureFlags.parseFilterWords(v);
+            }
+        } catch (Throwable ignored) {
+            try {
+                prefs.edit().remove("filterWords").commit();
+            } catch (Throwable ignored2) {
+            }
+        }
+        return FeatureFlags.parseFilterWords(
+                FeatureFlags.DEFAULT_FILTER_WORDS);
+    }
+
+    /** v555: 写关键词词表：落盘（字符串）+ 备份 + 广播给
+     * SystemUI 立刻换词表 + 重绘药丸（同 setRecallTtlMin
+     * 的路子）。 */
+    private void setFilterWords(java.util.List<String> words) {
+        String joined = FeatureFlags.joinFilterWords(words);
+        prefs.edit().putString("filterWords", joined).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "filterWords");
+        i.putExtra("words", joined);
+        sendBroadcast(i);
+        rebuildKeywordChips();
+    }
+
+    /** v555: 关键词词表面板——挂在关键词过滤行下面，形态
+     * 照回看时长选择区（buildRecallTtlPanel）：同底色/圆角/
+     * 内边距，药丸复用 buildRecallTtlChip + paintRecallTtlChip，
+     * 添加输入行复用回看时长的自定义输入行（输入框 + 确定
+     * 白药丸）。开关关时整块收起（refreshKeywordPanel）。 */
+    private LinearLayout buildKeywordPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(16)));
+        panel.setPadding(dp(12), dp(12), dp(4), dp(4));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(8);
+        plp.leftMargin = dp(12);
+        plp.rightMargin = dp(12);
+        panel.setLayoutParams(plp);
+        panel.setVisibility(View.GONE);
+
+        keywordChipsBox = new LinearLayout(this);
+        keywordChipsBox.setOrientation(LinearLayout.VERTICAL);
+        panel.addView(keywordChipsBox);
+
+        // 添加输入行：默认收起，点「＋ 添加」药丸才滑出
+        // （同回看时长自定义行的做法）。
+        keywordAddRow = new LinearLayout(this);
+        keywordAddRow.setOrientation(LinearLayout.HORIZONTAL);
+        keywordAddRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams arlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        arlp.topMargin = dp(2);
+        arlp.bottomMargin = dp(8);
+        keywordAddRow.setLayoutParams(arlp);
+        keywordAddRow.setVisibility(View.GONE);
+        keywordAddInput = new EditText(this);
+        keywordAddInput.setSingleLine(true);
+        keywordAddInput.setTextSize(14);
+        keywordAddInput.setTextColor(Color.WHITE);
+        keywordAddInput.setHint("输入关键词");
+        keywordAddInput.setHintTextColor(
+                Color.argb(160, 255, 255, 255));
+        keywordAddInput.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(10)));
+        keywordAddInput.setPadding(dp(10), dp(7), dp(10), dp(7));
+        keywordAddInput.setLayoutParams(
+                new LinearLayout.LayoutParams(dp(150),
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+        keywordAddRow.addView(keywordAddInput);
+        TextView ok = new TextView(this);
+        ok.setText("确定");
+        ok.setTextSize(13);
+        ok.setGravity(Gravity.CENTER);
+        ok.setTextColor(Color.rgb(59, 130, 246));
+        ok.setTypeface(ok.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        ok.setBackground(rounded(Color.WHITE, dp(999)));
+        ok.setPadding(dp(16), dp(7), dp(16), dp(7));
+        LinearLayout.LayoutParams oklp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        oklp.leftMargin = dp(10);
+        ok.setLayoutParams(oklp);
+        ok.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String raw = keywordAddInput.getText() == null
+                        ? "" : keywordAddInput.getText()
+                                .toString().trim();
+                if (raw.isEmpty()) {
+                    Toast.makeText(MainActivity.this,
+                            "先输入关键词",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (raw.length() > 12) {
+                    Toast.makeText(MainActivity.this,
+                            "关键词太长了（最多 12 个字）",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                java.util.List<String> words = filterWordsValue();
+                if (words.contains(raw)) {
+                    Toast.makeText(MainActivity.this,
+                            "这个词已经有了",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                words.add(raw);
+                setFilterWords(words);
+                hideKeywordAddRow();
+            }
+        });
+        keywordAddRow.addView(ok);
+        panel.addView(keywordAddRow);
+
+        rebuildKeywordChips();
+        return panel;
+    }
+
+    /** v555: 按当前词表重排药丸：每颗「词 ×」点一下删掉，
+     * 最后一颗是「＋ 添加」。药丸按估算宽度自动换行排布
+     * （LinearLayout 不自动换行，手动分行；宽度估算 =
+     * 字宽 + 药丸左右内边距 + 右边距）。 */
+    private void rebuildKeywordChips() {
+        if (keywordChipsBox == null) {
+            return;
+        }
+        keywordChipsBox.removeAllViews();
+        java.util.List<String> words = filterWordsValue();
+        int avail = getResources().getDisplayMetrics().widthPixels
+                - dp(88);
+        LinearLayout row = null;
+        int rowWidth = 0;
+        java.util.ArrayList<String> labels =
+                new java.util.ArrayList<>(words);
+        labels.add("＋ 添加");
+        for (final String label : labels) {
+            final boolean isAdd = "＋ 添加".equals(label);
+            TextView chip = buildRecallTtlChip(
+                    isAdd ? label : label + "  ×");
+            paintRecallTtlChip(chip, false);
+            int w = (int) chip.getPaint().measureText(
+                    chip.getText().toString())
+                    + dp(28) + dp(8);
+            if (row == null || (rowWidth > 0
+                    && rowWidth + w > avail)) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                keywordChipsBox.addView(row);
+                rowWidth = 0;
+            }
+            rowWidth += w;
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (isAdd) {
+                        showKeywordAddRow();
+                        return;
+                    }
+                    java.util.List<String> ws = filterWordsValue();
+                    ws.remove(label);
+                    setFilterWords(ws);
+                }
+            });
+            row.addView(chip);
+        }
+    }
+
+    /** v555: 点「＋ 添加」药丸：滑出输入行并聚焦（同回看
+     * 时长自定义行的做法）。 */
+    private void showKeywordAddRow() {
+        if (keywordAddRow == null) {
+            return;
+        }
+        keywordAddRow.setVisibility(View.VISIBLE);
+        if (keywordAddInput != null) {
+            keywordAddInput.setText("");
+            keywordAddInput.requestFocus();
+        }
+    }
+
+    private void hideKeywordAddRow() {
+        if (keywordAddRow != null) {
+            keywordAddRow.setVisibility(View.GONE);
+        }
+    }
+
+    /** v555: 词表面板的显隐联动：关键词过滤开（且通知气泡
+     * 总开关开）才展开；关了整块收起、输入行一并收。拨
+     * keywordFilter 开关和 notif 总开关时都刷。 */
+    private void refreshKeywordPanel() {
+        if (keywordPanel == null) {
+            return;
+        }
+        boolean show = isOn("notif") && isOn("keywordFilter");
+        keywordPanel.setVisibility(show
+                ? View.VISIBLE : View.GONE);
+        if (!show) {
+            hideKeywordAddRow();
+        } else {
+            rebuildKeywordChips();
+        }
+    }
+
+    /** v555: 安静规则三件套的置灰联动（wei 的规矩，同
+     * refreshNotifSubLinkage）：通知气泡总开关关 → 三行
+     * 置灰、开关点不动；开 → 按各自开关状态恢复明暗。 */
+    private void refreshQuietGateLinkage() {
+        boolean master = isOn("notif");
+        if (burstBreakSwitch != null) {
+            burstBreakSwitch.setEnabled(master);
+        }
+        if (burstBreakRow != null) {
+            burstBreakRow.setAlpha(master
+                    ? (isOn("burstBreak") ? 1f : 0.45f) : 0.45f);
+        }
+        if (mentionBreakSwitch != null) {
+            mentionBreakSwitch.setEnabled(master);
+        }
+        if (mentionBreakRow != null) {
+            mentionBreakRow.setAlpha(master
+                    ? (isOn("mentionBreak") ? 1f : 0.45f) : 0.45f);
+        }
+        if (keywordFilterSwitch != null) {
+            keywordFilterSwitch.setEnabled(master);
+        }
+        if (keywordFilterRow != null) {
+            keywordFilterRow.setAlpha(master
+                    ? (isOn("keywordFilter") ? 1f : 0.45f) : 0.45f);
+        }
+        refreshKeywordPanel();
     }
 
     // ================= v536 提示音展开卡 =================
@@ -3818,6 +4233,30 @@ public class MainActivity extends Activity {
         addSearch("回看胶囊", "通知气泡 › 回看胶囊",
                 "回看 错过 历史 找回 划掉 恢复",
                 subRowViews.get("recallCapsule"), "notif");
+        // v543: 回看保留时长是回看胶囊开关行下面的值行。
+        addSearch("回看保留时长", "通知气泡 › 回看保留时长",
+                "时长 时间 保留 几分钟 回看",
+                recallTtlRow, "notif");
+        addSearch("长按菜单", "通知气泡 › 长按菜单",
+                "长按 快捷回复 回复 菜单",
+                subRowViews.get("longPressMenu"), "notif");
+        addSearch("排队呼吸点", "通知气泡 › 排队呼吸点",
+                "呼吸点 排队 队列 静默 场景 小点",
+                subRowViews.get("queueDot"), "notif");
+        // v549: 呼吸点位置是呼吸点开关行下面的值行。
+        addSearch("呼吸点位置", "通知气泡 › 呼吸点位置",
+                "位置 左边 右边 靠上 靠下 高度 贴边 拖动 呼吸点",
+                queueDotPosRow, "notif");
+        // v556: 收纳点三条（开关行 + 位置行 + 颜色行）。
+        addSearch("收纳点替代扇子", "通知气泡 › 收纳点替代扇子",
+                "收纳 扇子 替代 收集 小点 边缘",
+                subRowViews.get("collectDot"), "notif");
+        addSearch("收纳点位置", "通知气泡 › 收纳点位置",
+                "位置 左边 右边 靠上 靠下 高度 贴边 拖动 收纳",
+                collectDotPosRow, "notif");
+        addSearch("收纳点颜色", "通知气泡 › 收纳点颜色",
+                "颜色 蓝 橙 紫 绿 粉 青 收纳",
+                collectDotColorRow, "notif");
         // v536: 提示音是主页展开卡（贴着通知气泡卡），搜索
         // 展开这张卡定位（同安静规则条目的做法）。
         addSearch("气泡提示音", "胶囊类型 › 气泡提示音",
@@ -3897,19 +4336,31 @@ public class MainActivity extends Activity {
         addSearch("场景模式", "安静规则 › 场景模式",
                 "游戏 视频 全屏 场景 模式 排队 总开关",
                 quietSceneModeAnchor, "quiet");
+        // v555: 安静规则三件套（应用名单下方的突破与过滤区）。
+        addSearch("连发突破", "安静规则 › 连发突破",
+                "连发 突破 急事 连发三条 刷屏 排队",
+                quietBurstAnchor, "quiet");
+        addSearch("@我突破", "安静规则 › @我突破",
+                "@ 艾特 被@ 群聊 突破 提醒 排队",
+                quietMentionAnchor, "quiet");
+        addSearch("关键词过滤", "安静规则 › 关键词过滤",
+                "关键词 过滤 促销 秒杀 领券 广告 屏蔽词 词表",
+                quietKeywordAnchor, "quiet");
         // 外观
         searchIndex.add(new SearchEntry("外观设置", "外观",
                 "外观 扇子 位置 大小 圆角 长相",
                 searchTargets.get("appearanceCard"), null));
-        addSearch("胶囊自动取色", "外观设置 › 胶囊自动取色",
+        // v557: 胶囊长相三行迁进通知气泡卡——索引跟着改
+        // parent，搜出来展开的是通知气泡卡。
+        addSearch("胶囊自动取色", "通知气泡 › 胶囊自动取色",
                 "颜色 取色 图标 底色 主色",
-                subRowViews.get("autoTint"), "appearance");
-        addSearch("胶囊滚动", "外观设置 › 胶囊滚动",
+                subRowViews.get("autoTint"), "notif");
+        addSearch("胶囊滚动", "通知气泡 › 胶囊滚动",
                 "滚动 太长 省略 截断 跑马灯",
-                subRowViews.get("scroll"), "appearance");
-        addSearch("扇子自动变淡", "外观设置 › 扇子自动变淡",
+                subRowViews.get("scroll"), "notif");
+        addSearch("扇子自动变淡", "通知气泡 › 扇子自动变淡",
                 "扇子 变淡 半透明 挡屏幕 挡住",
-                subRowViews.get("fanAutoDim"), "appearance");
+                subRowViews.get("fanAutoDim"), "notif");
         addSearch("扇子位置", "外观设置 › 扇子位置",
                 "扇子 位置 高度 上下", "fanpos", "appearance");
         // 页脚 / 状态行
@@ -4045,6 +4496,22 @@ public class MainActivity extends Activity {
         } catch (Throwable ignored) {
         }
         expandCard(e.expandKey);
+        // v544: 搜到「回看保留时长」时，它的卡内展开区也一并
+        // 展开（收起状态下定位到行看不到选项）。
+        if (target == recallTtlRow) {
+            setRecallTtlExpanded(true);
+        }
+        // v549: 搜到「呼吸点位置」同理，展开它的选择区。
+        if (target == queueDotPosRow) {
+            setQueueDotPosExpanded(true);
+        }
+        // v556: 搜到「收纳点位置 / 收纳点颜色」同理。
+        if (target == collectDotPosRow) {
+            setCollectDotPosExpanded(true);
+        }
+        if (target == collectDotColorRow) {
+            setCollectDotColorExpanded(true);
+        }
         target.post(new Runnable() {
             @Override
             public void run() {
@@ -4184,9 +4651,62 @@ public class MainActivity extends Activity {
                 if ("code".equals(f.key) && "mask".equals(s.key)) {
                     subBox.addView(buildZoneLabel("敏感打码"));
                 }
+                // v557: 胶囊长相分区标题——三行迁入通知气泡
+                // 卡后，加在第一行（胶囊自动取色）之前（同
+                // 外观卡里原来的分区名）。
+                if ("autoTint".equals(s.key)) {
+                    subBox.addView(buildZoneLabel("胶囊长相"));
+                }
                 View subRow = buildSubSwitch(s);
                 subRowViews.put(s.key, subRow);
                 subBox.addView(subRow);
+                // v557: 胶囊长相三行各自的行下说明——随行从
+                // 外观卡迁入，原文一字不动；说明视图也随通知
+                // 气泡总开关联动置灰（refreshNotifSubLinkage）。
+                if ("autoTint".equals(s.key)) {
+                    autoTintDesc = cardDesc("关掉后全部用默认白色底+黑描边。"
+                            + "来电胶囊不受影响。");
+                    subBox.addView(autoTintDesc);
+                }
+                if ("scroll".equals(s.key)) {
+                    scrollDesc = cardDesc("关掉后超长内容以 … 截断。");
+                    subBox.addView(scrollDesc);
+                }
+                if ("fanAutoDim".equals(s.key)) {
+                    fanAutoDimDesc = cardDesc("点一下扇子恢复并展开。关掉后一直不透明。");
+                    subBox.addView(fanAutoDimDesc);
+                }
+                // v543: 回看保留时长行，紧贴「回看胶囊」开关
+                // 行下面（同 callRight 下面挂滑条的做法）。
+                if ("recallCapsule".equals(s.key)) {
+                    recallTtlRow = buildRecallTtlRow();
+                    subBox.addView(recallTtlRow);
+                    // v544: 时长行下面紧跟卡内展开选择区。
+                    recallTtlPanel = buildRecallTtlPanel();
+                    subBox.addView(recallTtlPanel);
+                }
+                // v549: 呼吸点位置行，紧贴「排队呼吸点」开关
+                // 行下面（同回看保留时长的做法），下面紧跟
+                // 卡内展开选择区（贴边/高度两排胶囊 chips）。
+                if ("queueDot".equals(s.key)) {
+                    queueDotPosRow = buildQueueDotPosRow();
+                    subBox.addView(queueDotPosRow);
+                    queueDotPosPanel = buildQueueDotPosPanel();
+                    subBox.addView(queueDotPosPanel);
+                }
+                // v556: 收纳点位置行 + 颜色行，紧贴「收纳点
+                // 替代扇子」开关行下面（同呼吸点位置的做法），
+                // 每行下面紧跟各自的卡内展开选择区。
+                if ("collectDot".equals(s.key)) {
+                    collectDotPosRow = buildCollectDotPosRow();
+                    subBox.addView(collectDotPosRow);
+                    collectDotPosPanel = buildCollectDotPosPanel();
+                    subBox.addView(collectDotPosPanel);
+                    collectDotColorRow = buildCollectDotColorRow();
+                    subBox.addView(collectDotColorRow);
+                    collectDotColorPanel = buildCollectDotColorPanel();
+                    subBox.addView(collectDotColorPanel);
+                }
                 // v442: 来电高度滑条，紧贴在「来电放右边」下面
                 // （用户 “就在那个来电放在右边下面”）。
                 if ("callRight".equals(s.key)) {
@@ -4302,8 +4822,15 @@ public class MainActivity extends Activity {
             refreshCodeLinkage();
         }
         // v534: 通知气泡卡——子行建完后刷一次提示音的初始联动。
+        // v543: 同理刷一次回看保留时长行的初始联动。
         if ("notif".equals(f.key)) {
             refreshSoundLinkage();
+            refreshRecallLinkage();
+            refreshNotifSubLinkage();
+            // v549: 呼吸点位置行的初始联动一并刷。
+            refreshQueueDotPosLinkage();
+            // v556: 收纳点位置/颜色行的初始联动一并刷。
+            refreshCollectDotLinkage();
         }
         if (subBox.getChildCount() > 0) {
             subBox.setPadding(0, 0, 0, dp(12));
@@ -4456,6 +4983,35 @@ public class MainActivity extends Activity {
         if ("autoCopyCode".equals(sub.key)) {
             autoCopyCodeRow = row;
         }
+        if ("longPressMenu".equals(sub.key)) {
+            longPressMenuRow = row;
+        }
+        if ("queueDot".equals(sub.key)) {
+            queueDotRow = row;
+        }
+        if ("collectDot".equals(sub.key)) {
+            collectDotRow = row;
+        }
+        // v557: 胶囊长相三行的行引用（同上）。
+        if ("autoTint".equals(sub.key)) {
+            autoTintRow = row;
+        }
+        if ("scroll".equals(sub.key)) {
+            scrollRow = row;
+        }
+        if ("fanAutoDim".equals(sub.key)) {
+            fanAutoDimRow = row;
+        }
+        // v555: 安静规则三件套的行引用（总开关联动置灰用）。
+        if ("burstBreak".equals(sub.key)) {
+            burstBreakRow = row;
+        }
+        if ("mentionBreak".equals(sub.key)) {
+            mentionBreakRow = row;
+        }
+        if ("keywordFilter".equals(sub.key)) {
+            keywordFilterRow = row;
+        }
         wrap.addView(row);
         return wrap;
     }
@@ -4519,6 +5075,36 @@ public class MainActivity extends Activity {
         }
         if ("autoCopyCode".equals(f.key)) {
             autoCopyCodeSwitch = sw;
+        }
+        if ("longPressMenu".equals(f.key)) {
+            longPressMenuSwitch = sw;
+        }
+        if ("queueDot".equals(f.key)) {
+            queueDotSwitch = sw;
+        }
+        if ("collectDot".equals(f.key)) {
+            collectDotSwitch = sw;
+        }
+        // v557: 胶囊长相三行的开关引用（迁入通知气泡卡，
+        // 随总开关联动置灰用）。
+        if ("autoTint".equals(f.key)) {
+            autoTintSwitch = sw;
+        }
+        if ("scroll".equals(f.key)) {
+            scrollSwitch = sw;
+        }
+        if ("fanAutoDim".equals(f.key)) {
+            fanAutoDimSwitch = sw;
+        }
+        // v555: 安静规则三件套的开关引用（联动置灰用）。
+        if ("burstBreak".equals(f.key)) {
+            burstBreakSwitch = sw;
+        }
+        if ("mentionBreak".equals(f.key)) {
+            mentionBreakSwitch = sw;
+        }
+        if ("keywordFilter".equals(f.key)) {
+            keywordFilterSwitch = sw;
         }
         sw.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -4615,8 +5201,39 @@ public class MainActivity extends Activity {
                 }
                 // v534: 通知气泡是提示音的总开关——拨它时同步
                 // 刷新提示音行的置灰/可点状态（联动，wei 定）。
+                // v543: 回看保留时长行也依附在通知气泡卡下，
+                // 一并刷新。
                 if ("notif".equals(f.key)) {
                     refreshSoundLinkage();
+                    refreshRecallLinkage();
+                    refreshNotifSubLinkage();
+                    refreshQueueDotPosLinkage();
+                    // v556: 收纳点的位置/颜色行也依附通知
+                    // 气泡总开关，一并刷新。
+                    refreshCollectDotLinkage();
+                    // v555: 安静规则三件套也依附通知气泡
+                    // 总开关——拨它时同步刷新三行的置灰。
+                    refreshQuietGateLinkage();
+                }
+                // v555: 关键词过滤开关——拨它时同步展开/
+                // 收起下面的词表面板（联动，同回看时长）。
+                if ("keywordFilter".equals(f.key)) {
+                    refreshKeywordPanel();
+                }
+                // v543: 回看胶囊是保留时长行的总开关——拨它时
+                // 同步刷新时长行的置灰/可点状态（联动，wei 定）。
+                if ("recallCapsule".equals(f.key)) {
+                    refreshRecallLinkage();
+                }
+                // v549: 呼吸点是位置行的总开关——拨它时同步
+                // 刷新位置行的置灰/可点状态（联动，同上）。
+                if ("queueDot".equals(f.key)) {
+                    refreshQueueDotPosLinkage();
+                }
+                // v556: 收纳点是位置/颜色两行的总开关——拨它
+                // 时同步刷新两行的置灰/可点状态（联动，同上）。
+                if ("collectDot".equals(f.key)) {
+                    refreshCollectDotLinkage();
                 }
                 // v536: 提示音自己的总开关——拨它时同步刷新
                 // 展开区的置灰状态（联动，wei 定）。
@@ -5105,6 +5722,67 @@ public class MainActivity extends Activity {
      * 按自动复制自己的标志位恢复。行为层 BubbleWindow
      * 本来就先过 code 功能门（关了验证码根本不识别），
      * 这里只补 UI 联动。 */
+    /** v546: 「长按菜单 / 排队呼吸点」两行随「通知气泡」总
+     * 开关联动（同 v540/v544 的规矩）：总开关关 → 两行置灰
+     * 且开关不可点；总开关开 → 按各自标志位恢复。 */
+    private void refreshNotifSubLinkage() {
+        boolean master = isOn("notif");
+        if (longPressMenuSwitch != null) {
+            longPressMenuSwitch.setEnabled(master);
+        }
+        if (longPressMenuRow != null) {
+            longPressMenuRow.setAlpha(master
+                    ? (isOn("longPressMenu") ? 1f : 0.45f) : 0.45f);
+        }
+        if (queueDotSwitch != null) {
+            queueDotSwitch.setEnabled(master);
+        }
+        if (queueDotRow != null) {
+            queueDotRow.setAlpha(master
+                    ? (isOn("queueDot") ? 1f : 0.45f) : 0.45f);
+        }
+        // v556: 收纳点行同理随通知气泡总开关联动。
+        if (collectDotSwitch != null) {
+            collectDotSwitch.setEnabled(master);
+        }
+        if (collectDotRow != null) {
+            collectDotRow.setAlpha(master
+                    ? (isOn("collectDot") ? 1f : 0.45f) : 0.45f);
+        }
+        // v557: 胶囊长相三行（从外观卡迁入）同理随通知气泡
+        // 总开关联动，行下说明跟着一起灰。
+        if (autoTintSwitch != null) {
+            autoTintSwitch.setEnabled(master);
+        }
+        if (autoTintRow != null) {
+            autoTintRow.setAlpha(master
+                    ? (isOn("autoTint") ? 1f : 0.45f) : 0.45f);
+        }
+        if (autoTintDesc != null) {
+            autoTintDesc.setAlpha(master ? 1f : 0.45f);
+        }
+        if (scrollSwitch != null) {
+            scrollSwitch.setEnabled(master);
+        }
+        if (scrollRow != null) {
+            scrollRow.setAlpha(master
+                    ? (isOn("scroll") ? 1f : 0.45f) : 0.45f);
+        }
+        if (scrollDesc != null) {
+            scrollDesc.setAlpha(master ? 1f : 0.45f);
+        }
+        if (fanAutoDimSwitch != null) {
+            fanAutoDimSwitch.setEnabled(master);
+        }
+        if (fanAutoDimRow != null) {
+            fanAutoDimRow.setAlpha(master
+                    ? (isOn("fanAutoDim") ? 1f : 0.45f) : 0.45f);
+        }
+        if (fanAutoDimDesc != null) {
+            fanAutoDimDesc.setAlpha(master ? 1f : 0.45f);
+        }
+    }
+
     private void refreshCodeLinkage() {
         boolean link = isOn("code");
         if (autoCopyCodeSwitch != null) {
@@ -5113,6 +5791,1119 @@ public class MainActivity extends Activity {
         if (autoCopyCodeRow != null) {
             autoCopyCodeRow.setAlpha(link
                     ? (isOn("autoCopyCode") ? 1f : 0.45f) : 0.45f);
+        }
+    }
+
+    /** v543: 读回看保留时长（分钟）。存字符串 prefs（与
+     * bubbleSoundId 同路，备份恢复按字符串回）；读坏了回
+     * 默认 3 并清掉坏键，不崩。 */
+    private int recallTtlMinValue() {
+        try {
+            String v = prefs.getString("recallTtlMin", null);
+            if (v != null) {
+                return FeatureFlags.parseRecallTtlMin(v);
+            }
+        } catch (Throwable ignored) {
+            try {
+                prefs.edit().remove("recallTtlMin").commit();
+            } catch (Throwable ignored2) {
+            }
+        }
+        return FeatureFlags.RECALL_TTL_MIN_DEFAULT;
+    }
+
+    /** v543: 写回看保留时长：落盘（字符串）+ 备份 + 广播给
+     * SystemUI 立刻换值并重排栈的到期定时器 + 刷行上显示。 */
+    private void setRecallTtlMin(int minutes) {
+        int m = FeatureFlags.clampRecallTtlMin(minutes);
+        prefs.edit().putString("recallTtlMin",
+                String.valueOf(m)).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "recallTtlMin");
+        i.putExtra("minutes", m);
+        sendBroadcast(i);
+        refreshRecallTtlValue();
+    }
+
+    private void refreshRecallTtlValue() {
+        if (recallTtlValue != null) {
+            recallTtlValue.setText(recallTtlMinValue() + " 分钟");
+        }
+        // v544: 药丸选中态跟值走（面板还没建时内部自动跳过）。
+        refreshRecallTtlChips();
+    }
+
+    /** v549: 读呼吸点位置（规范化后的 "L1" 之类）。存字符串
+     * prefs（与 recallTtlMin 同路，备份恢复按字符串回）；
+     * 读坏了回默认 "L1" 并清掉坏键，不崩。 */
+    private String queueDotPosValue() {
+        try {
+            String v = prefs.getString("queueDotPos", null);
+            if (v != null) {
+                return FeatureFlags.parseQueueDotPos(v);
+            }
+        } catch (Throwable ignored) {
+            try {
+                prefs.edit().remove("queueDotPos").commit();
+            } catch (Throwable ignored2) {
+            }
+        }
+        return "L1";
+    }
+
+    /** v549: 位置的人话标签，如「左边 · 中间」。 */
+    private String queueDotPosLabel(String pos) {
+        String p = FeatureFlags.parseQueueDotPos(pos);
+        String side = p.startsWith("R") ? "右边" : "左边";
+        String[] bands = new String[]{"靠上", "中间", "靠下"};
+        return side + " · " + bands[p.charAt(1) - '0'];
+    }
+
+    /** v549: 写呼吸点位置：落盘（字符串）+ 备份 + 广播给
+     * SystemUI 立刻换值挪点 + 刷行上显示（同 setRecallTtlMin
+     * 的路子）。拖动改的位置走 SystemUI→App 的
+     * ACTION_SET_QUEUE_DOT_POS 落盘，也会回到这里的效果
+     * （下次打开设置页读 prefs 就是新值）。 */
+    private void setQueueDotPos(String pos) {
+        String p = FeatureFlags.parseQueueDotPos(pos);
+        prefs.edit().putString("queueDotPos", p).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "queueDotPos");
+        i.putExtra("pos", p);
+        sendBroadcast(i);
+        refreshQueueDotPosValue();
+    }
+
+    private void refreshQueueDotPosValue() {
+        if (queueDotPosValue != null) {
+            queueDotPosValue.setText(
+                    queueDotPosLabel(queueDotPosValue()));
+        }
+        refreshQueueDotPosChips();
+    }
+
+    /** v549: 按当前值重绘位置药丸选中态（贴边一排 + 高度
+     * 一排），画法与回看时长药丸共用 paintRecallTtlChip。 */
+    private void refreshQueueDotPosChips() {
+        String cur = queueDotPosValue();
+        for (Map.Entry<String, TextView> e
+                : queueDotPosSideChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    cur.startsWith(e.getKey()));
+        }
+        int band = cur.charAt(1) - '0';
+        for (Map.Entry<Integer, TextView> e
+                : queueDotPosHeightChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    e.getKey().intValue() == band);
+        }
+    }
+
+    /** v549: 呼吸点位置行——与回看保留时长行同款式（同底色/
+     * 图标盘/字号），右边是当前值 + 统一「›」箭头，点行在
+     * 卡内就地展开选择区（buildQueueDotPosPanel）。 */
+    private View buildQueueDotPosRow() {
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        rlp.leftMargin = dp(12);
+        rlp.rightMargin = dp(12);
+        row.setLayoutParams(rlp);
+
+        TextView icon = new TextView(this);
+        icon.setText("位");
+        icon.setTextSize(13);
+        icon.setTextColor(Color.rgb(59, 130, 246));
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+        row.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("呼吸点位置");
+        title.setTextSize(14);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("小点贴哪边、什么高度，也能直接拖小点");
+        sub.setTextSize(11);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        row.addView(texts);
+
+        queueDotPosValue = new TextView(this);
+        queueDotPosValue.setTextSize(13);
+        queueDotPosValue.setTextColor(Color.argb(230, 255, 255, 255));
+        row.addView(queueDotPosValue);
+
+        queueDotPosChev = new TextView(this);
+        queueDotPosChev.setText("›");
+        queueDotPosChev.setTextSize(22);
+        queueDotPosChev.setTextColor(Color.argb(230, 255, 255, 255));
+        queueDotPosChev.setGravity(Gravity.CENTER);
+        queueDotPosChev.setRotation(90f);
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        chlp.leftMargin = dp(6);
+        queueDotPosChev.setLayoutParams(chlp);
+        row.addView(queueDotPosChev);
+        refreshQueueDotPosValue();
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setQueueDotPosExpanded(!queueDotPosExpanded);
+            }
+        });
+        return row;
+    }
+
+    /** v549: 展开/收起呼吸点位置的卡内选择区。联动关着
+     * （呼吸点关/总开关关）时不许展开。 */
+    private void setQueueDotPosExpanded(boolean expanded) {
+        if (expanded && !(isOn("notif") && isOn("queueDot"))) {
+            expanded = false;
+        }
+        queueDotPosExpanded = expanded;
+        if (queueDotPosPanel != null) {
+            queueDotPosPanel.setVisibility(expanded
+                    ? View.VISIBLE : View.GONE);
+        }
+        if (expanded) {
+            refreshQueueDotPosChips();
+        }
+        setChevronExpanded(queueDotPosChev, expanded);
+    }
+
+    /** v549: 呼吸点位置选择区（展开在位置行下面，同子行
+     * 底色/圆角）：「贴边」一排（左边/右边）+「高度」一排
+     * （靠上/中间/靠下），药丸与回看时长共用
+     * buildRecallTtlChip 的样式。点药丸立即落盘+广播，
+     * SystemUI 的小点当场挪位。 */
+    private LinearLayout buildQueueDotPosPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(16)));
+        panel.setPadding(dp(12), dp(12), dp(4), dp(4));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(8);
+        plp.leftMargin = dp(12);
+        plp.rightMargin = dp(12);
+        panel.setLayoutParams(plp);
+        panel.setVisibility(View.GONE);
+
+        TextView sideLabel = new TextView(this);
+        sideLabel.setText("贴边");
+        sideLabel.setTextSize(12);
+        sideLabel.setTextColor(Color.argb(200, 255, 255, 255));
+        sideLabel.setPadding(0, 0, 0, dp(6));
+        panel.addView(sideLabel);
+        queueDotPosSideChips.clear();
+        LinearLayout sideRow = new LinearLayout(this);
+        sideRow.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(sideRow);
+        String[][] sides = new String[][]{
+                {"L", "左边"}, {"R", "右边"}};
+        for (final String[] s : sides) {
+            TextView chip = buildRecallTtlChip(s[1]);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String cur = queueDotPosValue();
+                    setQueueDotPos(s[0] + cur.substring(1));
+                }
+            });
+            queueDotPosSideChips.put(s[0], chip);
+            sideRow.addView(chip);
+        }
+
+        TextView heightLabel = new TextView(this);
+        heightLabel.setText("高度");
+        heightLabel.setTextSize(12);
+        heightLabel.setTextColor(Color.argb(200, 255, 255, 255));
+        heightLabel.setPadding(0, dp(2), 0, dp(6));
+        panel.addView(heightLabel);
+        queueDotPosHeightChips.clear();
+        LinearLayout heightRow = new LinearLayout(this);
+        heightRow.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(heightRow);
+        String[] bands = new String[]{"靠上", "中间", "靠下"};
+        for (int b = 0; b < bands.length; b++) {
+            final int band = b;
+            TextView chip = buildRecallTtlChip(bands[b]);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String cur = queueDotPosValue();
+                    setQueueDotPos(cur.charAt(0)
+                            + String.valueOf(band));
+                }
+            });
+            queueDotPosHeightChips.put(band, chip);
+            heightRow.addView(chip);
+        }
+
+        TextView hint = new TextView(this);
+        hint.setText("也能直接按住小点上下拖，松手就记住高度。");
+        hint.setTextSize(11);
+        hint.setTextColor(Color.argb(170, 255, 255, 255));
+        hint.setPadding(0, dp(2), 0, dp(10));
+        panel.addView(hint);
+
+        refreshQueueDotPosChips();
+        return panel;
+    }
+
+    /** v549: 呼吸点位置行的联动（wei 的规矩，同回看时长）：
+     * 呼吸点开关关（或通知气泡总开关关）→ 位置行置灰且点
+     * 不动、展开区收起；开 → 恢复。行为层 BubbleWindow 的
+     * 小点本来就先过 queueDot，这里只补 UI。 */
+    private void refreshQueueDotPosLinkage() {
+        if (queueDotPosRow == null) {
+            return;
+        }
+        boolean link = isOn("notif") && isOn("queueDot");
+        queueDotPosRow.setEnabled(link);
+        queueDotPosRow.setAlpha(link ? 1f : 0.45f);
+        if (queueDotPosPanel != null) {
+            queueDotPosPanel.setAlpha(link ? 1f : 0.45f);
+            if (!link) {
+                setQueueDotPosExpanded(false);
+            }
+        }
+    }
+
+    /** v556: 收纳点位置/颜色两行的联动（wei 的规矩，同
+     * 呼吸点位置）：收纳点开关关（或通知气泡总开关关）→
+     * 两行置灰且点不动、展开区收起；开 → 恢复。行为层
+     * BubbleWindow 的小点本来就先过 collectDot，这里
+     * 只补 UI。 */
+    private void refreshCollectDotLinkage() {
+        boolean link = isOn("notif") && isOn("collectDot");
+        if (collectDotPosRow != null) {
+            collectDotPosRow.setEnabled(link);
+            collectDotPosRow.setAlpha(link ? 1f : 0.45f);
+        }
+        if (collectDotPosPanel != null) {
+            collectDotPosPanel.setAlpha(link ? 1f : 0.45f);
+            if (!link) {
+                setCollectDotPosExpanded(false);
+            }
+        }
+        if (collectDotColorRow != null) {
+            collectDotColorRow.setEnabled(link);
+            collectDotColorRow.setAlpha(link ? 1f : 0.45f);
+        }
+        if (collectDotColorPanel != null) {
+            collectDotColorPanel.setAlpha(link ? 1f : 0.45f);
+            if (!link) {
+                setCollectDotColorExpanded(false);
+            }
+        }
+    }
+
+    /** v556: 读收纳点位置（规范化后的 "L0" 之类）。存
+     * 字符串 prefs（与 queueDotPos 同路，备份恢复按字符
+     * 串回）；读坏了回默认 "L0" 并清掉坏键，不崩。 */
+    private String collectDotPosValue() {
+        try {
+            String v = prefs.getString("collectDotPos", null);
+            if (v != null) {
+                return FeatureFlags.parseCollectDotPos(v);
+            }
+        } catch (Throwable ignored) {
+            try {
+                prefs.edit().remove("collectDotPos").commit();
+            } catch (Throwable ignored2) {
+            }
+        }
+        return "L0";
+    }
+
+    /** v556: 收纳点位置的人话标签，如「左边 · 靠上」。 */
+    private String collectDotPosLabel(String pos) {
+        String p = FeatureFlags.parseCollectDotPos(pos);
+        String side = p.startsWith("R") ? "右边" : "左边";
+        String[] bands = new String[]{"靠上", "中间", "靠下"};
+        return side + " · " + bands[p.charAt(1) - '0'];
+    }
+
+    /** v556: 写收纳点位置：落盘（字符串）+ 备份 + 广播给
+     * SystemUI 立刻换值挪点 + 刷行上显示（同 setQueueDotPos
+     * 的路子）。拖动改的位置走 SystemUI→App 的
+     * ACTION_SET_COLLECT_DOT_POS 落盘，下次打开设置页读
+     * prefs 就是新值。 */
+    private void setCollectDotPos(String pos) {
+        String p = FeatureFlags.parseCollectDotPos(pos);
+        prefs.edit().putString("collectDotPos", p).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "collectDotPos");
+        i.putExtra("pos", p);
+        sendBroadcast(i);
+        refreshCollectDotPosValue();
+    }
+
+    private void refreshCollectDotPosValue() {
+        if (collectDotPosValue != null) {
+            collectDotPosValue.setText(
+                    collectDotPosLabel(collectDotPosValue()));
+        }
+        refreshCollectDotPosChips();
+    }
+
+    /** v556: 按当前值重绘位置药丸选中态（贴边一排 + 高度
+     * 一排），画法与回看时长药丸共用 paintRecallTtlChip。 */
+    private void refreshCollectDotPosChips() {
+        String cur = collectDotPosValue();
+        for (Map.Entry<String, TextView> e
+                : collectDotPosSideChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    cur.startsWith(e.getKey()));
+        }
+        int band = cur.charAt(1) - '0';
+        for (Map.Entry<Integer, TextView> e
+                : collectDotPosHeightChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    e.getKey().intValue() == band);
+        }
+    }
+
+    /** v556: 收纳点位置行——与呼吸点位置行同款式（同底色/
+     * 图标盘/字号），右边是当前值 + 统一「›」箭头，点行在
+     * 卡内就地展开选择区（buildCollectDotPosPanel）。 */
+    private View buildCollectDotPosRow() {
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        rlp.leftMargin = dp(12);
+        rlp.rightMargin = dp(12);
+        row.setLayoutParams(rlp);
+
+        TextView icon = new TextView(this);
+        icon.setText("位");
+        icon.setTextSize(13);
+        icon.setTextColor(Color.rgb(59, 130, 246));
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+        row.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("收纳点位置");
+        title.setTextSize(14);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("收纳点贴哪边、什么高度，也能直接拖小点");
+        sub.setTextSize(11);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        row.addView(texts);
+
+        collectDotPosValue = new TextView(this);
+        collectDotPosValue.setTextSize(13);
+        collectDotPosValue.setTextColor(Color.argb(230, 255, 255, 255));
+        row.addView(collectDotPosValue);
+
+        collectDotPosChev = new TextView(this);
+        collectDotPosChev.setText("›");
+        collectDotPosChev.setTextSize(22);
+        collectDotPosChev.setTextColor(Color.argb(230, 255, 255, 255));
+        collectDotPosChev.setGravity(Gravity.CENTER);
+        collectDotPosChev.setRotation(90f);
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        chlp.leftMargin = dp(6);
+        collectDotPosChev.setLayoutParams(chlp);
+        row.addView(collectDotPosChev);
+        refreshCollectDotPosValue();
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setCollectDotPosExpanded(!collectDotPosExpanded);
+            }
+        });
+        return row;
+    }
+
+    /** v556: 展开/收起收纳点位置的卡内选择区。联动关着
+     * （收纳点关/总开关关）时不许展开。 */
+    private void setCollectDotPosExpanded(boolean expanded) {
+        if (expanded && !(isOn("notif") && isOn("collectDot"))) {
+            expanded = false;
+        }
+        collectDotPosExpanded = expanded;
+        if (collectDotPosPanel != null) {
+            collectDotPosPanel.setVisibility(expanded
+                    ? View.VISIBLE : View.GONE);
+        }
+        if (expanded) {
+            refreshCollectDotPosChips();
+        }
+        setChevronExpanded(collectDotPosChev, expanded);
+    }
+
+    /** v556: 收纳点位置选择区（展开在位置行下面，同子行
+     * 底色/圆角）：「贴边」一排（左边/右边）+「高度」一排
+     * （靠上/中间/靠下），药丸与回看时长共用
+     * buildRecallTtlChip 的样式。点药丸立即落盘+广播，
+     * SystemUI 的收纳点当场挪位。 */
+    private LinearLayout buildCollectDotPosPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(16)));
+        panel.setPadding(dp(12), dp(12), dp(4), dp(4));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(8);
+        plp.leftMargin = dp(12);
+        plp.rightMargin = dp(12);
+        panel.setLayoutParams(plp);
+        panel.setVisibility(View.GONE);
+
+        TextView sideLabel = new TextView(this);
+        sideLabel.setText("贴边");
+        sideLabel.setTextSize(12);
+        sideLabel.setTextColor(Color.argb(200, 255, 255, 255));
+        sideLabel.setPadding(0, 0, 0, dp(6));
+        panel.addView(sideLabel);
+        collectDotPosSideChips.clear();
+        LinearLayout sideRow = new LinearLayout(this);
+        sideRow.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(sideRow);
+        String[][] sides = new String[][]{
+                {"L", "左边"}, {"R", "右边"}};
+        for (final String[] s : sides) {
+            TextView chip = buildRecallTtlChip(s[1]);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String cur = collectDotPosValue();
+                    setCollectDotPos(s[0] + cur.substring(1));
+                }
+            });
+            collectDotPosSideChips.put(s[0], chip);
+            sideRow.addView(chip);
+        }
+
+        TextView heightLabel = new TextView(this);
+        heightLabel.setText("高度");
+        heightLabel.setTextSize(12);
+        heightLabel.setTextColor(Color.argb(200, 255, 255, 255));
+        heightLabel.setPadding(0, dp(2), 0, dp(6));
+        panel.addView(heightLabel);
+        collectDotPosHeightChips.clear();
+        LinearLayout heightRow = new LinearLayout(this);
+        heightRow.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(heightRow);
+        String[] bands = new String[]{"靠上", "中间", "靠下"};
+        for (int b = 0; b < bands.length; b++) {
+            final int band = b;
+            TextView chip = buildRecallTtlChip(bands[b]);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    String cur = collectDotPosValue();
+                    setCollectDotPos(cur.charAt(0)
+                            + String.valueOf(band));
+                }
+            });
+            collectDotPosHeightChips.put(band, chip);
+            heightRow.addView(chip);
+        }
+
+        TextView hint = new TextView(this);
+        hint.setText("也能直接按住收纳点上下拖，松手就记住高度。跟排队点撞档位时排队点会自动让开。");
+        hint.setTextSize(11);
+        hint.setTextColor(Color.argb(170, 255, 255, 255));
+        hint.setPadding(0, dp(2), 0, dp(10));
+        panel.addView(hint);
+
+        refreshCollectDotPosChips();
+        return panel;
+    }
+
+    /** v556: 读收纳点颜色 id（blue/orange/purple/green/
+     * pink/cyan）。存字符串 prefs（与 collectDotPos 同
+     * 路）；读坏了回默认 "blue" 并清掉坏键，不崩。 */
+    private String collectDotColorValue() {
+        try {
+            String v = prefs.getString("collectDotColor", null);
+            if (v != null) {
+                return FeatureFlags.parseCollectDotColor(v);
+            }
+        } catch (Throwable ignored) {
+            try {
+                prefs.edit().remove("collectDotColor").commit();
+            } catch (Throwable ignored2) {
+            }
+        }
+        return "blue";
+    }
+
+    /** v556: 收纳点颜色的人话标签。 */
+    private String collectDotColorLabel(String id) {
+        String c = FeatureFlags.parseCollectDotColor(id);
+        if ("orange".equals(c)) {
+            return "橙";
+        }
+        if ("purple".equals(c)) {
+            return "紫";
+        }
+        if ("green".equals(c)) {
+            return "绿";
+        }
+        if ("pink".equals(c)) {
+            return "粉";
+        }
+        if ("cyan".equals(c)) {
+            return "青";
+        }
+        return "蓝";
+    }
+
+    /** v556: 写收纳点颜色：落盘（字符串）+ 备份 + 广播给
+     * SystemUI 立刻换色重绘 + 刷行上显示。 */
+    private void setCollectDotColor(String id) {
+        String c = FeatureFlags.parseCollectDotColor(id);
+        prefs.edit().putString("collectDotColor", c).commit();
+        SettingsStore.saveAll(this);
+        Intent i = new Intent(
+                "com.chenan.flymebobo.FEATURE_TOGGLE");
+        i.putExtra("key", "collectDotColor");
+        i.putExtra("color", c);
+        sendBroadcast(i);
+        refreshCollectDotColorValue();
+    }
+
+    private void refreshCollectDotColorValue() {
+        if (collectDotColorValue != null) {
+            collectDotColorValue.setText(
+                    collectDotColorLabel(collectDotColorValue()));
+        }
+        refreshCollectDotColorChips();
+    }
+
+    /** v556: 按当前值重绘颜色药丸选中态（六色一排），
+     * 画法与回看时长药丸共用 paintRecallTtlChip。 */
+    private void refreshCollectDotColorChips() {
+        String cur = collectDotColorValue();
+        for (Map.Entry<String, TextView> e
+                : collectDotColorChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    cur.equals(e.getKey()));
+        }
+    }
+
+    /** v556: 收纳点颜色行——与收纳点位置行同款式，图标盘
+     * 换「色」字，右边是当前颜色 + 统一「›」箭头，点行在
+     * 卡内就地展开六色选择区。 */
+    private View buildCollectDotColorRow() {
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        rlp.leftMargin = dp(12);
+        rlp.rightMargin = dp(12);
+        row.setLayoutParams(rlp);
+
+        TextView icon = new TextView(this);
+        icon.setText("色");
+        icon.setTextSize(13);
+        icon.setTextColor(Color.rgb(59, 130, 246));
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+        row.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("收纳点颜色");
+        title.setTextSize(14);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("小点签的颜色，角标不变");
+        sub.setTextSize(11);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        row.addView(texts);
+
+        collectDotColorValue = new TextView(this);
+        collectDotColorValue.setTextSize(13);
+        collectDotColorValue.setTextColor(Color.argb(230, 255, 255, 255));
+        row.addView(collectDotColorValue);
+
+        collectDotColorChev = new TextView(this);
+        collectDotColorChev.setText("›");
+        collectDotColorChev.setTextSize(22);
+        collectDotColorChev.setTextColor(Color.argb(230, 255, 255, 255));
+        collectDotColorChev.setGravity(Gravity.CENTER);
+        collectDotColorChev.setRotation(90f);
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        chlp.leftMargin = dp(6);
+        collectDotColorChev.setLayoutParams(chlp);
+        row.addView(collectDotColorChev);
+        refreshCollectDotColorValue();
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setCollectDotColorExpanded(!collectDotColorExpanded);
+            }
+        });
+        return row;
+    }
+
+    /** v556: 展开/收起收纳点颜色的卡内选择区。联动关着
+     * 时不许展开。 */
+    private void setCollectDotColorExpanded(boolean expanded) {
+        if (expanded && !(isOn("notif") && isOn("collectDot"))) {
+            expanded = false;
+        }
+        collectDotColorExpanded = expanded;
+        if (collectDotColorPanel != null) {
+            collectDotColorPanel.setVisibility(expanded
+                    ? View.VISIBLE : View.GONE);
+        }
+        if (expanded) {
+            refreshCollectDotColorChips();
+        }
+        setChevronExpanded(collectDotColorChev, expanded);
+    }
+
+    /** v556: 收纳点颜色选择区（展开在颜色行下面，同子行
+     * 底色/圆角）：六色药丸一排（蓝/橙/紫/绿/粉/青），
+     * 药丸与回看时长共用 buildRecallTtlChip 的样式。点
+     * 药丸立即落盘+广播，SystemUI 的小点当场换色。 */
+    private LinearLayout buildCollectDotColorPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(16)));
+        panel.setPadding(dp(12), dp(12), dp(4), dp(4));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(8);
+        plp.leftMargin = dp(12);
+        plp.rightMargin = dp(12);
+        panel.setLayoutParams(plp);
+        panel.setVisibility(View.GONE);
+
+        TextView label = new TextView(this);
+        label.setText("颜色");
+        label.setTextSize(12);
+        label.setTextColor(Color.argb(200, 255, 255, 255));
+        label.setPadding(0, 0, 0, dp(6));
+        panel.addView(label);
+        collectDotColorChips.clear();
+        LinearLayout colorRow = new LinearLayout(this);
+        colorRow.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(colorRow);
+        String[][] colors = new String[][]{
+                {"blue", "蓝"}, {"orange", "橙"}, {"purple", "紫"},
+                {"green", "绿"}, {"pink", "粉"}, {"cyan", "青"}};
+        for (final String[] c : colors) {
+            TextView chip = buildRecallTtlChip(c[1]);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    setCollectDotColor(c[0]);
+                }
+            });
+            collectDotColorChips.put(c[0], chip);
+            colorRow.addView(chip);
+        }
+
+        TextView hint = new TextView(this);
+        hint.setText("只换小点签的颜色；红色数字角标不变，排队点的橙/紫是状态色也不跟着变。");
+        hint.setTextSize(11);
+        hint.setTextColor(Color.argb(170, 255, 255, 255));
+        hint.setPadding(0, dp(2), 0, dp(10));
+        panel.addView(hint);
+
+        refreshCollectDotColorChips();
+        return panel;
+    }
+
+        /** v544: 回看保留时长行——跟卡内子开关行同款式（同底色/
+     * 图标盘/字号），右边是当前值 + 统一「›」箭头。点行不再
+     * 弹系统 AlertDialog（v543 的弹窗 wei 说跟咱们风格不符），
+     * 改为在卡内就地展开选择区（buildRecallTtlPanel），照
+     * 安静规则/提示音展开卡的路子：visibility 展开收起 +
+     * 箭头旋转。回看胶囊关着时这行置灰点不动、展开区收起
+     * （refreshRecallLinkage）。 */
+    private View buildRecallTtlRow() {
+        final LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(rounded(Color.argb(60, 255, 255, 255), dp(16)));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.topMargin = dp(8);
+        rlp.leftMargin = dp(12);
+        rlp.rightMargin = dp(12);
+        row.setLayoutParams(rlp);
+
+        TextView icon = new TextView(this);
+        icon.setText("时");
+        icon.setTextSize(13);
+        icon.setTextColor(Color.rgb(59, 130, 246));
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(Color.WHITE, dp(8)));
+        icon.setLayoutParams(new LinearLayout.LayoutParams(dp(30), dp(30)));
+        row.addView(icon);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        tlp.leftMargin = dp(10);
+        texts.setLayoutParams(tlp);
+        TextView title = new TextView(this);
+        title.setText("回看保留时长");
+        title.setTextSize(14);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(title.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        texts.addView(title);
+        TextView sub = new TextView(this);
+        sub.setText("划掉的气泡在边缘留多久");
+        sub.setTextSize(11);
+        sub.setTextColor(Color.argb(230, 255, 255, 255));
+        texts.addView(sub);
+        row.addView(texts);
+
+        recallTtlValue = new TextView(this);
+        recallTtlValue.setTextSize(13);
+        recallTtlValue.setTextColor(Color.argb(230, 255, 255, 255));
+        row.addView(recallTtlValue);
+
+        // v544: 行尾统一「›」箭头（同 buildExpandChevron 的
+        // 字形/朝向约定：收起朝下、展开转上），尺寸按行内
+        // 比例略小一号。
+        recallTtlChev = new TextView(this);
+        recallTtlChev.setText("›");
+        recallTtlChev.setTextSize(22);
+        recallTtlChev.setTextColor(Color.argb(230, 255, 255, 255));
+        recallTtlChev.setGravity(Gravity.CENTER);
+        recallTtlChev.setRotation(90f);
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        chlp.leftMargin = dp(6);
+        recallTtlChev.setLayoutParams(chlp);
+        row.addView(recallTtlChev);
+        refreshRecallTtlValue();
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                setRecallTtlExpanded(!recallTtlExpanded);
+            }
+        });
+        return row;
+    }
+
+    /** v544: 展开/收起回看保留时长的卡内选择区。展开时先按
+     * 当前值重绘药丸选中态；联动关着（回看关/总开关关）时
+     * 不许展开。 */
+    private void setRecallTtlExpanded(boolean expanded) {
+        if (expanded && !(isOn("notif") && isOn("recallCapsule"))) {
+            expanded = false;
+        }
+        recallTtlExpanded = expanded;
+        if (recallTtlPanel != null) {
+            recallTtlPanel.setVisibility(expanded
+                    ? View.VISIBLE : View.GONE);
+        }
+        if (expanded) {
+            refreshRecallTtlChips();
+        }
+        setChevronExpanded(recallTtlChev, expanded);
+    }
+
+    /** v544: 回看保留时长选择区（展开在时长行下面，同子行
+     * 底色/圆角）：预设胶囊药丸两行（1/3/5/10 分钟 + 自定义），
+     * 点预设立即走 v543 的 setRecallTtlMin 落盘+广播；点
+     * 「自定义」滑出输入行（数字框 + 分钟 + 确定），确定后
+     * 夹紧 1–120 生效并收起输入行，非数字 Toast 不保存。 */
+    private LinearLayout buildRecallTtlPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(16)));
+        panel.setPadding(dp(12), dp(12), dp(4), dp(4));
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        plp.topMargin = dp(8);
+        plp.leftMargin = dp(12);
+        plp.rightMargin = dp(12);
+        panel.setLayoutParams(plp);
+        panel.setVisibility(View.GONE);
+
+        recallTtlChips.clear();
+        LinearLayout chipRow1 = new LinearLayout(this);
+        chipRow1.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(chipRow1);
+        int[] presets = new int[]{1, 3, 5, 10};
+        for (final int mins : presets) {
+            TextView chip = buildRecallTtlChip(mins + " 分钟");
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideRecallTtlCustomRow();
+                    setRecallTtlMin(mins);
+                }
+            });
+            recallTtlChips.put(mins, chip);
+            chipRow1.addView(chip);
+        }
+        LinearLayout chipRow2 = new LinearLayout(this);
+        chipRow2.setOrientation(LinearLayout.HORIZONTAL);
+        panel.addView(chipRow2);
+        recallTtlCustomChip = buildRecallTtlChip("自定义");
+        recallTtlCustomChip.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        showRecallTtlCustomRow();
+                    }
+                });
+        chipRow2.addView(recallTtlCustomChip);
+
+        // 自定义输入行：默认收起，点「自定义」药丸才滑出。
+        recallTtlCustomRow = new LinearLayout(this);
+        recallTtlCustomRow.setOrientation(LinearLayout.HORIZONTAL);
+        recallTtlCustomRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams crlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        crlp.topMargin = dp(2);
+        crlp.bottomMargin = dp(8);
+        recallTtlCustomRow.setLayoutParams(crlp);
+        recallTtlCustomRow.setVisibility(View.GONE);
+        recallTtlCustomInput = new EditText(this);
+        recallTtlCustomInput.setInputType(
+                android.text.InputType.TYPE_CLASS_NUMBER);
+        recallTtlCustomInput.setSingleLine(true);
+        recallTtlCustomInput.setTextSize(14);
+        recallTtlCustomInput.setTextColor(Color.WHITE);
+        recallTtlCustomInput.setHint("1–120");
+        recallTtlCustomInput.setHintTextColor(
+                Color.argb(160, 255, 255, 255));
+        recallTtlCustomInput.setBackground(rounded(
+                Color.argb(60, 255, 255, 255), dp(10)));
+        recallTtlCustomInput.setPadding(dp(10), dp(7), dp(10), dp(7));
+        recallTtlCustomInput.setLayoutParams(
+                new LinearLayout.LayoutParams(dp(84),
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+        recallTtlCustomRow.addView(recallTtlCustomInput);
+        TextView unit = new TextView(this);
+        unit.setText("分钟");
+        unit.setTextSize(13);
+        unit.setTextColor(Color.argb(230, 255, 255, 255));
+        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        ulp.leftMargin = dp(8);
+        unit.setLayoutParams(ulp);
+        recallTtlCustomRow.addView(unit);
+        TextView ok = new TextView(this);
+        ok.setText("确定");
+        ok.setTextSize(13);
+        ok.setGravity(Gravity.CENTER);
+        ok.setTextColor(Color.rgb(59, 130, 246));
+        ok.setTypeface(ok.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        ok.setBackground(rounded(Color.WHITE, dp(999)));
+        ok.setPadding(dp(16), dp(7), dp(16), dp(7));
+        LinearLayout.LayoutParams oklp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        oklp.leftMargin = dp(10);
+        ok.setLayoutParams(oklp);
+        ok.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String raw = recallTtlCustomInput.getText() == null
+                        ? "" : recallTtlCustomInput.getText()
+                                .toString().trim();
+                try {
+                    setRecallTtlMin(Integer.parseInt(raw));
+                    hideRecallTtlCustomRow();
+                } catch (NumberFormatException e) {
+                    Toast.makeText(MainActivity.this,
+                            "请输入数字（1–120 分钟）",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        recallTtlCustomRow.addView(ok);
+        panel.addView(recallTtlCustomRow);
+
+        refreshRecallTtlChips();
+        return panel;
+    }
+
+    /** v544: 时长药丸——全圆角小胶囊，与卡内分段控件
+     * （SegControl）同语言。 */
+    private TextView buildRecallTtlChip(String label) {
+        TextView chip = new TextView(this);
+        chip.setText(label);
+        chip.setTextSize(13);
+        chip.setGravity(Gravity.CENTER);
+        chip.setPadding(dp(14), dp(7), dp(14), dp(7));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = dp(8);
+        lp.bottomMargin = dp(8);
+        chip.setLayoutParams(lp);
+        return chip;
+    }
+
+    /** v544: 按当前值重绘药丸选中态：命中的预设（或非预设
+     * 值时的「自定义」）填充卡片主题蓝 + 白字加粗，其余描边
+     * 浅底。自定义输入行打开时「自定义」也算选中。 */
+    private void refreshRecallTtlChips() {
+        int cur = recallTtlMinValue();
+        boolean customOpen = recallTtlCustomRow != null
+                && recallTtlCustomRow.getVisibility() == View.VISIBLE;
+        for (Map.Entry<Integer, TextView> e
+                : recallTtlChips.entrySet()) {
+            paintRecallTtlChip(e.getValue(),
+                    e.getKey().intValue() == cur && !customOpen);
+        }
+        if (recallTtlCustomChip != null) {
+            paintRecallTtlChip(recallTtlCustomChip,
+                    customOpen || !recallTtlChips.containsKey(cur));
+        }
+    }
+
+    private void paintRecallTtlChip(TextView chip, boolean selected) {
+        if (chip == null) {
+            return;
+        }
+        android.graphics.drawable.GradientDrawable d =
+                new android.graphics.drawable.GradientDrawable();
+        d.setCornerRadius(dp(999));
+        if (selected) {
+            d.setColor(Color.rgb(59, 130, 246));
+            d.setStroke(dp(1), Color.WHITE);
+            chip.setTextColor(Color.WHITE);
+            chip.setTypeface(chip.getTypeface(),
+                    android.graphics.Typeface.BOLD);
+        } else {
+            d.setColor(Color.argb(40, 255, 255, 255));
+            d.setStroke(dp(1), Color.argb(160, 255, 255, 255));
+            chip.setTextColor(Color.WHITE);
+            chip.setTypeface(chip.getTypeface(),
+                    android.graphics.Typeface.NORMAL);
+        }
+        chip.setBackground(d);
+    }
+
+    /** v544: 点「自定义」药丸：滑出输入行（预填当前值），
+     * 药丸选中态跟到「自定义」上。 */
+    private void showRecallTtlCustomRow() {
+        if (recallTtlCustomRow == null) {
+            return;
+        }
+        recallTtlCustomRow.setVisibility(View.VISIBLE);
+        if (recallTtlCustomInput != null) {
+            recallTtlCustomInput.setText(
+                    String.valueOf(recallTtlMinValue()));
+            recallTtlCustomInput.selectAll();
+            recallTtlCustomInput.requestFocus();
+        }
+        refreshRecallTtlChips();
+    }
+
+    private void hideRecallTtlCustomRow() {
+        if (recallTtlCustomRow != null) {
+            recallTtlCustomRow.setVisibility(View.GONE);
+        }
+        refreshRecallTtlChips();
+    }
+
+/** v543: 回看保留时长行的联动（wei 的规矩，同打码/销毁）：
+     * 回看胶囊开关关（或通知气泡总开关关）→ 时长行置灰且
+     * 点不动；开 → 恢复。行为层 BubbleWindow 的入栈本来就
+     * 先过 recallCapsule，这里只补 UI。 */
+    private void refreshRecallLinkage() {
+        if (recallTtlRow == null) {
+            return;
+        }
+        boolean link = isOn("notif") && isOn("recallCapsule");
+        recallTtlRow.setEnabled(link);
+        recallTtlRow.setAlpha(link ? 1f : 0.45f);
+        // v544: 展开区跟着置灰；联动关时直接收起（收起即点不动）。
+        if (recallTtlPanel != null) {
+            recallTtlPanel.setAlpha(link ? 1f : 0.45f);
+            if (!link) {
+                setRecallTtlExpanded(false);
+            }
         }
     }
 
@@ -5308,7 +7099,8 @@ public class MainActivity extends Activity {
         texts.addView(title);
         TextView sub = new TextView(this);
         // v527: 卡内吸收了取色/滚动，副标题跟着改。
-        sub.setText("扇子位置 · 胶囊 · 卡片 · 取色与滚动");
+        // v557: 取色/滚动/变淡迁去通知气泡卡，副标题同步去掉。
+        sub.setText("扇子位置 · 胶囊 · 卡片");
         sub.setTextSize(12);
         sub.setTextColor(Color.argb(230, 255, 255, 255));
         // v464: 跟上面功能卡一样高——副标题只一行，不换行（原来
@@ -5345,30 +7137,10 @@ public class MainActivity extends Activity {
             }
         });
 
-        // ---- v527: 胶囊长相（从主页迁入的三个开关，标志位不变）----
-        body.addView(buildZoneLabel("胶囊长相"));
-        Feature tintF = featureFor("autoTint");
-        if (tintF != null) {
-            View r = buildSubSwitch(tintF);
-            subRowViews.put(tintF.key, r);
-            body.addView(r);
-        }
-        body.addView(cardDesc("关掉后全部用默认白色底+黑描边。"
-                + "来电胶囊不受影响。"));
-        Feature scrollF = featureFor("scroll");
-        if (scrollF != null) {
-            View r = buildSubSwitch(scrollF);
-            subRowViews.put(scrollF.key, r);
-            body.addView(r);
-        }
-        body.addView(cardDesc("关掉后超长内容以 … 截断。"));
-        Feature dimF = featureFor("fanAutoDim");
-        if (dimF != null) {
-            View r = buildSubSwitch(dimF);
-            subRowViews.put(dimF.key, r);
-            body.addView(r);
-        }
-        body.addView(cardDesc("点一下扇子恢复并展开。关掉后一直不透明。"));
+        // ---- v557: 胶囊长相三行（取色/滚动/变淡）已按 wei
+        // 指示迁进「通知气泡」卡（parent 改 "notif"，在通用
+        // 建卡循环里随行挂上，含分区标题与行下说明），外观
+        // 卡这里不再重复挂。 ----
 
         // ---- v456: 实时预览（拖滑条自动展开）----
         //  mock 胶囊 + mock 卡片 + mock 扇子，按当前滑条值画。

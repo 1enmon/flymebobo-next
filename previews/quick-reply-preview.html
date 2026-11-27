@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>长按胶囊 · 快捷回复预览</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; background:#eef0f4; color:#1c2434; display:flex; flex-direction:column; align-items:center; padding:14px 10px 30px; }
+  .banner { background:#fff7e0; border:1px dashed #c9a227; border-radius:10px; color:#7a6414; font-size:12.5px; line-height:1.6; padding:8px 12px; margin-bottom:14px; text-align:center; width:100%; max-width:392px; }
+  h3 { width:100%; max-width:392px; font-size:15px; margin:14px 0 8px; }
+  h3 span { color:#7a8699; font-weight:400; font-size:12.5px; }
+  .stage { position:relative; width:100%; max-width:392px; height:400px; border-radius:26px; overflow:hidden; box-shadow:0 10px 30px rgba(30,40,60,.22); background:linear-gradient(160deg,#8fb573 0%,#5d8a63 45%,#33523f 100%); }
+  .clock { position:absolute; top:36px; left:0; right:0; text-align:center; color:rgba(255,255,255,.92); font-size:42px; font-weight:200; }
+  .cap { position:absolute; left:10px; top:110px; width:238px; height:52px; border-radius:26px; background:rgba(28,32,44,.9); display:flex; align-items:center; gap:9px; padding:0 14px 0 6px; color:#fff; box-shadow:0 8px 24px rgba(0,0,0,.35); }
+  .cap .ic { width:40px; height:40px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; }
+  .cap .tt { flex:1; min-width:0; }
+  .cap .t1 { font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cap .t2 { font-size:12px; color:rgba(255,255,255,.72); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .menu { position:absolute; left:10px; top:174px; width:238px; border-radius:20px; background:rgba(24,28,40,.96); box-shadow:0 14px 34px rgba(0,0,0,.4); padding:8px; color:#fff; }
+  .mi { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:12px; font-size:14px; cursor:pointer; }
+  .mi:hover { background:rgba(255,255,255,.08); }
+  .mi .g { width:26px; text-align:center; font-size:15px; }
+  .mi .sub { margin-left:auto; font-size:11.5px; color:rgba(255,255,255,.45); }
+  .replybox { display:none; margin:4px 2px 2px; background:rgba(255,255,255,.09); border-radius:14px; padding:8px; }
+  .replybox.show { display:block; }
+  .replybox .in { display:flex; gap:8px; }
+  .replybox input { flex:1; border:none; outline:none; background:rgba(255,255,255,.14); color:#fff; border-radius:999px; padding:9px 13px; font-size:13.5px; }
+  .replybox input::placeholder { color:rgba(255,255,255,.5); }
+  .replybox button { border:none; background:#22c55e; color:#fff; font-weight:700; font-size:13px; border-radius:999px; padding:0 16px; cursor:pointer; }
+  .sent { display:none; text-align:center; color:#7ee2a8; font-size:13px; padding:8px 0 4px; }
+  .sent.show { display:block; }
+  .hint { position:absolute; left:0; right:0; bottom:12px; text-align:center; color:rgba(255,255,255,.85); font-size:12.5px; padding:0 18px; line-height:1.6; }
+  .note { max-width:392px; margin-top:12px; font-size:13px; line-height:1.75; color:#4a5568; background:#fff; border-radius:12px; padding:12px 14px; box-shadow:0 2px 8px rgba(30,40,60,.06); }
+  .note b { color:#1c2434; }
+</style>
+</head>
+<body>
+  <div class="banner">⚠ 长按胶囊 · 快捷回复预览<br>长按气泡出菜单，回复在胶囊下面就地完成</div>
+
+  <h3>支持回复的应用（短信） <span>点「回复」试试</span></h3>
+  <div class="stage">
+    <div class="clock">15:38</div>
+    <div class="cap">
+      <div class="ic" style="background:#3b82f6">信</div>
+      <div class="tt"><div class="t1">短信 · 妈妈</div><div class="t2">晚上回来吃饭吗？</div></div>
+    </div>
+    <div class="menu">
+      <div class="mi" id="replyBtn"><span class="g">↩</span>回复<span class="sub">不用打开应用</span></div>
+      <div class="replybox" id="replyBox">
+        <div class="in"><input id="replyIn" placeholder="输入回复…"><button id="sendBtn">发送</button></div>
+        <div class="sent" id="sentTip">✓ 已发送，气泡自动收起</div>
+      </div>
+      <div class="mi"><span class="g">✓</span>标为已读</div>
+      <div class="mi"><span class="g">◷</span>稍后提醒<span class="sub">10 分钟后</span></div>
+      <div class="mi"><span class="g">↩</span>收进回看</div>
+      <div class="mi"><span class="g">✕</span>这个应用不再弹</div>
+    </div>
+    <div class="hint">长按 0.4 秒出菜单；点别处收起；菜单项按通知实际支持的能力出现</div>
+  </div>
+
+  <h3>不支持回复的应用（微信） <span>没有死按钮</span></h3>
+  <div class="stage">
+    <div class="clock">15:38</div>
+    <div class="cap">
+      <div class="ic" style="background:#22c55e">微</div>
+      <div class="tt"><div class="t1">微信 · 小陈</div><div class="t2">在吗？文件发我一下</div></div>
+    </div>
+    <div class="menu">
+      <div class="mi"><span class="g">➤</span>打开微信回复<span class="sub">微信不支持直接回复</span></div>
+      <div class="mi"><span class="g">◷</span>稍后提醒<span class="sub">10 分钟后</span></div>
+      <div class="mi"><span class="g">↩</span>收进回看</div>
+      <div class="mi"><span class="g">✕</span>这个应用不再弹</div>
+    </div>
+    <div class="hint">微信通知不带回复动作 →「回复」不出现，换成「打开微信回复」直达会话</div>
+  </div>
+
+  <div class="note"><b>规则：</b>① 菜单只显示<b>真能用</b>的项 — 通知带 RemoteInput 才有「回复」，带已读动作才有「标为已读」；② 回复走系统标准的通知回复通道（跟在通知栏里点回复是同一条路），发完气泡收起；③ 微信/QQ 这类不支持的，第一项换成「打开应用回复」，点了直达会话不绕路；④ 「稍后提醒/收进回看/不再弹」是咱们自己的能力，哪个应用都有；⑤ 带开关，老规矩。</div>
+
+<script>
+  var rb = document.getElementById('replyBox');
+  document.getElementById('replyBtn').addEventListener('click', function () {
+    rb.classList.toggle('show');
+    if (rb.classList.contains('show')) document.getElementById('replyIn').focus();
+  });
+  document.getElementById('sendBtn').addEventListener('click', function () {
+    if (!document.getElementById('replyIn').value) return;
+    document.getElementById('sentTip').classList.add('show');
+  });
+</script>
+</body>
+</html>
