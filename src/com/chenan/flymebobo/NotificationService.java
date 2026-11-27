@@ -1581,7 +1581,7 @@ public class NotificationService extends NotificationListenerService {
                         try {
                             String[] split = trim2.split(":");
                             if (split.length == 2) {
-                                arrayList.add(Long.valueOf((long) ((Long.parseLong(split[0]) * MUSIC_TICK_MS) + (Double.parseDouble(split[1]) * 1000.0d))));
+                                arrayList.add(Long.valueOf((long) ((Long.parseLong(split[0]) * 60000L) + (Double.parseDouble(split[1]) * 1000.0d))));
                                 arrayList2.add(toSimplified(trim3));
                             }
                         } catch (Throwable th) {
@@ -1744,7 +1744,7 @@ public class NotificationService extends NotificationListenerService {
                         try {
                             String[] split = trim2.split(":");
                             if (split.length == 2) {
-                                arrayList.add(Long.valueOf((long) ((Long.parseLong(split[0]) * MUSIC_TICK_MS) + (Double.parseDouble(split[1]) * 1000.0d))));
+                                arrayList.add(Long.valueOf((long) ((Long.parseLong(split[0]) * 60000L) + (Double.parseDouble(split[1]) * 1000.0d))));
                                 arrayList2.add(toSimplified(trim3));
                             }
                         } catch (Throwable th) {
