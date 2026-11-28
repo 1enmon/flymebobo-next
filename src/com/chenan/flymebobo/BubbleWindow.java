@@ -1634,6 +1634,22 @@ public class BubbleWindow {
     private boolean lightMorningShown;
     private boolean lightMorningPillShowing;
     private int lightMorningPulseCount;
+    // v632: 早报过期（wei 定：中午 12 点自动收）。
+    private final Runnable lightMorningExpireRunnable =
+            new Runnable() {
+                @Override
+                public void run() {
+                    if (!lightMorningSeen
+                            && lightMorningBody != null) {
+                        lightMorningSeen = true;
+                        FileLog.i("Morning expired (noon)");
+                        if (lightPanelAdded
+                                && !lightPanelRecallMode) {
+                            rebuildLightPanelRows();
+                        }
+                    }
+                }
+            };
     // v628: 摘要形象（wei 定：默认什么都没有，用户在
     // AI 卡「摘要形象」里自己设）：头像
     // /sdcard/flymebobo/persona.png + 名字 persona.txt，
@@ -4336,6 +4352,26 @@ public class BubbleWindow {
                                     .ACTION_UP:
                             case android.view.MotionEvent
                                     .ACTION_CANCEL: {
+                                // v632: 早报闪着时朝屏幕外
+                                // 横划一下 = 划掉（wei 定）。
+                                if (e.getAction()
+                                        == android.view.MotionEvent
+                                                .ACTION_UP
+                                        && lightMorningPillShowing
+                                        && !dragging) {
+                                    float dx = e.getRawX()
+                                            - downRawX;
+                                    boolean outward =
+                                            FeatureFlags
+                                                    .lightDotRight()
+                                                    ? dx > dp(40)
+                                                    : dx < -dp(40);
+                                    if (outward) {
+                                        dragging = false;
+                                        dismissLightMorningBySwipe();
+                                        return true;
+                                    }
+                                }
                                 boolean wasDrag = dragging;
                                 dragging = false;
                                 if (wasDrag) {
@@ -4508,17 +4544,13 @@ public class BubbleWindow {
         if (blp == null) {
             return;
         }
+        // v632: 角标只在呼吸点上出现，位置恒定在点
+        // 的外侧上角（不再随药丸移动）。
         boolean right = FeatureFlags.lightDotRight();
-        boolean pillShowing = (lightPill != null
-                && lightPill.getVisibility() == View.VISIBLE)
-                || (lightSubPill != null
-                && lightSubPill.getVisibility()
-                        == View.VISIBLE);
-        boolean atStart = right == pillShowing;
         blp.gravity = Gravity.TOP
-                | (atStart ? Gravity.START : Gravity.END);
-        blp.leftMargin = atStart ? dp(5) : 0;
-        blp.rightMargin = atStart ? 0 : dp(5);
+                | (right ? Gravity.END : Gravity.START);
+        blp.leftMargin = right ? 0 : dp(5);
+        blp.rightMargin = right ? dp(5) : 0;
         blp.topMargin = 0;
         lightBadge.setLayoutParams(blp);
     }
@@ -4527,9 +4559,17 @@ public class BubbleWindow {
         if (lightBadge == null) {
             return;
         }
-        // v630: AI 摘要闪烁时角标整个隐藏（wei 定），
-        // 闪停后由收尾路径再调本方法恢复。
-        if (lightAiPillShowing) {
+        // v632: wei 定——角标只存在于呼吸灯（收起）
+        // 状态：任何药丸展开时（到达/歌词/摘要/消息
+        // 提醒/早报/副药丸）角标都不出现；药丸收回后
+        // 由收尾路径再调本方法恢复。推翻 v629 的药丸
+        // 远端角标与 v630 的摘要单例。
+        boolean pillShowing = (lightPill != null
+                && lightPill.getVisibility() == View.VISIBLE)
+                || (lightSubPill != null
+                && lightSubPill.getVisibility()
+                        == View.VISIBLE);
+        if (pillShowing) {
             lightBadge.setVisibility(View.GONE);
             return;
         }
@@ -6943,6 +6983,20 @@ public class BubbleWindow {
         lightMorningCity = city;
         lightMorningSeen = false;
         lightMorningPulseCount = 0;
+        // v632: 排到下一个中午 12 点自动过期。
+        handler.removeCallbacks(lightMorningExpireRunnable);
+        java.util.Calendar nc =
+                java.util.Calendar.getInstance();
+        nc.set(java.util.Calendar.HOUR_OF_DAY, 12);
+        nc.set(java.util.Calendar.MINUTE, 0);
+        nc.set(java.util.Calendar.SECOND, 0);
+        nc.set(java.util.Calendar.MILLISECOND, 0);
+        long nowMs = System.currentTimeMillis();
+        if (nc.getTimeInMillis() <= nowMs) {
+            nc.add(java.util.Calendar.DAY_OF_YEAR, 1);
+        }
+        handler.postDelayed(lightMorningExpireRunnable,
+                nc.getTimeInMillis() - nowMs);
         FileLog.i("Morning report in");
         if (lightPanelAdded && !lightPanelRecallMode) {
             rebuildLightPanelRows();
@@ -6952,8 +7006,9 @@ public class BubbleWindow {
     }
 
     private void maybeFlashMorning() {
+        // v632: wei 定——早报跟摘要一样一直闪，直到打
+        // 开面板看过、被划掉、或中午过期才停。
         if (lightMorningBody == null || lightMorningSeen
-                || lightMorningPulseCount >= 4
                 || lightPanelAdded
                 || lightFlashKey != null || lightPulsing) {
             return;
@@ -6993,6 +7048,24 @@ public class BubbleWindow {
         lightMorningPulseCount++;
         handler.removeCallbacks(lightPulseEndRunnable);
         handler.postDelayed(lightPulseEndRunnable, 11200);
+    }
+
+    /** v632: 早报被划掉——停闪 + 卡片一并收（与看
+     * 过同效，用 seen 标记）。 */
+    private void dismissLightMorningBySwipe() {
+        lightMorningSeen = true;
+        lightMorningPillShowing = false;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        lightPulsing = false;
+        if (lightPill != null) {
+            lightPill.setVisibility(View.GONE);
+        }
+        if (lightDotTab != null) {
+            lightDotTab.setVisibility(View.VISIBLE);
+        }
+        refreshLightDot();
+        updateLightBadge();
+        FileLog.i("Morning swiped away");
     }
 
     /** v631: 早报卡（面板第一张；看过关闭后不再出）。 */
