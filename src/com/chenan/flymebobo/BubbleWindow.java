@@ -3135,12 +3135,20 @@ public class BubbleWindow {
      * 时轻气泡的「时光机」照样工作，面板里读的是同一个
      * recallStack）。排除类型与 pushRecall 一致。 */
     private void lightPushRecall(NotifData d) {
+        lightPushRecall(d, false);
+    }
+
+    private void lightPushRecall(NotifData d,
+            boolean keepInfoCard) {
         if (d == null || !FeatureFlags.lightMode || d.recalled) {
             return;
         }
         // v601: 进时光机的通知若成过信息卡，卡联动收
-        // （提醒一并取消）。
-        removeInfoCardForKey(d.key);
+        // （提醒一并取消）。v649: 全部清除时例外——
+        // 票务卡不是普通通知，不跟着清，提醒也留着。
+        if (!keepInfoCard) {
+            removeInfoCardForKey(d.key);
+        }
         if (d.isMusic || d.isDownload || d.isLive || d.isNavi
                 || d.isBus || d.isCall) {
             return;
@@ -3332,7 +3340,9 @@ public class BubbleWindow {
                 new java.util.ArrayList<>(lightStack);
         lightStack.clear();
         for (NotifData d : copy) {
-            lightPushRecall(d);
+            boolean hasInfo = d.key != null
+                    && lightInfoKeyToId.containsKey(d.key);
+            lightPushRecall(d, hasInfo);
         }
         FileLog.i("Light clearAll -> recall n="
                 + recallStack.size());
