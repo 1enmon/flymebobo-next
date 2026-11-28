@@ -5093,6 +5093,9 @@ public class BubbleWindow {
         stopLightSummaryFlash();
         // v640: 主动提醒同理，开面板即停。
         stopLightNudgeFlash();
+        // v659: 到达闪同理——新通知点开面板就是看
+        // 过了，不再继续闪（wei 定）。
+        stopLightArrivalFlash();
         loadLightInfoCards();
         if (!summoned && !FeatureFlags.lightTodayCard
                 && lightStack.isEmpty()
@@ -7281,6 +7284,25 @@ public class BubbleWindow {
         handler.removeCallbacks(lightPulseEndRunnable);
         handler.postDelayed(lightPulseEndRunnable, 11200);
         FileLog.i("Light msg remind pkg=" + d.pkg);
+    }
+
+    /** v659: 到达闪（含消息提醒闪）收尾——清钥匙、
+     * 撤收尾回调、药丸藏回、小签恢复、角标刷新。
+     * 歌词闪不设 lightFlashKey，不受影响。 */
+    private void stopLightArrivalFlash() {
+        if (lightFlashKey == null) {
+            return;
+        }
+        lightFlashKey = null;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        lightPulsing = false;
+        if (lightPill != null) {
+            lightPill.setVisibility(View.GONE);
+        }
+        if (lightDotTab != null && !lightSubShowing) {
+            lightDotTab.setVisibility(View.VISIBLE);
+        }
+        updateLightBadge();
     }
 
     /** v631: 早报送达（XposedEntry 转发）——存卡 + 排
