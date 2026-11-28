@@ -191,6 +191,31 @@ public class InfoParse {
         return tryBill(all, pkg, when);
     }
 
+    /** v643: 自学规则专用——已知种类时跳过触发词
+     * 门槛，直接按种类提取（提取本身仍严格，提不出
+     * 就返回 null，不硬凑）。 */
+    public static Card tryParseAs(String kind, String pkg,
+            String title, String text, long when) {
+        String all = ((title == null) ? "" : title) + " "
+                + ((text == null) ? "" : text);
+        if (all.trim().length() < 6 || kind == null) {
+            return null;
+        }
+        if ("train".equals(kind)) {
+            return tryTrain(all, pkg, when);
+        }
+        if ("flight".equals(kind)) {
+            return tryFlight(all, pkg, when);
+        }
+        if ("courier".equals(kind)) {
+            return tryCourier(all, pkg, when);
+        }
+        if ("bill".equals(kind)) {
+            return tryBill(all, pkg, when);
+        }
+        return null;
+    }
+
     private static Card base(String kind, String pkg,
             long when) {
         Card c = new Card();

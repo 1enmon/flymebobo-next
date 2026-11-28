@@ -3631,6 +3631,20 @@ public class BubbleWindow {
         // 用截断（实测顺丰单号短正文只到第 11 位数）。
         InfoParse.Card ic = InfoParse.tryParse(d.pkg,
                 d.title, d.fullText(), d.postTime);
+        // v643: 本地没认出 → 先查自学规则（AI 以前教
+        // 过的形状），命中就按种类本地提取出卡。
+        if (ic == null) {
+            String lk = LearnedRules.matchKind(d.pkg,
+                    d.title);
+            if (lk != null) {
+                ic = InfoParse.tryParseAs(lk, d.pkg,
+                        d.title, d.fullText(), d.postTime);
+                if (ic != null) {
+                    FileLog.i("Info card by learned rule "
+                            + lk + " " + d.pkg);
+                }
+            }
+        }
         if (ic == null) {
             // 同 key 重投后内容变了、不再是信息卡：把旧
             // 映射摘掉，行恢复普通显示。
@@ -3794,7 +3808,9 @@ public class BubbleWindow {
                     .append(cur != null ? cur.kind : "")
                     .append('\u0001')
                     .append(t).append('\u0001')
-                    .append(x).append('\n');
+                    .append(x).append('\u0001')
+                    .append(d.pkg == null ? "" : d.pkg)
+                    .append('\n');
             lightInfoAiChecked.add(d.key + "@" + d.postTime);
             n++;
         }

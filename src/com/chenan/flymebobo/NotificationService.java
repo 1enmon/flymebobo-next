@@ -4291,6 +4291,8 @@ public class NotificationService extends NotificationListenerService {
                     String[] split = stringExtra.split("\n");
                     ArrayList arrayList = new ArrayList();
                     ArrayList arrayList2 = new ArrayList();
+                    ArrayList arrayList3 = new ArrayList();
+                    ArrayList arrayList4 = new ArrayList();
                     StringBuilder sb = new StringBuilder();
                     sb.append("下面是手机通知收纳盒里的").append(split.length).append("条通知，逐条处理后只输出一个 JSON 数组，不要解释。\n");
                     for (String str : split) {
@@ -4298,6 +4300,9 @@ public class NotificationService extends NotificationListenerService {
                         if (split2.length >= 4) {
                             arrayList.add(split2[0]);
                             arrayList2.add(split2[1]);
+                            arrayList3.add(split2[2]);
+                            arrayList4.add(split2.length >= 5
+                                    ? split2[4] : "");
                             sb.append("[").append(arrayList.size() - 1).append("]");
                             if (!split2[1].isEmpty()) {
                                 sb.append("(本地已识别为 ").append(split2[1]).append("，请核对)");
@@ -4382,6 +4387,20 @@ public class NotificationService extends NotificationListenerService {
                                     r33 = parse != null ? parse.getTime() : 0L;
                                 } catch (Throwable th) {
                                 }
+                            }
+                            // v643: 本地没认出、AI 认出
+                            // 了 → 学成本地规则（只轻气
+                            // 泡这条线，经典不碰）。
+                            if (((String) arrayList2
+                                    .get(optInt)).isEmpty()
+                                    && !"none".equals(
+                                            optString)) {
+                                LearnedRules.learn(
+                                        (String) arrayList4
+                                                .get(optInt),
+                                        (String) arrayList3
+                                                .get(optInt),
+                                        optString);
                             }
                             sb3.append((String) arrayList.get(optInt)).append("\u0001").append(optString).append("\u0001").append(jSONObject4.optString("title", "")).append("\u0001").append(jSONObject4.optString("sub", "")).append("\u0001").append(r33).append("\u0001").append(jSONObject4.optString("copy", "")).append("\n");
                         }
