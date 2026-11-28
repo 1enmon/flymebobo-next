@@ -379,6 +379,11 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_AI_RESULT);
         filter.addAction(
                 NotificationService.ACTION_AI_INFO_RESULT);
+        // v645: 识屏 OCR 广播探针（验证包）——Aicy 的
+        // AIBar 截屏 OCR 后广播全文，先验证收不收得到。
+        filter.addAction(
+                "com.meizu.voiceassistant"
+                        + ".ACTION_SEND_CAPTURE_CURRENT_SCREEN");
         filter.addAction(MorningReceiver.ACTION_REPORT);
         filter.addAction(MorningReceiver.ACTION_NUDGE);
         filter.addAction(NotificationService.ACTION_LIGHT_OPEN);
@@ -1265,6 +1270,20 @@ public class XposedEntry extends XposedModule {
                     if (bw != null) {
                         bw.onButlerNudge(
                                 intent.getStringExtra("text"));
+                    }
+                    return;
+                }
+                // v645: 识屏 OCR 探针——只记日志验证。
+                if (("com.meizu.voiceassistant"
+                        + ".ACTION_SEND_CAPTURE_CURRENT_SCREEN")
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onScreenOcrProbe(
+                                intent.getStringExtra(
+                                        "KEY_APP_NAME"),
+                                intent.getStringExtra(
+                                        "KEY_OCR_DATA"));
                     }
                     return;
                 }

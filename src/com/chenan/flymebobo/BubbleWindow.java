@@ -7508,6 +7508,24 @@ public class BubbleWindow {
     /** v640: 管家主动提醒入口（傍晚巡检挑出的那件
      * 事）——一直闪到打开面板或划掉，优先级低于摘
      * 要、高于早报。 */
+    /** v645: 识屏 OCR 探针（验证包）——收到 Aicy
+     * AIBar 的截屏 OCR 广播时记一行日志：来源应用 +
+     * 全文长度 + 开头一截。验证完即拆。 */
+    public void onScreenOcrProbe(String appName,
+            String ocrData) {
+        String head = "";
+        if (ocrData != null) {
+            head = ocrData.replace('\n', ' ')
+                    .replace('\r', ' ');
+            if (head.length() > 120) {
+                head = head.substring(0, 120);
+            }
+        }
+        FileLog.i("OcrProbe app=" + appName + " len="
+                + (ocrData == null ? -1 : ocrData.length())
+                + " head=" + head);
+    }
+
     public void onButlerNudge(String text) {
         if (text == null || text.trim().isEmpty()) {
             return;
