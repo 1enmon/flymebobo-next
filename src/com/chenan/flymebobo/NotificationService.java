@@ -79,6 +79,13 @@ public class NotificationService extends NotificationListenerService {
     public static final String ACTION_AI_ANALYZE = "com.chenan.flymebobo.AI_ANALYZE";
     public static final String ACTION_AI_RESULT = "com.chenan.flymebobo.AI_RESULT";
     public static final String ACTION_AI_INFO_RESULT = "com.chenan.flymebobo.AI_INFO_RESULT";
+    // v647: 手动识别（识屏栏按钮 / 选中文字 / 分享 /
+    // 快捷方式）——SystemUI 本地没认出时托 NS 用 AI
+    // 兜底，结果回 SystemUI 弹悬浮卡。
+    public static final String ACTION_MANUAL_RECOGNIZE = "com.chenan.flymebobo.MANUAL_RECOGNIZE";
+    public static final String ACTION_MANUAL_RESULT = "com.chenan.flymebobo.MANUAL_RESULT";
+    public static final String ACTION_MANUAL_TEXT = "com.chenan.flymebobo.MANUAL_TEXT";
+    public static final String ACTION_MANUAL_SHOW_INPUT = "com.chenan.flymebobo.MANUAL_SHOW_INPUT";
     public static final String ACTION_INFO_REMIND = "com.chenan.flymebobo.INFO_REMIND";
     public static final String ACTION_INFO_REMIND_CANCEL = "com.chenan.flymebobo.INFO_REMIND_CANCEL";
     public static final String ACTION_MUSIC_CONTROL = "com.chenan.flymebobo.MUSIC_CONTROL";
@@ -2978,6 +2985,7 @@ public class NotificationService extends NotificationListenerService {
     public void onListenerConnected() {
         FileLog.i("Listener connected, FileLog ready");
         ensureMorningReceiver();
+        ensureManualReceiver();
         FileLog.i("Version: " + appVersion());
         startUpdateCheck();
         try {
@@ -3254,6 +3262,51 @@ public class NotificationService extends NotificationListenerService {
                     }, "morning-prep").start();
                 }
             };
+
+    private volatile boolean manualReceiverReady = false;
+
+    private final android.content.BroadcastReceiver
+            manualReceiver =
+            new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(
+                        android.content.Context c,
+                        final android.content.Intent intent) {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            handleManualRecognize(intent);
+                        }
+                    }, "manual-recognize").start();
+                }
+            };
+
+    private void ensureManualReceiver() {
+        if (manualReceiverReady) {
+            return;
+        }
+        manualReceiverReady = true;
+        try {
+            android.content.IntentFilter filter =
+                    new android.content.IntentFilter(
+                            ACTION_MANUAL_RECOGNIZE);
+            try {
+                java.lang.reflect.Method m = android.content
+                        .Context.class.getMethod(
+                                "registerReceiver",
+                                android.content.BroadcastReceiver
+                                        .class,
+                                android.content.IntentFilter
+                                        .class,
+                                Integer.TYPE);
+                m.invoke(this, manualReceiver, filter, 2);
+            } catch (Throwable t) {
+                registerReceiver(manualReceiver, filter);
+            }
+        } catch (Throwable t) {
+            FileLog.i("Manual receiver fail " + t);
+        }
+    }
 
     private void ensureMorningReceiver() {
         if (morningReceiverReady) {
@@ -4183,6 +4236,147 @@ public class NotificationService extends NotificationListenerService {
     /** v614: 一次 OpenAI 兼容 chat 调用（系统词固定
      * 为通知整理助手），返回 message content；任何
      * 失败返回 null 并记日志。 */
+    /** v647: 手动识别的 AI 兜底——SystemUI 本地
+     * 规则没认出的文字托过来，用当前 AI 通道判
+     * 种类（票四类 / 取件取餐码）；票类还要再过
+     * 一遍本地 tryParseAs 拿到票面字段才算数，
+     * 码必须能在原文里找到才算数，验证码永不
+     * 算。结果经 ACTION_MANUAL_RESULT 回 SystemUI。 */
+    private void handleManualRecognize(Intent intent) {
+        final String text = intent.getStringExtra("text");
+        if (text == null || text.trim().isEmpty()) {
+            sendManualResult("none", text, null, null);
+            return;
+        }
+        SharedPreferences features =
+                getSharedPreferences("flymebobo_features", 0);
+        if (!features.getBoolean("aiEnabled", false)) {
+            sendManualResult("none", text, null, null);
+            return;
+        }
+        SharedPreferences aiPrefs =
+                getSharedPreferences("flymebobo_ai", 0);
+        final String key = AiKey.decrypt(
+                aiPrefs.getString("aiKey", ""));
+        if (!aiUseAicy()
+                && (key == null || key.isEmpty())) {
+            sendManualResult("none", text, null, null);
+            return;
+        }
+        final String base = aiPrefs.getString("aiBase",
+                "https://api.deepseek.com");
+        final String model = aiPrefs.getString("aiModel",
+                "deepseek-chat");
+        final String clip = text.length() > 1500
+                ? text.substring(0, 1500) : text;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String kind = "none";
+                InfoParse.Card card = null;
+                String[] codeArr = null;
+                try {
+                    String prompt = "下面是一段文字（可能"
+                            + "来自通知或屏幕识别），判断它"
+                            + "是不是火车票、机票、快递、"
+                            + "账单，或包含取件码/取餐码。"
+                            + "只输出一个 JSON 对象，不要"
+                            + "解释。\n格式：{\"kind\":"
+                            + "\"train/flight/courier/bill"
+                            + "/code/none\",\"code\":\"码"
+                            + "或空\",\"label\":\"取件码"
+                            + "/取餐码或空\"}\nkind 定义："
+                            + "train=火车票/高铁票订单，"
+                            + "flight=机票/航班订单，courier"
+                            + "=快递物流，bill=信用卡账单，"
+                            + "code=含取件码或取餐码（且不"
+                            + "属于上面四类），都不是填 "
+                            + "none。验证码、校验码、动态码"
+                            + "不算 code，填 none。\n文字：\n"
+                            + clip;
+                    String out = aiChatOnce(base, key, model,
+                            prompt);
+                    if (out != null) {
+                        int a = out.indexOf('{');
+                        int b = out.lastIndexOf('}');
+                        if (a >= 0 && b > a) {
+                            org.json.JSONObject jo =
+                                    new org.json.JSONObject(
+                                            out.substring(
+                                                    a, b + 1));
+                            String k = jo.optString(
+                                    "kind", "none");
+                            if ("train".equals(k)
+                                    || "flight".equals(k)
+                                    || "courier".equals(k)
+                                    || "bill".equals(k)) {
+                                InfoParse.Card c2 =
+                                        InfoParse.tryParseAs(
+                                                k, "screen", "",
+                                                text,
+                                                System
+                                                        .currentTimeMillis());
+                                if (c2 != null) {
+                                    kind = k;
+                                    card = c2;
+                                }
+                            } else if ("code".equals(k)) {
+                                String code = jo.optString(
+                                        "code", "").trim();
+                                String label = jo.optString(
+                                        "label", "取件码")
+                                        .trim();
+                                if (!code.isEmpty()
+                                        && code.length() <= 12
+                                        && text.contains(code)
+                                        && code.matches(
+                                                ".*\\d.*")) {
+                                    kind = "code";
+                                    codeArr = new String[]{
+                                            code,
+                                            label.isEmpty()
+                                                    ? "取件码"
+                                                    : label,
+                                            ""};
+                                }
+                            }
+                        }
+                    }
+                } catch (Throwable t) {
+                    FileLog.i("Manual recognize ai err " + t);
+                }
+                sendManualResult(kind, text, card, codeArr);
+            }
+        }, "manual-ai").start();
+    }
+
+    private void sendManualResult(String kind, String text,
+            InfoParse.Card card, String[] codeArr) {
+        try {
+            Intent it = new Intent(ACTION_MANUAL_RESULT);
+            it.putExtra("kind", kind);
+            it.putExtra("text", text == null ? "" : text);
+            if (card != null) {
+                it.putExtra("cTitle", card.title);
+                it.putExtra("cSub", card.sub);
+                it.putExtra("cExtra", card.extra);
+                it.putExtra("cCopy", card.copyText);
+                it.putExtra("cEvent", card.eventTime);
+                it.putExtra("cFp", card.fp);
+                it.putExtra("cId", card.id);
+            }
+            if (codeArr != null) {
+                it.putExtra("code", codeArr[0]);
+                it.putExtra("codeLabel", codeArr[1]);
+                it.putExtra("cabinet",
+                        codeArr.length > 2 ? codeArr[2] : "");
+            }
+            sendBroadcast(it);
+        } catch (Throwable t) {
+            FileLog.i("Manual result send fail " + t);
+        }
+    }
+
     private String aiChatOnce(String apiBase, String apiKey,
             String model, String userText) {
         // v626: 系统 AI 通道优先借道 Aicy；借道失败且填过

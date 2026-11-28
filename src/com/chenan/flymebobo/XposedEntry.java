@@ -122,6 +122,11 @@ public class XposedEntry extends XposedModule {
         aicyInitialized = true;
         try {
             new AicyBorrow(this, app, aicyClassLoader).install();
+        try {
+            new ScreenOcrRelay(app).install();
+        } catch (Throwable t) {
+            log(6, TAG, "ScreenOcrRelay install failed", t);
+        }
         } catch (Throwable t) {
             log(6, TAG, "AicyBorrow install failed", t);
         }
@@ -379,6 +384,15 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_AI_RESULT);
         filter.addAction(
                 NotificationService.ACTION_AI_INFO_RESULT);
+        filter.addAction(
+                NotificationService.ACTION_MANUAL_RESULT);
+        filter.addAction(
+                NotificationService.ACTION_MANUAL_TEXT);
+        filter.addAction(
+                NotificationService.ACTION_MANUAL_SHOW_INPUT);
+        filter.addAction(ScreenOcrRelay.ACTION_OCR_TEXT);
+        filter.addAction(
+                RecognizeTileService.ACTION_TILE_RECOGNIZE);
         // v645: 识屏 OCR 广播探针（验证包）——Aicy 的
         // AIBar 截屏 OCR 后广播全文，先验证收不收得到。
         filter.addAction(
@@ -476,6 +490,54 @@ public class XposedEntry extends XposedModule {
                         // v564: unlocked — the light dot may
                         // show again too.
                         bw.refreshLightDot();
+                    }
+                    return;
+                }
+                if (NotificationService.ACTION_MANUAL_RESULT
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw =
+                            BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onManualResult(intent);
+                    }
+                    return;
+                }
+                if (NotificationService.ACTION_MANUAL_TEXT
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw =
+                            BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onScreenOcrText("manual",
+                                intent.getStringExtra("text"));
+                    }
+                    return;
+                }
+                if (NotificationService.ACTION_MANUAL_SHOW_INPUT
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw =
+                            BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.showManualInput();
+                    }
+                    return;
+                }
+                if (ScreenOcrRelay.ACTION_OCR_TEXT.equals(
+                        intent.getAction())) {
+                    BubbleWindow bw =
+                            BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onScreenOcrText(
+                                intent.getStringExtra("app"),
+                                intent.getStringExtra("text"));
+                    }
+                    return;
+                }
+                if (RecognizeTileService.ACTION_TILE_RECOGNIZE
+                        .equals(intent.getAction())) {
+                    BubbleWindow bw =
+                            BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.startScreenRecognize();
                     }
                     return;
                 }

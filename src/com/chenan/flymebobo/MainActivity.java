@@ -1143,6 +1143,50 @@ public class MainActivity extends Activity {
         // 两页，只要设置页（三栏外壳与镜像页代码留树里
         // 停用，面板里的收纳/时光机不受影响）。
         setContentView(scroll);
+
+        // v647: 桌面快捷方式「输入文字识别」——点开
+        // 弹悬浮输入小窗（SystemUI 侧），不进 App
+        // 界面。每次开设置页按开关状态刷新一次。
+        try {
+            android.content.pm.ShortcutManager sm =
+                    (android.content.pm.ShortcutManager)
+                            getSystemService(
+                                    android.content.pm
+                                            .ShortcutManager
+                                            .class);
+            if (sm != null) {
+                java.util.List<android.content.pm
+                        .ShortcutInfo> dyn =
+                        new java.util.ArrayList<>();
+                if (isOn("manualRecognize")) {
+                    Intent scIntent = new Intent(this,
+                            RecognizeActivity.class);
+                    scIntent.setAction(
+                            RecognizeActivity.ACTION_INPUT);
+                    android.content.pm.ShortcutInfo si =
+                            new android.content.pm
+                                    .ShortcutInfo.Builder(
+                                            this,
+                                            "recognize_input")
+                                    .setShortLabel(
+                                            "输入文字识别")
+                                    .setLongLabel(
+                                            "粘贴文字识别票和码")
+                                    .setIcon(android.graphics
+                                            .drawable.Icon
+                                            .createWithResource(
+                                                    this,
+                                                    android.R
+                                                            .drawable
+                                                            .ic_menu_search))
+                                    .setIntent(scIntent)
+                                    .build();
+                    dyn.add(si);
+                }
+                sm.setDynamicShortcuts(dyn);
+            }
+        } catch (Throwable ignored) {
+        }
         // v572: 切换动画的入场衔接——新页先盖一层新底色，
         // 380ms 淡出，落点与动画的漫换色不断层。
         if (pendingModeAnimIn) {
@@ -4172,6 +4216,14 @@ public class MainActivity extends Activity {
                 null));
         lightInfoSubViews.put("infoRemind", infoRemindRow);
         body.addView(infoRemindRow);
+        View manualRecRow = buildSubSwitch(new Feature(
+                "manualRecognize", "手动识别入口",
+                "控制中心磁贴点一下识别当前屏；选中文字 / 分享 / 快捷方式也能送进来认",
+                "", Color.rgb(8, 145, 178), "识", true,
+                null));
+        lightInfoSubViews.put("manualRecognize",
+                manualRecRow);
+        body.addView(manualRecRow);
         TextView leadLabel = new TextView(this);
         leadLabel.setText("提醒提前量");
         leadLabel.setTextSize(12.5f);

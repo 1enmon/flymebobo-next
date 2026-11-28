@@ -24,6 +24,7 @@ public class FeatureFlags {
     public static volatile boolean music = true;
     public static volatile boolean dl = true;
     public static volatile boolean code = true;
+    public static volatile boolean manualRecognize = true;
     public static volatile boolean live = true;
     public static volatile boolean card = true;
     public static volatile boolean scroll = true;
@@ -461,6 +462,8 @@ public class FeatureFlags {
             dl = enabled;
         } else if ("code".equals(key)) {
             code = enabled;
+        } else if ("manualRecognize".equals(key)) {
+            manualRecognize = enabled;
         } else if ("live".equals(key)) {
             live = enabled;
         } else if ("card".equals(key)) {
@@ -592,6 +595,8 @@ public class FeatureFlags {
             music = fileOrPrefsBool("music", prefs, true);
             dl = fileOrPrefsBool("dl", prefs, true);
             code = fileOrPrefsBool("code", prefs, true);
+            manualRecognize = fileOrPrefsBool(
+                    "manualRecognize", prefs, true);
             live = fileOrPrefsBool("live", prefs, true);
             card = fileOrPrefsBool("card", prefs, true);
             scroll = fileOrPrefsBool("scroll", prefs, true);

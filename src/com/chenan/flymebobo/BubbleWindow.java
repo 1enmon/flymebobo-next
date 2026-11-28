@@ -90,6 +90,15 @@ public class BubbleWindow {
     private static final int DOCK_EDGE_DP = 0;
 
     private Context app;
+    // v647: 手动识别悬浮卡 / 提示药丸 / 输入小窗。
+    private View manualOverlay;
+    private View manualInputOverlay;
+    private android.widget.TextView manualPill;
+    private NotifData manualPending;
+    private int manualPillSeq;
+    private View scanOverlay;
+    private volatile boolean scanRunning;
+    private int scanSeq;
     private WindowManager wm;
     private FrameLayout root;
     private FrameLayout dock;
@@ -16951,6 +16960,616 @@ public class BubbleWindow {
             }
         });
         anim.start();
+    }
+
+    // ---------- v647 手动识别（识屏 / 文字） ----------
+
+    /** 磁贴入口：点一下识别当前屏。起扫光动画，
+     * 广播让 Aicy 进程里的 ScreenOcrRelay 触发
+     * 系统识屏截屏 OCR；结果经 onScreenOcrText
+     * 回来（那边 12 秒超时兜底，这边 13 秒再兜
+     * 一层）。 */
+    public void startScreenRecognize() {
+        if (!FeatureFlags.manualRecognize || scanRunning) {
+            return;
+        }
+        scanRunning = true;
+        final int seq = ++scanSeq;
+        showScanAnimation();
+        try {
+            app.sendBroadcast(new Intent(
+                    ScreenOcrRelay.ACTION_OCR_REQUEST));
+        } catch (Throwable t) {
+            FileLog.i("Tile recognize send fail " + t);
+        }
+        FileLog.i("Tile recognize start");
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (scanRunning && seq == scanSeq) {
+                    stopScanAnimation();
+                    showManualPill("没拿到屏幕文字", false);
+                }
+            }
+        }, 13000);
+    }
+
+    /** 扫光动画：全屏细框 + 一道蓝光从上往下
+     * 反复扫（约 1.5 秒一趟），不挡触摸。 */
+    private void showScanAnimation() {
+        stopScanAnimationViewOnly();
+        try {
+            final FrameLayout rootF = new FrameLayout(app);
+            android.graphics.drawable.GradientDrawable frame =
+                    new android.graphics.drawable
+                            .GradientDrawable();
+            frame.setColor(Color.TRANSPARENT);
+            frame.setStroke(dp(2),
+                    Color.argb(180, 59, 130, 246));
+            frame.setCornerRadius(dp(22));
+            FrameLayout.LayoutParams frameLp =
+                    new FrameLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT);
+            int inset = dp(10);
+            frameLp.setMargins(inset, inset, inset, inset);
+            View frameV = new View(app);
+            frameV.setBackground(frame);
+            rootF.addView(frameV, frameLp);
+            final View line = new View(app);
+            android.graphics.drawable.GradientDrawable lg =
+                    new android.graphics.drawable
+                            .GradientDrawable(
+                                    android.graphics.drawable
+                                            .GradientDrawable
+                                            .Orientation
+                                            .TOP_BOTTOM,
+                                    new int[]{
+                                            Color.argb(0, 59, 130, 246),
+                                            Color.argb(110, 59, 130, 246),
+                                            Color.argb(0, 59, 130, 246)});
+            line.setBackground(lg);
+            final int lineH = dp(72);
+            FrameLayout.LayoutParams lineLp =
+                    new FrameLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            lineH);
+            rootF.addView(line, lineLp);
+            WindowManager.LayoutParams lp =
+                    new WindowManager.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            WindowManager.LayoutParams
+                                    .TYPE_APPLICATION_OVERLAY,
+                            WindowManager.LayoutParams
+                                    .FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams
+                                            .FLAG_NOT_TOUCHABLE,
+                            android.graphics.PixelFormat
+                                    .TRANSLUCENT);
+            wm.addView(rootF, lp);
+            scanOverlay = rootF;
+            final int screenH = app.getResources()
+                    .getDisplayMetrics().heightPixels;
+            final long start =
+                    android.os.SystemClock.uptimeMillis();
+            final Runnable tick = new Runnable() {
+                @Override
+                public void run() {
+                    if (!scanRunning
+                            || scanOverlay != rootF) {
+                        return;
+                    }
+                    long el = android.os.SystemClock
+                            .uptimeMillis() - start;
+                    float phase = (el % 1500L) / 1500f;
+                    line.setTranslationY(
+                            phase * (screenH - lineH));
+                    handler.postDelayed(this, 16);
+                }
+            };
+            handler.post(tick);
+        } catch (Throwable t) {
+            FileLog.i("Scan anim err " + t);
+        }
+    }
+
+    private void stopScanAnimationViewOnly() {
+        if (scanOverlay != null) {
+            try {
+                wm.removeView(scanOverlay);
+            } catch (Throwable ignored) {
+            }
+            scanOverlay = null;
+        }
+    }
+
+    private void stopScanAnimation() {
+        scanRunning = false;
+        stopScanAnimationViewOnly();
+    }
+
+    /** 识别入口：识屏 OCR 全文（AiBarButtonHook 转发）
+     * 或 RecognizeActivity 送来的文字。本地规则先认
+     * （信息卡 / 码），都没认出且 AI 开着时托 NS 兜底。 */
+    public void onScreenOcrText(String srcApp, String text) {
+        stopScanAnimation();
+        if (!FeatureFlags.manualRecognize) {
+            return;
+        }
+        try {
+            if (text == null || text.trim().isEmpty()) {
+                showManualPill("没拿到屏幕文字", false);
+                FileLog.i("Manual ocr empty app=" + srcApp);
+                return;
+            }
+            final String body = text.trim();
+            FileLog.i("Manual ocr len=" + body.length()
+                    + " app=" + srcApp);
+            InfoParse.Card card = InfoParse.tryParse(
+                    "screen", "", body,
+                    System.currentTimeMillis());
+            if (card != null) {
+                showManualCard(buildLightInfoCard(card),
+                        manualEntry(body, card.title));
+                return;
+            }
+            String[] code = extractCode("", body);
+            if (code != null) {
+                NotifData d = manualEntry(body, code[1]);
+                d.code = code[0];
+                d.codeLabel = code[1];
+                d.cabinet = code.length > 2 ? code[2] : "";
+                d.isPickupCode = "取件码".equals(code[1]);
+                showManualCard(buildLightCodeCard(d), d);
+                return;
+            }
+            if (FeatureFlags.aiEnabled) {
+                showManualPill("识别中…", true);
+                Intent it = new Intent(
+                        NotificationService
+                                .ACTION_MANUAL_RECOGNIZE);
+                it.putExtra("text", body);
+                app.sendBroadcast(it);
+                FileLog.i("Manual recognize to ai");
+            } else {
+                showManualPill("没认出票或码", false);
+            }
+        } catch (Throwable t) {
+            FileLog.i("Manual ocr err " + t);
+        }
+    }
+
+    /** NS 的 AI 兜底结果回来：拼卡弹悬浮卡，
+     * none 就给个短提示。 */
+    public void onManualResult(Intent intent) {
+        hideManualPill();
+        if (!FeatureFlags.manualRecognize) {
+            return;
+        }
+        try {
+            String kind = intent.getStringExtra("kind");
+            String text = intent.getStringExtra("text");
+            if (text == null) {
+                text = "";
+            }
+            if ("train".equals(kind) || "flight".equals(kind)
+                    || "courier".equals(kind)
+                    || "bill".equals(kind)) {
+                InfoParse.Card card = new InfoParse.Card();
+                card.kind = kind;
+                card.id = intent.getStringExtra("cId");
+                card.title = intent.getStringExtra("cTitle");
+                card.sub = intent.getStringExtra("cSub");
+                card.extra = intent.getStringExtra("cExtra");
+                card.copyText =
+                        intent.getStringExtra("cCopy");
+                card.eventTime = intent.getLongExtra(
+                        "cEvent", 0L);
+                card.fp = intent.getStringExtra("cFp");
+                card.ai = true;
+                card.source = "screen";
+                showManualCard(buildLightInfoCard(card),
+                        manualEntry(text, card.title));
+            } else if ("code".equals(kind)) {
+                String code = intent.getStringExtra("code");
+                String label =
+                        intent.getStringExtra("codeLabel");
+                if (code == null || code.isEmpty()) {
+                    showManualPill("没认出票或码", false);
+                    return;
+                }
+                NotifData d = manualEntry(text, label);
+                d.code = code;
+                d.codeLabel = label == null
+                        ? "取件码" : label;
+                d.cabinet = intent.getStringExtra("cabinet");
+                d.isPickupCode = "取件码".equals(d.codeLabel);
+                showManualCard(buildLightCodeCard(d), d);
+            } else {
+                showManualPill("没认出票或码", false);
+            }
+        } catch (Throwable t) {
+            FileLog.i("Manual result err " + t);
+        }
+    }
+
+    private NotifData manualEntry(String body,
+            String titleHint) {
+        String disp = body.length() > 120
+                ? body.substring(0, 120) : body;
+        NotifData d = new NotifData(
+                "screenocr:" + System.currentTimeMillis(),
+                "com.kai.screenocr",
+                titleHint == null || titleHint.isEmpty()
+                        ? "识屏识别" : titleHint,
+                disp, System.currentTimeMillis(), null, null);
+        d.bigText = body;
+        d.srcPkg = "com.chenan.flymebobo";
+        d.srcLabel = "识屏识别";
+        return d;
+    }
+
+    private android.graphics.drawable.GradientDrawable
+            manualCardBg(int radiusDp) {
+        android.graphics.drawable.GradientDrawable g =
+                new android.graphics.drawable
+                        .GradientDrawable();
+        g.setColor(lpWhite() ? Color.WHITE
+                : Color.rgb(30, 36, 48));
+        g.setCornerRadius(dp(radiusDp));
+        if (lpWhite()) {
+            g.setStroke(dp(1), Color.rgb(15, 23, 42));
+        }
+        return g;
+    }
+
+    private android.widget.TextView manualButton(
+            String label, boolean accent) {
+        android.widget.TextView b =
+                new android.widget.TextView(app);
+        b.setText(label);
+        b.setTextSize(14);
+        b.setGravity(android.view.Gravity.CENTER);
+        b.setPadding(dp(16), dp(10), dp(16), dp(10));
+        android.graphics.drawable.GradientDrawable g =
+                new android.graphics.drawable
+                        .GradientDrawable();
+        if (accent) {
+            g.setColor(Color.rgb(37, 99, 235));
+            b.setTextColor(Color.WHITE);
+        } else {
+            g.setColor(lpWhite()
+                    ? Color.rgb(241, 245, 249)
+                    : Color.rgb(51, 65, 85));
+            b.setTextColor(lpTitleC());
+        }
+        g.setCornerRadius(dp(12));
+        b.setBackground(g);
+        return b;
+    }
+
+    /** 悬浮结果卡：面板同款卡片 + 「收进面板 /
+     * 完成」按钮，45 秒没管自动收。 */
+    private void showManualCard(View cardView,
+            NotifData pending) {
+        hideManualPill();
+        dismissManualCard();
+        if (cardView == null) {
+            showManualPill("没认出票或码", false);
+            return;
+        }
+        manualPending = pending;
+        try {
+            android.widget.LinearLayout col = new android.widget.LinearLayout(app);
+            col.setOrientation(android.widget.LinearLayout.VERTICAL);
+            col.setBackground(manualCardBg(24));
+            col.setPadding(dp(14), dp(12), dp(14), dp(12));
+            android.widget.TextView head =
+                    new android.widget.TextView(app);
+            head.setText("识别结果");
+            head.setTextSize(12);
+            head.setTextColor(lpWhite()
+                    ? Color.rgb(100, 116, 139)
+                    : Color.argb(160, 255, 255, 255));
+            col.addView(head);
+            android.widget.LinearLayout.LayoutParams cardLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardLp.topMargin = dp(8);
+            col.addView(cardView, cardLp);
+            android.widget.LinearLayout row = new android.widget.LinearLayout(app);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowLp.topMargin = dp(12);
+            if (FeatureFlags.lightMode) {
+                android.widget.TextView keep =
+                        manualButton("收进面板", true);
+                keep.setOnClickListener(
+                        new View.OnClickListener() {
+                            @Override
+                            public void onClick(View v) {
+                                NotifData d = manualPending;
+                                dismissManualCard();
+                                if (d != null) {
+                                    lightCollect(d);
+                                    android.widget.Toast
+                                            .makeText(app,
+                                                    "已收进面板",
+                                                    android.widget
+                                                            .Toast
+                                                            .LENGTH_SHORT)
+                                            .show();
+                                }
+                            }
+                        });
+                android.widget.LinearLayout.LayoutParams kLp =
+                        new android.widget.LinearLayout.LayoutParams(0,
+                                android.view.ViewGroup.LayoutParams
+                                        .WRAP_CONTENT, 1f);
+                row.addView(keep, kLp);
+            }
+            android.widget.TextView done =
+                    manualButton("完成", false);
+            done.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissManualCard();
+                        }
+                    });
+            android.widget.LinearLayout.LayoutParams dLp =
+                    new android.widget.LinearLayout.LayoutParams(0,
+                            android.view.ViewGroup.LayoutParams
+                                    .WRAP_CONTENT, 1f);
+            if (FeatureFlags.lightMode) {
+                dLp.leftMargin = dp(10);
+            }
+            row.addView(done, dLp);
+            col.addView(row, rowLp);
+            WindowManager.LayoutParams lp =
+                    new WindowManager.LayoutParams(
+                            dp(340),
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                            WindowManager.LayoutParams
+                                    .TYPE_APPLICATION_OVERLAY,
+                            WindowManager.LayoutParams
+                                    .FLAG_NOT_FOCUSABLE,
+                            android.graphics.PixelFormat
+                                    .TRANSLUCENT);
+            lp.gravity = android.view.Gravity.CENTER;
+            wm.addView(col, lp);
+            manualOverlay = col;
+            final View shown = col;
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (manualOverlay == shown) {
+                        dismissManualCard();
+                    }
+                }
+            }, 45000);
+            FileLog.i("Manual card shown");
+        } catch (Throwable t) {
+            FileLog.i("Manual card err " + t);
+            manualOverlay = null;
+        }
+    }
+
+    private void dismissManualCard() {
+        if (manualOverlay != null) {
+            try {
+                wm.removeView(manualOverlay);
+            } catch (Throwable ignored) {
+            }
+            manualOverlay = null;
+        }
+        manualPending = null;
+    }
+
+    /** 中央小提示（识别中… / 没认出票或码 等）。 */
+    private void showManualPill(String msg,
+            boolean sticky) {
+        hideManualPill();
+        try {
+            android.widget.TextView tv =
+                    new android.widget.TextView(app);
+            tv.setText(msg);
+            tv.setTextSize(13.5f);
+            tv.setTextColor(Color.WHITE);
+            tv.setPadding(dp(16), dp(9), dp(16), dp(9));
+            android.graphics.drawable.GradientDrawable g =
+                    new android.graphics.drawable
+                            .GradientDrawable();
+            g.setColor(Color.argb(225, 15, 23, 42));
+            g.setCornerRadius(dp(20));
+            tv.setBackground(g);
+            WindowManager.LayoutParams lp =
+                    new WindowManager.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                            WindowManager.LayoutParams
+                                    .TYPE_APPLICATION_OVERLAY,
+                            WindowManager.LayoutParams
+                                    .FLAG_NOT_FOCUSABLE
+                                    | WindowManager.LayoutParams
+                                            .FLAG_NOT_TOUCHABLE,
+                            android.graphics.PixelFormat
+                                    .TRANSLUCENT);
+            lp.gravity = android.view.Gravity.CENTER;
+            wm.addView(tv, lp);
+            manualPill = tv;
+            if (!sticky) {
+                final int seq = ++manualPillSeq;
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (seq == manualPillSeq) {
+                            hideManualPill();
+                        }
+                    }
+                }, 2600);
+            }
+        } catch (Throwable t) {
+            FileLog.i("Manual pill err " + t);
+        }
+    }
+
+    private void hideManualPill() {
+        if (manualPill != null) {
+            try {
+                wm.removeView(manualPill);
+            } catch (Throwable ignored) {
+            }
+            manualPill = null;
+        }
+    }
+
+    /** 快捷方式「输入文字识别」的悬浮小窗：
+     * 粘贴订单/票务文字进来认。 */
+    public void showManualInput() {
+        if (!FeatureFlags.manualRecognize) {
+            return;
+        }
+        dismissManualInput();
+        try {
+            android.widget.LinearLayout col = new android.widget.LinearLayout(app);
+            col.setOrientation(android.widget.LinearLayout.VERTICAL);
+            col.setBackground(manualCardBg(24));
+            col.setPadding(dp(16), dp(14), dp(16), dp(14));
+            android.widget.TextView head =
+                    new android.widget.TextView(app);
+            head.setText("粘贴文字识别票和码");
+            head.setTextSize(14);
+            head.setTextColor(lpTitleC());
+            col.addView(head);
+            final android.widget.EditText edit =
+                    new android.widget.EditText(app);
+            edit.setHint("把订单 / 票务文字粘贴到这里");
+            edit.setTextSize(13.5f);
+            edit.setMinLines(3);
+            edit.setMaxLines(6);
+            edit.setGravity(android.view.Gravity.TOP
+                    | android.view.Gravity.START);
+            android.widget.LinearLayout.LayoutParams eLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            eLp.topMargin = dp(10);
+            col.addView(edit, eLp);
+            android.widget.LinearLayout row = new android.widget.LinearLayout(app);
+            row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            android.widget.LinearLayout.LayoutParams rowLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowLp.topMargin = dp(12);
+            android.widget.TextView paste =
+                    manualButton("粘贴", false);
+            paste.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            try {
+                                android.content.ClipboardManager
+                                        cm =
+                                        (android.content
+                                                .ClipboardManager)
+                                                app.getSystemService(
+                                                        Context
+                                                                .CLIPBOARD_SERVICE);
+                                if (cm != null
+                                        && cm.hasPrimaryClip()
+                                        && cm.getPrimaryClip()
+                                                != null
+                                        && cm.getPrimaryClip()
+                                                .getItemCount()
+                                                > 0) {
+                                    CharSequence cs =
+                                            cm.getPrimaryClip()
+                                                    .getItemAt(0)
+                                                    .coerceToText(
+                                                            app);
+                                    if (cs != null) {
+                                        edit.setText(cs);
+                                    }
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                    });
+            android.widget.LinearLayout.LayoutParams pLp =
+                    new android.widget.LinearLayout.LayoutParams(0,
+                            android.view.ViewGroup.LayoutParams
+                                    .WRAP_CONTENT, 1f);
+            row.addView(paste, pLp);
+            android.widget.TextView go =
+                    manualButton("识别", true);
+            go.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            String t = edit.getText() == null
+                                    ? "" : edit.getText()
+                                            .toString();
+                            dismissManualInput();
+                            onScreenOcrText("manual", t);
+                        }
+                    });
+            android.widget.LinearLayout.LayoutParams gLp =
+                    new android.widget.LinearLayout.LayoutParams(0,
+                            android.view.ViewGroup.LayoutParams
+                                    .WRAP_CONTENT, 1f);
+            gLp.leftMargin = dp(10);
+            row.addView(go, gLp);
+            android.widget.TextView cancel =
+                    manualButton("取消", false);
+            cancel.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override
+                        public void onClick(View v) {
+                            dismissManualInput();
+                        }
+                    });
+            android.widget.LinearLayout.LayoutParams cLp =
+                    new android.widget.LinearLayout.LayoutParams(0,
+                            android.view.ViewGroup.LayoutParams
+                                    .WRAP_CONTENT, 1f);
+            cLp.leftMargin = dp(10);
+            row.addView(cancel, cLp);
+            col.addView(row, rowLp);
+            WindowManager.LayoutParams lp =
+                    new WindowManager.LayoutParams(
+                            dp(330),
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                            WindowManager.LayoutParams
+                                    .TYPE_APPLICATION_OVERLAY,
+                            0,
+                            android.graphics.PixelFormat
+                                    .TRANSLUCENT);
+            lp.gravity = android.view.Gravity.CENTER;
+            lp.softInputMode = WindowManager.LayoutParams
+                    .SOFT_INPUT_STATE_VISIBLE;
+            wm.addView(col, lp);
+            manualInputOverlay = col;
+            edit.requestFocus();
+        } catch (Throwable t) {
+            FileLog.i("Manual input err " + t);
+        }
+    }
+
+    private void dismissManualInput() {
+        if (manualInputOverlay != null) {
+            try {
+                wm.removeView(manualInputOverlay);
+            } catch (Throwable ignored) {
+            }
+            manualInputOverlay = null;
+        }
     }
 
     private int dp(int v) {
