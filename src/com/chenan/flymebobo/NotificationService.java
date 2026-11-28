@@ -3140,6 +3140,149 @@ public class NotificationService extends NotificationListenerService {
      * （aiModelFast，留空跟随摘要模型）求快，摘要走
      * aiModel 求稳，两路并行、各自回广播（onAiResult
      * 按 summary/tags 分开收，缺哪路不动哪路）。 */
+    // v626: Aicy 借道客户端（与 AicyBorrow 广播协议对接）。
+    private final java.util.Map<String, Object[]> aicyPending =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile boolean aicyReceiverReady = false;
+
+    private boolean aiUseAicy() {
+        try {
+            return "aicy".equals(getSharedPreferences(
+                    "flymebobo_ai",
+                    android.content.Context.MODE_PRIVATE)
+                    .getString("aiChannel", "byok"));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void ensureAicyReceiver() {
+        if (aicyReceiverReady) {
+            return;
+        }
+        synchronized (this) {
+            if (aicyReceiverReady) {
+                return;
+            }
+            try {
+                android.content.BroadcastReceiver receiver =
+                        new android.content.BroadcastReceiver() {
+                    @Override
+                    public void onReceive(
+                            android.content.Context context,
+                            android.content.Intent intent) {
+                        if (intent == null) {
+                            return;
+                        }
+                        String id = intent.getStringExtra("id");
+                        if (id == null) {
+                            return;
+                        }
+                        Object[] slot = aicyPending.get(id);
+                        if (slot == null) {
+                            return;
+                        }
+                        if (AicyBorrow.ACTION_AICY_PONG.equals(
+                                intent.getAction())) {
+                            slot[3] = Boolean.valueOf(
+                                    intent.getBooleanExtra(
+                                            "ok", false));
+                        } else {
+                            slot[1] = intent.getStringExtra(
+                                    "text");
+                            slot[2] = intent.getStringExtra(
+                                    "err");
+                        }
+                        ((java.util.concurrent.CountDownLatch)
+                                slot[0]).countDown();
+                    }
+                };
+                android.content.IntentFilter filter =
+                        new android.content.IntentFilter(
+                                AicyBorrow.ACTION_AICY_REPLY);
+                filter.addAction(AicyBorrow.ACTION_AICY_PONG);
+                try {
+                    java.lang.reflect.Method m =
+                            android.content.Context.class.getMethod(
+                                    "registerReceiver",
+                                    android.content.BroadcastReceiver
+                                            .class,
+                                    android.content.IntentFilter
+                                            .class, int.class);
+                    m.invoke(this, receiver, filter,
+                            Integer.valueOf(2));
+                } catch (Throwable t) {
+                    registerReceiver(receiver, filter);
+                }
+                aicyReceiverReady = true;
+            } catch (Throwable t) {
+                FileLog.i("Light ai aicy receiver fail " + t);
+            }
+        }
+    }
+
+    private boolean aicyPing() {
+        ensureAicyReceiver();
+        String id = "ping-" + java.util.UUID.randomUUID();
+        Object[] slot = new Object[]{
+                new java.util.concurrent.CountDownLatch(1),
+                null, null, null};
+        aicyPending.put(id, slot);
+        try {
+            android.content.Intent it =
+                    new android.content.Intent(
+                            AicyBorrow.ACTION_AICY_PING);
+            it.putExtra("id", id);
+            sendBroadcast(it);
+            ((java.util.concurrent.CountDownLatch) slot[0])
+                    .await(3, java.util.concurrent.TimeUnit
+                            .SECONDS);
+        } catch (Throwable ignored) {
+        }
+        aicyPending.remove(id);
+        return Boolean.TRUE.equals(slot[3]);
+    }
+
+    private String aicyAsk(String system, String user) {
+        if (!aicyPing()) {
+            FileLog.i("Light ai aicy: no pong");
+            return null;
+        }
+        String id = java.util.UUID.randomUUID().toString();
+        Object[] slot = new Object[]{
+                new java.util.concurrent.CountDownLatch(1),
+                null, null, null};
+        aicyPending.put(id, slot);
+        try {
+            android.content.Intent it =
+                    new android.content.Intent(
+                            AicyBorrow.ACTION_AICY_ASK);
+            it.putExtra("id", id);
+            it.putExtra("system", system);
+            it.putExtra("user", user);
+            sendBroadcast(it);
+            boolean done =
+                    ((java.util.concurrent.CountDownLatch)
+                            slot[0]).await(90,
+                            java.util.concurrent.TimeUnit
+                                    .SECONDS);
+            if (!done) {
+                FileLog.i("Light ai aicy: ask timeout");
+                aicyPending.remove(id);
+                return null;
+            }
+        } catch (Throwable t) {
+            aicyPending.remove(id);
+            return null;
+        }
+        aicyPending.remove(id);
+        if (slot[2] != null) {
+            FileLog.i("Light ai aicy err " + slot[2]);
+            return null;
+        }
+        return (String) slot[1];
+    }
+
     private void handleAiAnalyze(
             final android.content.Intent intent) {
         final String sig = intent.getStringExtra("sig");
@@ -3158,7 +3301,8 @@ public class NotificationService extends NotificationListenerService {
         // 读时解密；旧版明文原样兼容。
         final String apiKey = AiKey.decrypt(
                 aiPrefs.getString("aiKey", ""));
-        if (apiKey == null || apiKey.isEmpty()) {
+        if (!aiUseAicy()
+                && (apiKey == null || apiKey.isEmpty())) {
             FileLog.i("Light ai skip: no key");
             return;
         }
@@ -3306,6 +3450,19 @@ public class NotificationService extends NotificationListenerService {
      * 失败返回 null 并记日志。 */
     private String aiChatOnce(String apiBase, String apiKey,
             String model, String userText) {
+        // v626: 系统 AI 通道优先借道 Aicy；借道失败且填过
+        // Key 时静默回退自带 Key（预览定版行为）。
+        if (aiUseAicy()) {
+            String aicyOut = aicyAsk(
+                    "你是通知整理助手，只输出 JSON。", userText);
+            if (aicyOut != null) {
+                return aicyOut;
+            }
+            if (apiKey == null || apiKey.isEmpty()) {
+                return null;
+            }
+            FileLog.i("Light ai aicy fallback to byok");
+        }
         try {
             org.json.JSONObject req =
                     new org.json.JSONObject();
@@ -3385,7 +3542,8 @@ public class NotificationService extends NotificationListenerService {
         }
         SharedPreferences sharedPreferences = getSharedPreferences("flymebobo_ai", 0);
         final String decrypt = AiKey.decrypt(sharedPreferences.getString("aiKey", ""));
-        if (decrypt == null || decrypt.isEmpty()) {
+        if (!aiUseAicy()
+                && (decrypt == null || decrypt.isEmpty())) {
             FileLog.i("Light info ai skip: no key");
             return;
         }
@@ -3429,6 +3587,15 @@ public class NotificationService extends NotificationListenerService {
                     jSONArray.put(jSONObject3);
                     jSONObject.put("messages", jSONArray);
                     jSONObject.put("temperature", 0.1d);
+                    String string3 = null;
+                    if (aiUseAicy()) {
+                        string3 = aicyAsk("你是通知信息提取器，只输出 JSON 数组。", sb.toString());
+                        if (string3 == null && (decrypt == null || decrypt.isEmpty())) {
+                            FileLog.i("Light info ai aicy fail, no key fallback");
+                            return;
+                        }
+                    }
+                    if (string3 == null) {
                     HttpURLConnection httpURLConnection = (HttpURLConnection) new URL(string + "/chat/completions").openConnection();
                     httpURLConnection.setRequestMethod("POST");
                     httpURLConnection.setConnectTimeout(15000);
@@ -3455,7 +3622,8 @@ public class NotificationService extends NotificationListenerService {
                         FileLog.i("Light info ai http " + responseCode);
                         return;
                     }
-                    String string3 = new JSONObject(sb2.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
+                    string3 = new JSONObject(sb2.toString()).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content");
+                    }
                     int indexOf = string3.indexOf(91);
                     int lastIndexOf = string3.lastIndexOf(93);
                     if (indexOf < 0 || lastIndexOf <= indexOf) {

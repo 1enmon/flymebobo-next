@@ -2632,6 +2632,91 @@ public class MainActivity extends Activity {
      * 定），Key 仍由用户自己填，落盘走 AiKey 加密
      * （系统密钥库），开启时 Toast 提示本地加密储
      * 存。仅轻气泡模式出现（AI 只分析收纳栈）。 */
+    private android.content.BroadcastReceiver aicyPongReceiver;
+
+    /** v626: AI 卡「系统 AI」状态检测：向 Aicy 进程发
+     * PING，3.5 秒内收到 PONG(ok) 显示已连接，否则提示
+     * 连不上与回退行为。 */
+    private void pingAiAicyStatus(final TextView status) {
+        status.setText("正在检测超级 Aicy…");
+        final String pingId = "ui-" + System.currentTimeMillis();
+        final boolean[] answered = new boolean[1];
+        if (aicyPongReceiver != null) {
+            try {
+                unregisterReceiver(aicyPongReceiver);
+            } catch (Throwable ignored) {
+            }
+            aicyPongReceiver = null;
+        }
+        final android.content.BroadcastReceiver receiver =
+                new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context,
+                    android.content.Intent intent) {
+                if (intent == null || !pingId.equals(
+                        intent.getStringExtra("id"))) {
+                    return;
+                }
+                answered[0] = true;
+                boolean ok = intent.getBooleanExtra("ok", false);
+                status.setText(ok ? "● 超级 Aicy 已连接"
+                        : "○ Aicy 还没准备好（打开一次 Aicy 再试）");
+                try {
+                    unregisterReceiver(this);
+                } catch (Throwable ignored) {
+                }
+                if (aicyPongReceiver == this) {
+                    aicyPongReceiver = null;
+                }
+            }
+        };
+        aicyPongReceiver = receiver;
+        try {
+            java.lang.reflect.Method m =
+                    android.content.Context.class.getMethod(
+                            "registerReceiver",
+                            android.content.BroadcastReceiver.class,
+                            android.content.IntentFilter.class,
+                            int.class);
+            m.invoke(this, receiver,
+                    new android.content.IntentFilter(
+                            AicyBorrow.ACTION_AICY_PONG),
+                    Integer.valueOf(2));
+        } catch (Throwable t) {
+            try {
+                registerReceiver(receiver,
+                        new android.content.IntentFilter(
+                                AicyBorrow.ACTION_AICY_PONG));
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            android.content.Intent it =
+                    new android.content.Intent(
+                            AicyBorrow.ACTION_AICY_PING);
+            it.putExtra("id", pingId);
+            sendBroadcast(it);
+        } catch (Throwable ignored) {
+        }
+        new android.os.Handler(
+                android.os.Looper.getMainLooper()).postDelayed(
+                new Runnable() {
+                    @Override
+                    public void run() {
+                        if (!answered[0]) {
+                            status.setText("○ 暂时连不上 Aicy——请先打开一次超级 Aicy 再回来；分析时会自动回退自带 Key 通道（填过的话）");
+                            if (aicyPongReceiver == receiver) {
+                                try {
+                                    unregisterReceiver(receiver);
+                                } catch (Throwable ignored) {
+                                }
+                                aicyPongReceiver = null;
+                            }
+                        }
+                    }
+                }, 3500);
+    }
+
     /** v612: AI 风险告知书（wei 定：每次打开 AI 助
      * 手开关都弹、强制阅读 10 秒、同意才真开）。同
      * 意按钮带倒计时，10 秒内点不动；取消/点外面关
@@ -2672,7 +2757,11 @@ public class MainActivity extends Activity {
         android.widget.ScrollView scroll =
                 new android.widget.ScrollView(this);
         TextView body = new TextView(this);
-        body.setText("一、数据会离开你的手机\n"
+        boolean aiRiskAicy = "aicy".equals(
+                getSharedPreferences("flymebobo_ai",
+                        MODE_PRIVATE).getString(
+                        "aiChannel", "byok"));
+        String aiRiskBody = "一、数据会离开你的手机\n"
                 + "开启后，被收纳通知的标题和正文会发送到你填写的 AI 服务商（默认 DeepSeek）处理，用于生成摘要、标签和信息卡核对。通知可能包含聊天内容、账单金额、行程信息等个人内容；发送后受服务商隐私政策约束，其留存与使用本模块无法控制。\n\n"
                 + "二、这些内容永远不会发送\n"
                 + "验证码、校验码类通知，以及带验证码 / 取件码的条目，永不发送给 AI。\n\n"
@@ -2681,7 +2770,20 @@ public class MainActivity extends Activity {
                 + "四、结果仅供参考（免责）\n"
                 + "AI 生成的摘要、标签（含「疑似诈骗」判断）和信息核对结果由大模型自动生成，可能出现错误、遗漏或误判，仅供参考，不能作为付款、拦截、出行等决定的唯一依据。因依赖 AI 结果产生的任何损失，本模块与作者不承担责任。\n\n"
                 + "五、随时可以关闭\n"
-                + "关闭 AI 助手总开关后立即停止一切发送。点「我已阅读并同意」即视为你已理解并接受以上内容。");
+                + "关闭 AI 助手总开关后立即停止一切发送。点「我已阅读并同意」即视为你已理解并接受以上内容。";
+        if (aiRiskAicy) {
+            aiRiskBody = aiRiskBody.replace(
+                    "发送到你填写的 AI 服务商（默认 DeepSeek）处理",
+                    "经魅族超级 Aicy 的服务处理");
+            int s3 = aiRiskBody.indexOf("三、Key 与费用");
+            int s4 = aiRiskBody.indexOf("四、结果仅供参考");
+            if (s3 >= 0 && s4 > s3) {
+                aiRiskBody = aiRiskBody.substring(0, s3)
+                        + "三、通道与费用\n系统 AI 通道借用 Aicy 的免费档，不需要 API Key、不产生接口费用；若切换到自带 Key 通道，Key 只加密储存在本机（系统密钥库托管），调用费用由你与服务商结算，保管责任在你本人。\n\n"
+                        + aiRiskBody.substring(s4);
+            }
+        }
+        body.setText(aiRiskBody);
         body.setTextSize(13.5f);
         body.setTextColor(L_BODY);
         body.setLineSpacing(dp(3), 1f);
@@ -2851,6 +2953,117 @@ public class MainActivity extends Activity {
         // v609: 网络歌词兜底已按 wei 的话移去音乐
         // 卡片那边（FEATURES 表 parent=music），AI
         // 卡里不再放这一行。
+        // v626: AI 通道切换（预览已过 wei 点头）：自带 Key /
+        // 系统 AI（Aicy 借道·免费）。选中即落盘；系统 AI 时
+        // 隐藏 Key 相关控件（byokViews 收集），显示状态框。
+        final android.content.SharedPreferences aiPrefsCh =
+                getSharedPreferences("flymebobo_ai",
+                        MODE_PRIVATE);
+        final java.util.List<View> byokViews =
+                new java.util.ArrayList<>();
+        TextView aiChannelLabel = new TextView(this);
+        aiChannelLabel.setText("AI 通道");
+        aiChannelLabel.setTextSize(13);
+        aiChannelLabel.setTextColor(L_SUB);
+        android.widget.LinearLayout.LayoutParams aiChLabelLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        aiChLabelLp.topMargin = dp(12);
+        aiChannelLabel.setLayoutParams(aiChLabelLp);
+        body.addView(aiChannelLabel);
+        android.widget.LinearLayout aiSeg =
+                new android.widget.LinearLayout(this);
+        aiSeg.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        aiSeg.setBackground(rounded(
+                Color.rgb(238, 240, 243), dp(999)));
+        aiSeg.setPadding(dp(3), dp(3), dp(3), dp(3));
+        android.widget.LinearLayout.LayoutParams aiSegLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        aiSegLp.topMargin = dp(6);
+        aiSeg.setLayoutParams(aiSegLp);
+        final TextView aiSegByok = new TextView(this);
+        aiSegByok.setText("自带 Key");
+        aiSegByok.setGravity(android.view.Gravity.CENTER);
+        aiSegByok.setTextSize(13.5f);
+        aiSegByok.setPadding(0, dp(7), 0, dp(7));
+        aiSeg.addView(aiSegByok,
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f));
+        final TextView aiSegAicy = new TextView(this);
+        aiSegAicy.setText("系统 AI · 免费");
+        aiSegAicy.setGravity(android.view.Gravity.CENTER);
+        aiSegAicy.setTextSize(13.5f);
+        aiSegAicy.setPadding(0, dp(7), 0, dp(7));
+        aiSeg.addView(aiSegAicy,
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f));
+        body.addView(aiSeg);
+        final android.widget.LinearLayout aiAicyBox =
+                new android.widget.LinearLayout(this);
+        aiAicyBox.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        aiAicyBox.setBackground(rounded(
+                Color.rgb(242, 247, 255), dp(12)));
+        aiAicyBox.setPadding(dp(12), dp(10), dp(12), dp(10));
+        android.widget.LinearLayout.LayoutParams aiBoxLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        aiBoxLp.topMargin = dp(10);
+        aiAicyBox.setLayoutParams(aiBoxLp);
+        final TextView aiAicyStatus = new TextView(this);
+        aiAicyStatus.setText("正在检测超级 Aicy…");
+        aiAicyStatus.setTextSize(14);
+        aiAicyStatus.setTextColor(L_INK);
+        aiAicyBox.addView(aiAicyStatus);
+        TextView aiAicyNote = new TextView(this);
+        aiAicyNote.setText("借用 Aicy 的免费档，不用填 Key、不花钱。Key 输入框和模型选择随即隐藏。");
+        aiAicyNote.setTextSize(12.5f);
+        aiAicyNote.setTextColor(L_SUB);
+        aiAicyBox.addView(aiAicyNote);
+        body.addView(aiAicyBox);
+        final Runnable refreshAiChannel = new Runnable() {
+            @Override
+            public void run() {
+                boolean aicy = "aicy".equals(aiPrefsCh.getString(
+                        "aiChannel", "byok"));
+                aiSegByok.setBackground(aicy ? null
+                        : rounded(Color.WHITE, dp(999)));
+                aiSegByok.setTextColor(aicy ? L_SUB : L_INK);
+                aiSegByok.getPaint().setFakeBoldText(!aicy);
+                aiSegAicy.setBackground(aicy
+                        ? rounded(Color.WHITE, dp(999)) : null);
+                aiSegAicy.setTextColor(aicy ? L_INK : L_SUB);
+                aiSegAicy.getPaint().setFakeBoldText(aicy);
+                for (View v : byokViews) {
+                    v.setVisibility(aicy ? View.GONE
+                            : View.VISIBLE);
+                }
+                aiAicyBox.setVisibility(aicy ? View.VISIBLE
+                        : View.GONE);
+            }
+        };
+        View.OnClickListener aiSegClick =
+                new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                aiPrefsCh.edit().putString("aiChannel",
+                        v == aiSegAicy ? "aicy" : "byok")
+                        .apply();
+                refreshAiChannel.run();
+                if (v == aiSegAicy) {
+                    pingAiAicyStatus(aiAicyStatus);
+                }
+            }
+        };
+        aiSegByok.setOnClickListener(aiSegClick);
+        aiSegAicy.setOnClickListener(aiSegClick);
         final android.content.SharedPreferences aiPrefs =
                 getSharedPreferences("flymebobo_ai",
                         MODE_PRIVATE);
@@ -2867,6 +3080,7 @@ public class MainActivity extends Activity {
                 | android.text.InputType
                         .TYPE_TEXT_VARIATION_PASSWORD);
         body.addView(aiKeyIn);
+        byokViews.add(aiKeyIn);
         // v614: wei 的硅基流动邀请链接（他本人提供）：
         // 没 Key 的用户点此注册，双方都有免费额度。
         TextView aiInvite = new TextView(this);
@@ -2888,6 +3102,7 @@ public class MainActivity extends Activity {
             }
         });
         body.addView(aiInvite);
+        byokViews.add(aiInvite);
         final EditText aiBaseIn = new EditText(this);
         aiBaseIn.setHint("接口地址");
         aiBaseIn.setText(aiPrefs.getString("aiBase",
@@ -2897,6 +3112,7 @@ public class MainActivity extends Activity {
         aiBaseIn.setHintTextColor(L_SUB);
         aiBaseIn.setSingleLine(true);
         body.addView(aiBaseIn);
+        byokViews.add(aiBaseIn);
         final EditText aiModelIn = new EditText(this);
         aiModelIn.setHint("摘要模型（大而稳）");
         aiModelIn.setText(aiPrefs.getString("aiModel",
@@ -2906,6 +3122,7 @@ public class MainActivity extends Activity {
         aiModelIn.setHintTextColor(L_SUB);
         aiModelIn.setSingleLine(true);
         body.addView(aiModelIn);
+        byokViews.add(aiModelIn);
         // v614: 打标单独一个小模型（wei 定：打标求快、
         // 摘要求稳）；留空 = 跟随摘要模型。
         final EditText aiModelFastIn = new EditText(this);
@@ -2917,6 +3134,7 @@ public class MainActivity extends Activity {
         aiModelFastIn.setHintTextColor(L_SUB);
         aiModelFastIn.setSingleLine(true);
         body.addView(aiModelFastIn);
+        byokViews.add(aiModelFastIn);
         // v614: 模型自动识别（wei 提）——拿地址+Key 拉
         // /models 列表点选，免手打模型名。
         // v623: 三个按钮改全宽竖排（wei 两次截图报「选摘要/
@@ -2931,6 +3149,7 @@ public class MainActivity extends Activity {
                         LinearLayout.LayoutParams.WRAP_CONTENT);
         aiPickLp1.setMargins(0, dp(10), 0, 0);
         body.addView(aiPickSummary, aiPickLp1);
+        byokViews.add(aiPickSummary);
         TextView aiPickFast = buildWhitePillButton(
                 "选打标模型", L_ACCENT);
         LinearLayout.LayoutParams aiPickLp2 =
@@ -2939,6 +3158,7 @@ public class MainActivity extends Activity {
                         LinearLayout.LayoutParams.WRAP_CONTENT);
         aiPickLp2.setMargins(0, dp(10), 0, 0);
         body.addView(aiPickFast, aiPickLp2);
+        byokViews.add(aiPickFast);
         aiPickSummary.setOnClickListener(
                 new View.OnClickListener() {
             @Override
@@ -2992,12 +3212,19 @@ public class MainActivity extends Activity {
                         LinearLayout.LayoutParams.WRAP_CONTENT);
         aiSaveLp.setMargins(0, dp(10), 0, 0);
         body.addView(aiSave, aiSaveLp);
+        byokViews.add(aiSave);
+        refreshAiChannel.run();
+        if ("aicy".equals(aiPrefsCh.getString(
+                "aiChannel", "byok"))) {
+            pingAiAicyStatus(aiAicyStatus);
+        }
         TextView aiNote = new TextView(this);
-        aiNote.setText("API Key 加密储存在本机（系统密钥"
-                + "库托管），不会上传到任何服务器。只在收纳"
-                + "内容变化时异步调用，只发标题与正文；验"
-                + "证码类永不发送。没有 Key 时本卡不工作，"
-                + "模块其余功能不受影响。");
+        aiNote.setText("只在收纳内容变化时异步调用，"
+                + "只发标题与正文；验证码类永不发送。自带 "
+                + "Key 通道：Key 加密储存在本机（系统密钥库"
+                + "托管），不会上传到任何服务器，没填 Key "
+                + "时该通道不工作。系统 AI 通道：内容经魅"
+                + "族超级 Aicy 服务处理，不用 Key。");
         aiNote.setTextSize(11.5f);
         aiNote.setTextColor(L_SUB);
         aiNote.setPadding(0, dp(4), 0, dp(2));

@@ -1,8 +1,10 @@
 package com.chenan.flymebobo;
 
 import android.app.Application;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Handler;
 import android.os.Looper;
 import io.github.libxposed.api.XposedInterface;
@@ -16,29 +18,46 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
- * v620 stage 1: Aicy 借道侦察钩子（装在超级 Aicy 进程
- * com.meizu.voiceassistant 里）。
+ * Aicy 借道（装在超级 Aicy 进程 com.meizu.voiceassistant 里）。
  *
- * 反编译结论（Aicy 13.0.82, classes3.dex）：
- * - LLM 客户端接口 a7.f：a(request) 流式 / c(request, cont) 一次性。
+ * 反编译与实测结论（Aicy 13.0.82，日志 80–85 逐步验证）：
+ * - LLM 客户端接口 a7.f：a(request) 流式 / c(request, cont) 一次性；
+ *   c 的参数是具体类 ContinuationImpl 无法 Proxy，故走流式。
  * - 路由实现 com.flyme.agentos.llm.impl.routing.k implements a7.f，
- *   构造时由绑定 l 创建（l.a = ModelFunction 枚举 CHAT /
- *   CONTEXT_SUMMARY / ...）。钩 k 的构造即可截获实例。
- * - 请求对象 d7.C2117i（消息列表 + ChatCaller 场景标签 + 若干参数，
- *   无档位字段——档位由路由层按场景与 Aicy 自身模式决定）。
- * - 消息对象 d7.b0（Role + 正文 + ...，kotlin 默认参数合成构造）。
+ *   由绑定 l 创建（l.a = ModelFunction：CHAT/CONTEXT_SUMMARY/...）。
+ *   钩 k 的构造截获实例，Aicy 启动即全量捕获。
+ * - 请求类真实运行时名 d7.i（ChatRequest，@Serializable 序列化
+ *   构造：mask bit 置 1 = 用传入值，messages bit0 必填）；从客户
+ *   端 a 方法的参数类型取 Class，不写死类名。
+ * - 消息类 d7.b0（Message：role/content/toolCalls/toolCallId/
+ *   mediaInputs/reasoningContent，默认参数构造 mask 相反：
+ *   bit 置 1 = 取默认）。
+ * - 流式块 d7.f（ChatChunk）：字段 a = 正文增量，b = 思考增量
+ *   （忽略），d = done。collect/emit 的 Continuation 均为接口，
+ *   Proxy 可用（dex 实证）。日志 85 全链路跑通，摘要 JSON 正确。
  *
- * 本阶段只做两件事：截获实例并回报；在截获后 20 秒自动发一条
- * 测试请求（模块摘要提示词 + 四条样例），把回包对象的类名与
- * 字段反射倾倒进日志，验证「构造请求 → 调用 → 拿回文本」整条
- * 链路。日志经广播送到 SystemUI 的 FileLog（本进程 FileLog
- * 不落盘，见 v616/v617 的教训）。
+ * v626 起转服务模式：注册广播接收器，模块 App 进程发
+ * ACTION_AICY_ASK（id/system/user），本类在后台线程跑完流式
+ * 收集后以 ACTION_AICY_REPLY（id/text 或 err）回包；
+ * ACTION_AICY_PING → ACTION_AICY_PONG（id/ok）供存活检测。
+ * 日志经 ACTION_AICY_LOG 广播回 SystemUI 落 FileLog（本进程
+ * FileLog 不落盘）。
  */
 public class AicyBorrow {
     public static final String ACTION_AICY_LOG =
             "com.chenan.flymebobo.AICY_LOG";
+    public static final String ACTION_AICY_ASK =
+            "com.chenan.flymebobo.AICY_ASK";
+    public static final String ACTION_AICY_REPLY =
+            "com.chenan.flymebobo.AICY_REPLY";
+    public static final String ACTION_AICY_PING =
+            "com.chenan.flymebobo.AICY_PING";
+    public static final String ACTION_AICY_PONG =
+            "com.chenan.flymebobo.AICY_PONG";
 
     private static final String ROUTER_CLASS =
             "com.flyme.agentos.llm.impl.routing.k";
@@ -48,7 +67,7 @@ public class AicyBorrow {
     private final ClassLoader cl;
     private final Map<String, Object> clients =
             new ConcurrentHashMap<>();
-    private volatile boolean testFired = false;
+    private volatile boolean askOkLogged = false;
 
     public AicyBorrow(XposedModule module, Application app,
             ClassLoader cl) {
@@ -91,6 +110,7 @@ public class AicyBorrow {
         } catch (Throwable t) {
             log("install failed " + t);
         }
+        registerAskReceiver();
     }
 
     private void capture(Object client) {
@@ -112,49 +132,87 @@ public class AicyBorrow {
         }
         clients.put(fn, client);
         log("capture fn=" + fn + " total=" + clients.size());
-        if (!testFired) {
-            testFired = true;
-            new Handler(Looper.getMainLooper()).postDelayed(
-                    new Runnable() {
+    }
+
+    // ---- 服务模式：ASK / PING 广播 ----
+
+    private void registerAskReceiver() {
+        try {
+            IntentFilter filter = new IntentFilter(ACTION_AICY_ASK);
+            filter.addAction(ACTION_AICY_PING);
+            BroadcastReceiver receiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    if (intent == null) {
+                        return;
+                    }
+                    final String id = intent.getStringExtra("id");
+                    if (ACTION_AICY_PING.equals(intent.getAction())) {
+                        Intent pong = new Intent(ACTION_AICY_PONG);
+                        pong.putExtra("id", id);
+                        pong.putExtra("ok", !clients.isEmpty());
+                        try {
+                            app.sendBroadcast(pong);
+                        } catch (Throwable ignored) {
+                        }
+                        return;
+                    }
+                    final String system =
+                            intent.getStringExtra("system");
+                    final String user = intent.getStringExtra("user");
+                    new Thread(new Runnable() {
                         @Override
                         public void run() {
-                            new Thread(new Runnable() {
-                                @Override
-                                public void run() {
-                                    testAsk();
-                                }
-                            }, "aicy-test").start();
+                            handleAsk(id, system, user);
                         }
-                    }, 20000);
+                    }, "aicy-ask").start();
+                }
+            };
+            try {
+                Method m = Context.class.getMethod("registerReceiver",
+                        BroadcastReceiver.class, IntentFilter.class,
+                        int.class);
+                // 2 = RECEIVER_EXPORTED
+                m.invoke(app, receiver, filter, Integer.valueOf(2));
+            } catch (Throwable t) {
+                app.registerReceiver(receiver, filter);
+            }
+            log("ask receiver registered");
+        } catch (Throwable t) {
+            log("ask receiver failed " + t);
         }
     }
 
-    // ---- 测试请求：模块摘要提示词 + wei 手测过的四条样例 ----
+    private void reply(String id, String text, String err) {
+        Intent it = new Intent(ACTION_AICY_REPLY);
+        it.putExtra("id", id);
+        if (text != null) {
+            it.putExtra("text", text);
+        }
+        if (err != null) {
+            it.putExtra("err", err);
+        }
+        try {
+            app.sendBroadcast(it);
+        } catch (Throwable ignored) {
+        }
+    }
 
-    private void testAsk() {
+    private void handleAsk(String id, String system, String user) {
+        if (id == null) {
+            return;
+        }
         try {
             Object client = clients.get("CHAT");
             if (client == null && !clients.isEmpty()) {
                 client = clients.values().iterator().next();
             }
             if (client == null) {
-                log("test ask: no client captured");
+                reply(id, null, "no-client");
                 return;
             }
-            String system = "你是通知整理助手，只输出 JSON。";
-            String user = "下面是手机通知收纳盒里的4条通知，请处理后只输出一个 JSON 对象，不要解释。\n"
-                    + "[0] 标题：物业通知 正文：今晚22点停水，请提前储水\n"
-                    + "[1] 标题：顺丰速运 正文：您的快递已到菜鸟驿站，取件码 5-2-3106\n"
-                    + "[2] 标题：95588 正文：您的账户涉嫌洗钱，请点击链接验证身份\n"
-                    + "[3] 标题：购物App 正文：大促最后一天，全场五折\n"
-                    + "输出格式：{\"summary\":\"一句话总结这些通知（中文，30字以内，没有值得总结的就空字符串）\"}";
-            // v625: 改走流式 a()——c() 的参数类型是具体的
-            // ContinuationImpl（日志 84 实证 Proxy 被拒），而
-            // Flow 的 collect 与 collector.emit 参数都是
-            // Continuation 接口（dex 实证），Proxy 可用。
             Method a = null;
-            for (Method m : client.getClass()
-                    .getDeclaredMethods()) {
+            for (Method m : client.getClass().getDeclaredMethods()) {
                 if ("a".equals(m.getName())
                         && m.getParameterTypes().length == 1) {
                     a = m;
@@ -162,14 +220,19 @@ public class AicyBorrow {
                 }
             }
             if (a == null) {
-                throw new NoSuchMethodException("a/1");
+                reply(id, null, "no-method-a");
+                return;
             }
             a.setAccessible(true);
             Object request = buildRequest(system, user,
                     a.getParameterTypes()[0]);
-            log("test ask streaming caller=QUICKPASS_SUMMARY");
             Object flow = a.invoke(client, request);
-            Object collector = makeCollector();
+            final StringBuilder content = new StringBuilder();
+            final CountDownLatch done = new CountDownLatch(1);
+            final String[] error = new String[1];
+            Object collector = makeCollector(content);
+            Object continuation =
+                    makeContinuation(done, error);
             Method collect = null;
             for (Method m : flow.getClass().getMethods()) {
                 if ("b".equals(m.getName())
@@ -179,51 +242,66 @@ public class AicyBorrow {
                 }
             }
             if (collect == null) {
-                throw new NoSuchMethodException("flow collect b/2");
+                reply(id, null, "no-collect");
+                return;
             }
             collect.setAccessible(true);
-            Object ret = collect.invoke(flow, collector,
-                    makeContinuation());
-            Object suspended = coroutineSuspended();
-            if (ret != null && ret != suspended) {
-                log("test collect returned immediately " + ret);
-            } else {
-                log("test collect suspended, waiting chunks");
+            collect.invoke(flow, collector, continuation);
+            boolean finished = done.await(120, TimeUnit.SECONDS);
+            if (!finished) {
+                reply(id, null, "timeout");
+                return;
             }
+            if (error[0] != null) {
+                log("ask err " + error[0]);
+                reply(id, null, error[0]);
+                return;
+            }
+            if (!askOkLogged) {
+                askOkLogged = true;
+                log("ask ok len=" + content.length());
+            }
+            reply(id, content.toString(), null);
         } catch (Throwable t) {
             Throwable cause = t;
             while (cause.getCause() != null
                     && cause.getCause() != cause) {
                 cause = cause.getCause();
             }
-            log("test ask err " + t + " cause=" + cause);
+            log("ask fail " + cause);
+            reply(id, null, String.valueOf(cause));
         }
     }
 
-    private Object coroutineSuspended() {
-        try {
-            Class<?> kt = Class.forName(
-                    "kotlin.coroutines.intrinsics.IntrinsicsKt", false,
-                    cl);
-            Method m = kt.getMethod("getCOROUTINE_SUSPENDED");
-            return m.invoke(null);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
+    // ---- Proxy collector / continuation ----
 
-    private Object makeCollector() throws Exception {
+    private Object makeCollector(final StringBuilder content)
+            throws Exception {
         Class<?> collectorClass = Class.forName(
                 "kotlinx.coroutines.flow.i", false, cl);
         Class<?> unitClass = Class.forName("kotlin.Unit", false, cl);
         final Object unit = unitClass.getField("INSTANCE").get(null);
         InvocationHandler handler = new InvocationHandler() {
+            private Field contentField;
+
             @Override
             public Object invoke(Object proxy, Method method,
                     Object[] args) {
                 if ("emit".equals(method.getName())
-                        && args != null && args.length >= 1) {
-                    dumpResult("chunk", args[0]);
+                        && args != null && args.length >= 1
+                        && args[0] != null) {
+                    try {
+                        if (contentField == null) {
+                            contentField = args[0].getClass()
+                                    .getDeclaredField("a");
+                            contentField.setAccessible(true);
+                        }
+                        Object v = contentField.get(args[0]);
+                        if (v instanceof String) {
+                            content.append((String) v);
+                        }
+                    } catch (Throwable ignored) {
+                    }
                 }
                 return unit;
             }
@@ -232,13 +310,14 @@ public class AicyBorrow {
                 new Class<?>[]{collectorClass}, handler);
     }
 
-    private Object makeContinuation() throws Exception {
+    private Object makeContinuation(final CountDownLatch done,
+            final String[] error) throws Exception {
         Class<?> contClass = Class.forName(
                 "kotlin.coroutines.Continuation", false, cl);
         Class<?> emptyClass = Class.forName(
                 "kotlin.coroutines.EmptyCoroutineContext", false, cl);
-        Field inst = emptyClass.getField("INSTANCE");
-        final Object emptyContext = inst.get(null);
+        final Object emptyContext =
+                emptyClass.getField("INSTANCE").get(null);
         InvocationHandler handler = new InvocationHandler() {
             @Override
             public Object invoke(Object proxy, Method method,
@@ -256,13 +335,12 @@ public class AicyBorrow {
                             Field fe = r.getClass()
                                     .getDeclaredField("exception");
                             fe.setAccessible(true);
-                            log("test reply FAILURE " + fe.get(r));
+                            error[0] = String.valueOf(fe.get(r));
                         } catch (Throwable t) {
-                            log("test reply FAILURE (dump err) " + t);
+                            error[0] = "failure-dump-err";
                         }
-                    } else {
-                        dumpResult("resumed", r);
                     }
+                    done.countDown();
                     return null;
                 }
                 return null;
@@ -272,48 +350,16 @@ public class AicyBorrow {
                 new Class<?>[]{contClass}, handler);
     }
 
-    private void dumpResult(String how, Object result) {
-        if (result == null) {
-            log("test reply (" + how + ") null");
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        sb.append("test reply (").append(how).append(") class=")
-                .append(result.getClass().getName());
-        Class<?> c = result.getClass();
-        while (c != null && !c.getName().startsWith("java.lang.Object")) {
-            for (Field f : c.getDeclaredFields()) {
-                try {
-                    f.setAccessible(true);
-                    Object v = f.get(result);
-                    if (v instanceof String) {
-                        String s = (String) v;
-                        if (s.length() > 400) {
-                            s = s.substring(0, 400) + "…";
-                        }
-                        sb.append(" | ").append(f.getName()).append("=")
-                                .append(s);
-                    } else if (v != null
-                            && (v instanceof Number
-                            || v instanceof Boolean
-                            || v instanceof Enum)) {
-                        sb.append(" | ").append(f.getName()).append("=")
-                                .append(v);
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-            c = c.getSuperclass();
-        }
+    private Object coroutineSuspended() {
         try {
-            String ts = String.valueOf(result);
-            if (ts.length() > 600) {
-                ts = ts.substring(0, 600) + "…";
-            }
-            sb.append(" | toString=").append(ts);
-        } catch (Throwable ignored) {
+            Class<?> kt = Class.forName(
+                    "kotlin.coroutines.intrinsics.IntrinsicsKt", false,
+                    cl);
+            Method m = kt.getMethod("getCOROUTINE_SUSPENDED");
+            return m.invoke(null);
+        } catch (Throwable t) {
+            return null;
         }
-        log(sb.toString());
     }
 
     // ---- 反射构造请求 ----
@@ -331,11 +377,9 @@ public class AicyBorrow {
             }
         }
         Class<?> b0 = Class.forName("d7.b0", false, cl);
-        // v621: Aicy 的 kotlin 合成构造没有 DefaultConstructorMarker
-        // （日志 80 实证 NoSuchMethodException）——b0 的合成构造是
-        // (Role, String, List, String, List, String, int mask)。
-        // 按「首参是 Role、末参是 int」定位，mask 位 2..5 置 1
-        //（只给 role 与正文，其余取默认）。
+        // b0 合成构造 (Role, String, List, String, List, String,
+        // int mask)：默认参数语义，mask 位 2..5 置 1 = 其余取默认，
+        // 只给 role 与正文。
         Constructor<?> ctor = null;
         for (Constructor<?> c : b0.getDeclaredConstructors()) {
             Class<?>[] pt = c.getParameterTypes();
@@ -346,7 +390,7 @@ public class AicyBorrow {
             }
         }
         if (ctor == null) {
-            throw new NoSuchMethodException("b0 synthetic ctor v621");
+            throw new NoSuchMethodException("b0 synthetic ctor");
         }
         ctor.setAccessible(true);
         Class<?>[] pt = ctor.getParameterTypes();
@@ -357,22 +401,19 @@ public class AicyBorrow {
             args[i] = defaultFor(pt[i]);
         }
         args[pt.length - 1] = Integer.valueOf(0b111100);
-        Object msg = ctor.newInstance(args);
-        log("built message role=" + roleName + " -> " + msg);
-        return msg;
+        return ctor.newInstance(args);
     }
 
     private Object buildRequest(String system, String user,
             Class<?> reqClass) throws Exception {
         List<Object> messages = new ArrayList<>();
-        messages.add(buildMessage("SYSTEM", system));
+        if (system != null && !system.isEmpty()) {
+            messages.add(buildMessage("SYSTEM", system));
+        }
         messages.add(buildMessage("USER", user));
-        // v621: 合成构造为 (int mask, 23 个真实参数)，无 marker。
-        // v624: mask 语义修正——这是 @Serializable 的序列化构造
-        //（与 b0 的默认参数构造正好相反）：bit 置 1 = 用传入值，
-        // bit 为 0 = 取默认；且 bit0(messages) 必填，不置 1 直接
-        // 抛 MissingFieldException（日志 83 的 InvocationTarget-
-        // Exception 即此）。只给 messages 与 caller：mask=33。
+        // ChatRequest 合成构造 (int mask, 23 个真实参数)：
+        // @Serializable 序列化语义，bit 置 1 = 用传入值，
+        // messages(bit0) 必填。只给 messages 与 caller(bit5)。
         Constructor<?> ctor = null;
         for (Constructor<?> c : reqClass.getDeclaredConstructors()) {
             Class<?>[] pt = c.getParameterTypes();
@@ -382,7 +423,7 @@ public class AicyBorrow {
             }
         }
         if (ctor == null) {
-            throw new NoSuchMethodException("request synthetic ctor v621");
+            throw new NoSuchMethodException("request synthetic ctor");
         }
         ctor.setAccessible(true);
         Class<?>[] pt = ctor.getParameterTypes();
@@ -404,9 +445,7 @@ public class AicyBorrow {
             }
         }
         args[6] = caller;
-        Object req = ctor.newInstance(args);
-        log("built request -> " + req);
-        return req;
+        return ctor.newInstance(args);
     }
 
     private static Object defaultFor(Class<?> t) {
