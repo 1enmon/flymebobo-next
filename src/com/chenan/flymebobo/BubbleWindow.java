@@ -4375,16 +4375,7 @@ public class BubbleWindow {
                 lightDotBody.setLayoutParams(blp);
             }
         }
-        if (lightBadge != null) {
-            android.widget.FrameLayout.LayoutParams glp =
-                    (android.widget.FrameLayout.LayoutParams)
-                            lightBadge.getLayoutParams();
-            if (glp != null) {
-                glp.gravity = Gravity.TOP
-                        | (right ? Gravity.END : Gravity.START);
-                lightBadge.setLayoutParams(glp);
-            }
-        }
+        positionLightBadge();
         // v596: 触碰范围加一点（wei 定）——根窗口上下
         // 与内侧各留 12dp 透明 padding 当触摸区，竖签本
         // 身大小不变；y 补偿掉上 padding，签仍落在原来
@@ -4432,22 +4423,9 @@ public class BubbleWindow {
                         FeatureFlags.lightDotColorInt());
             }
         }
-        // 角标贴签的外上角。
-        if (lightBadge != null) {
-            FrameLayout.LayoutParams blp = (FrameLayout
-                    .LayoutParams) lightBadge.getLayoutParams();
-            blp.gravity = Gravity.TOP
-                    | (right ? Gravity.END : Gravity.START);
-            if (right) {
-                blp.rightMargin = dp(5);
-                blp.leftMargin = 0;
-            } else {
-                blp.leftMargin = dp(5);
-                blp.rightMargin = 0;
-            }
-            blp.topMargin = 0;
-            lightBadge.setLayoutParams(blp);
-        }
+        // v629: 角标位置统一走 positionLightBadge
+        // （药丸展开时挪到外侧那头，不压头像）。
+        positionLightBadge();
         if (lightDotAdded) {
             try {
                 wm.updateViewLayout(lightDotRoot, lightDotParams);
@@ -4489,6 +4467,35 @@ public class BubbleWindow {
         }
     }
 
+    /** v629: 角标位置（wei 实测截图：药丸展开时角标
+     * 压住左端头像）——收起时贴小签外上角；药丸展开时
+     * 挪到药丸外侧那一头的上角，不压图标/头像。药丸
+     * 显隐的必经之路（updateLightBadge / refreshLightDot）
+     * 都过这里，位置始终跟得上。 */
+    private void positionLightBadge() {
+        if (lightBadge == null) {
+            return;
+        }
+        FrameLayout.LayoutParams blp = (FrameLayout
+                .LayoutParams) lightBadge.getLayoutParams();
+        if (blp == null) {
+            return;
+        }
+        boolean right = FeatureFlags.lightDotRight();
+        boolean pillShowing = (lightPill != null
+                && lightPill.getVisibility() == View.VISIBLE)
+                || (lightSubPill != null
+                && lightSubPill.getVisibility()
+                        == View.VISIBLE);
+        boolean atStart = right == pillShowing;
+        blp.gravity = Gravity.TOP
+                | (atStart ? Gravity.START : Gravity.END);
+        blp.leftMargin = atStart ? dp(5) : 0;
+        blp.rightMargin = atStart ? 0 : dp(5);
+        blp.topMargin = 0;
+        lightBadge.setLayoutParams(blp);
+    }
+
     private void updateLightBadge() {
         if (lightBadge == null) {
             return;
@@ -4500,6 +4507,7 @@ public class BubbleWindow {
         }
         lightBadge.setText(n > 9 ? "9+" : String.valueOf(n));
         lightBadge.setVisibility(View.VISIBLE);
+        positionLightBadge();
     }
 
     /** v564: 呼吸（约 3.2 秒一周期）；音乐播放时签底色随
