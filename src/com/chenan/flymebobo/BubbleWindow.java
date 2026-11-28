@@ -1616,6 +1616,98 @@ public class BubbleWindow {
     // 进程分析，结果回来存这里。标签值 suspect /
     // promo / important，按通知 key 存。
     private String lightAiSummary;
+    // v628: 摘要形象（wei 定：默认什么都没有，用户在
+    // AI 卡「摘要形象」里自己设）：头像
+    // /sdcard/flymebobo/persona.png + 名字 persona.txt，
+    // 这里按 mtime 懒加载，摘要卡与摘要药丸用。
+    private android.graphics.Bitmap lightPersonaBmp;
+    private String lightPersonaName = "";
+    private long lightPersonaPngMtime = -1;
+    private long lightPersonaTxtMtime = -1;
+
+    private void refreshLightPersona() {
+        try {
+            java.io.File png = null;
+            java.io.File txt = null;
+            for (String dir : new String[]{
+                    SettingsStore.DIR_PUBLIC,
+                    SettingsStore.DIR_PUBLIC_ALT}) {
+                if (png == null) {
+                    java.io.File f = new java.io.File(
+                            dir, "persona.png");
+                    if (f.isFile()) {
+                        png = f;
+                    }
+                }
+                if (txt == null) {
+                    java.io.File f = new java.io.File(
+                            dir, "persona.txt");
+                    if (f.isFile()) {
+                        txt = f;
+                    }
+                }
+            }
+            long pm = png == null ? -1 : png.lastModified();
+            if (pm != lightPersonaPngMtime) {
+                lightPersonaPngMtime = pm;
+                lightPersonaBmp = null;
+                if (png != null) {
+                    android.graphics.Bitmap raw =
+                            android.graphics.BitmapFactory
+                                    .decodeFile(
+                                            png.getAbsolutePath());
+                    if (raw != null) {
+                        lightPersonaBmp = circleBitmap(raw);
+                    }
+                }
+            }
+            long tm = txt == null ? -1 : txt.lastModified();
+            if (tm != lightPersonaTxtMtime) {
+                lightPersonaTxtMtime = tm;
+                lightPersonaName = "";
+                if (txt != null) {
+                    byte[] buf = new byte[(int) Math.min(
+                            txt.length(), 256)];
+                    java.io.FileInputStream in =
+                            new java.io.FileInputStream(txt);
+                    int n = in.read(buf);
+                    in.close();
+                    if (n > 0) {
+                        lightPersonaName = new String(
+                                buf, 0, n, "UTF-8").trim();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static android.graphics.Bitmap circleBitmap(
+            android.graphics.Bitmap src) {
+        int w = src.getWidth(), h = src.getHeight();
+        int side = Math.min(w, h);
+        android.graphics.Bitmap sq =
+                android.graphics.Bitmap.createBitmap(
+                        src, (w - side) / 2, (h - side) / 2,
+                        side, side);
+        int size = 96;
+        android.graphics.Bitmap out =
+                android.graphics.Bitmap.createBitmap(size, size,
+                        android.graphics.Bitmap.Config
+                                .ARGB_8888);
+        android.graphics.Canvas canvas =
+                new android.graphics.Canvas(out);
+        android.graphics.Paint paint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setShader(new android.graphics.BitmapShader(
+                android.graphics.Bitmap.createScaledBitmap(
+                        sq, size, size, true),
+                android.graphics.Shader.TileMode.CLAMP,
+                android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint);
+        return out;
+    }
     private final java.util.HashMap<String, String>
             lightAiTags = new java.util.HashMap<>();
     private String lightAiReqSig;
@@ -5193,13 +5285,40 @@ public class BubbleWindow {
         card.setLayoutParams(cardLp);
         android.widget.TextView label =
                 new android.widget.TextView(app);
-        label.setText("✦ AI 摘要");
         label.setTextSize(11);
         label.setTextColor(lpWhite()
                 ? Color.rgb(37, 99, 235)
                 : Color.rgb(147, 197, 253));
         label.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        card.addView(label);
+        // v628: 设了摘要形象就带头像+名字出面，没设保持原样。
+        refreshLightPersona();
+        if (lightPersonaBmp != null
+                || !lightPersonaName.isEmpty()) {
+            android.widget.LinearLayout head =
+                    new android.widget.LinearLayout(app);
+            head.setOrientation(
+                    android.widget.LinearLayout.HORIZONTAL);
+            head.setGravity(Gravity.CENTER_VERTICAL);
+            if (lightPersonaBmp != null) {
+                android.widget.ImageView av =
+                        new android.widget.ImageView(app);
+                av.setImageBitmap(lightPersonaBmp);
+                android.widget.LinearLayout.LayoutParams
+                        avLp = new android.widget.LinearLayout
+                                .LayoutParams(dp(22), dp(22));
+                avLp.rightMargin = dp(6);
+                av.setLayoutParams(avLp);
+                head.addView(av);
+            }
+            label.setText(lightPersonaName.isEmpty()
+                    ? "AI 摘要"
+                    : lightPersonaName + " 的摘要");
+            head.addView(label);
+            card.addView(head);
+        } else {
+            label.setText("✦ AI 摘要");
+            card.addView(label);
+        }
         android.widget.TextView body =
                 new android.widget.TextView(app);
         body.setText(lightAiSummary);
@@ -6673,10 +6792,18 @@ public class BubbleWindow {
                 || !lightDotAdded) {
             return;
         }
-        lightPillIcon.setVisibility(View.GONE);
+        // v628: 设了摘要形象，药丸带圆形头像、署名说话。
+        refreshLightPersona();
+        if (lightPersonaBmp != null) {
+            lightPillIcon.setImageBitmap(lightPersonaBmp);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightPillIcon.setVisibility(View.GONE);
+        }
         setLightPillLyricMode(true);
-        lightPillLabel.setText(
-                "✦ AI 摘要：" + lightAiFlashText);
+        lightPillLabel.setText((lightPersonaName.isEmpty()
+                ? "✦ AI 摘要：" : lightPersonaName + "：")
+                + lightAiFlashText);
         lightPill.setVisibility(View.VISIBLE);
         lightDotTab.setVisibility(View.GONE);
         updateLightBadge();

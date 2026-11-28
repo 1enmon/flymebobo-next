@@ -612,6 +612,19 @@ public class MainActivity extends Activity {
     private boolean soundAppsLoading;
     private MediaPlayer soundPreviewPlayer;
     private static final int REQ_PICK_SOUND = 5351;
+    // v628: 摘要形象（默认无，用户自设）。
+    private static final int REQ_PICK_PERSONA = 5352;
+    private static final String PERSONA_INTERNAL =
+            "persona_avatar.png";
+    private android.widget.ImageView personaPreview;
+    private EditText personaNameIn;
+    // ⚠⚠ v628 测试包专用种子（wei 本人版）：首次打开
+    // App 时把 assets/kai_persona.png 种成摘要形象、
+    // 名字 Kai。【发版前必须删除】：本常量、
+    // seedKaiPersonaIfAbsent 的调用与方法本体、
+    // assets/kai_persona.png 三处一起删，缺一不可
+    // ——上传版默认必须什么都没有（wei 2026-11-28 定）。
+    private static final boolean SEED_KAI_PERSONA = true;
     private static final String SOUND_CUSTOM_INTERNAL =
             "bubble_custom_sound";
     private static final long SOUND_MAX_CUSTOM_BYTES =
@@ -1137,6 +1150,9 @@ public class MainActivity extends Activity {
         // 两页，只要设置页（三栏外壳与镜像页代码留树里
         // 停用，面板里的收纳/时光机不受影响）。
         setContentView(scroll);
+        if (SEED_KAI_PERSONA) {
+            seedKaiPersonaIfAbsent();
+        }
         // v572: 切换动画的入场衔接——新页先盖一层新底色，
         // 380ms 淡出，落点与动画的漫换色不断层。
         if (pendingModeAnimIn) {
@@ -3308,6 +3324,121 @@ public class MainActivity extends Activity {
         aiNote.setTextColor(L_SUB);
         aiNote.setPadding(0, dp(4), 0, dp(2));
         body.addView(aiNote);
+        // v628: 摘要形象（wei 定：默认什么都没有，想要
+        // 的人自己设）——头像 + 名字，存在
+        // /sdcard/flymebobo/persona.png / persona.txt，
+        // SystemUI 侧摘要卡与摘要药丸读取展示。
+        TextView personaLabel = new TextView(this);
+        personaLabel.setText("摘要形象");
+        personaLabel.setTextSize(13);
+        personaLabel.setTextColor(L_SUB);
+        android.widget.LinearLayout.LayoutParams personaLabelLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        personaLabelLp.topMargin = dp(14);
+        personaLabel.setLayoutParams(personaLabelLp);
+        body.addView(personaLabel);
+        android.widget.LinearLayout personaRow =
+                new android.widget.LinearLayout(this);
+        personaRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        personaRow.setGravity(
+                android.view.Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams personaRowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        personaRowLp.topMargin = dp(6);
+        personaRow.setLayoutParams(personaRowLp);
+        personaPreview = new android.widget.ImageView(this);
+        personaRow.addView(personaPreview,
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(40), dp(40)));
+        personaNameIn = new EditText(this);
+        personaNameIn.setHint("名字（可空），比如 Kai");
+        personaNameIn.setSingleLine(true);
+        personaNameIn.setTextSize(14);
+        personaNameIn.setText(aiPrefs.getString(
+                "aiPersonaName", ""));
+        personaNameIn.setBackground(rounded(
+                Color.rgb(243, 244, 246), dp(10)));
+        personaNameIn.setPadding(dp(10), dp(7), dp(10), dp(7));
+        android.widget.LinearLayout.LayoutParams personaNameLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f);
+        personaNameLp.leftMargin = dp(10);
+        personaNameIn.setLayoutParams(personaNameLp);
+        personaRow.addView(personaNameIn);
+        body.addView(personaRow);
+        android.widget.LinearLayout personaBtns =
+                new android.widget.LinearLayout(this);
+        personaBtns.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams personaBtnsLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        personaBtnsLp.topMargin = dp(8);
+        personaBtns.setLayoutParams(personaBtnsLp);
+        TextView personaPick = buildWhitePillButton(
+                "选择图片", Color.rgb(37, 99, 235));
+        personaPick.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        openPersonaPicker();
+                    }
+                });
+        personaBtns.addView(personaPick);
+        TextView personaSave = buildWhitePillButton(
+                "保存名字", Color.rgb(37, 99, 235));
+        android.widget.LinearLayout.LayoutParams personaSaveLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        personaSaveLp.leftMargin = dp(8);
+        personaSave.setLayoutParams(personaSaveLp);
+        personaSave.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        String name = personaNameIn.getText()
+                                .toString().trim();
+                        aiPrefs.edit().putString(
+                                "aiPersonaName", name).apply();
+                        personaWriteName();
+                        Toast.makeText(MainActivity.this,
+                                "已保存", Toast.LENGTH_SHORT)
+                                .show();
+                    }
+                });
+        personaBtns.addView(personaSave);
+        TextView personaClear = buildWhitePillButton(
+                "清除", Color.rgb(220, 38, 38));
+        android.widget.LinearLayout.LayoutParams personaClearLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        personaClearLp.leftMargin = dp(8);
+        personaClear.setLayoutParams(personaClearLp);
+        personaClear.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        clearPersona();
+                    }
+                });
+        personaBtns.addView(personaClear);
+        body.addView(personaBtns);
+        TextView personaNote = new TextView(this);
+        personaNote.setText("默认不设置就是现在这样：摘要卡和摘要药丸不带任何形象。设置后，新摘要会带上这个头像和名字出面。");
+        personaNote.setTextSize(11.5f);
+        personaNote.setTextColor(L_SUB);
+        personaNote.setPadding(0, dp(4), 0, dp(2));
+        body.addView(personaNote);
+        refreshPersonaPreview();
         refreshAiLinkage();
         return card;
     }
@@ -5512,6 +5643,39 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode,
             Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_PERSONA) {
+            if (resultCode == RESULT_OK && data != null
+                    && data.getData() != null) {
+                final Uri uri = data.getData();
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String err =
+                                importPersonaImage(uri);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (err == null) {
+                                    refreshPersonaPreview();
+                                    Toast.makeText(
+                                            MainActivity.this,
+                                            "形象头像已设置",
+                                            Toast.LENGTH_SHORT)
+                                            .show();
+                                } else {
+                                    Toast.makeText(
+                                            MainActivity.this,
+                                            err,
+                                            Toast.LENGTH_LONG)
+                                            .show();
+                                }
+                            }
+                        });
+                    }
+                }).start();
+            }
+            return;
+        }
         if (requestCode != REQ_PICK_SOUND
                 || resultCode != RESULT_OK
                 || data == null || data.getData() == null) {
@@ -5539,6 +5703,235 @@ public class MainActivity extends Activity {
                         }
                     }
                 });
+            }
+        }).start();
+    }
+
+    // ================= v628 摘要形象 =================
+
+    private void openPersonaPicker() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("image/*");
+            startActivityForResult(i, REQ_PICK_PERSONA);
+        } catch (Throwable t) {
+            try {
+                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("image/*");
+                startActivityForResult(i, REQ_PICK_PERSONA);
+            } catch (Throwable t2) {
+                Toast.makeText(this, "打不开文件选择器",
+                        Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    /** 圆形裁切（设置页预览 + 落盘前的方图处理共用）。 */
+    private static android.graphics.Bitmap personaCircle(
+            android.graphics.Bitmap src, int size) {
+        int w = src.getWidth(), h = src.getHeight();
+        int side = Math.min(w, h);
+        android.graphics.Bitmap sq =
+                android.graphics.Bitmap.createBitmap(
+                        src, (w - side) / 2, (h - side) / 2,
+                        side, side);
+        android.graphics.Bitmap out =
+                android.graphics.Bitmap.createBitmap(size, size,
+                        android.graphics.Bitmap.Config
+                                .ARGB_8888);
+        android.graphics.Canvas canvas =
+                new android.graphics.Canvas(out);
+        android.graphics.Paint paint =
+                new android.graphics.Paint(
+                        android.graphics.Paint.ANTI_ALIAS_FLAG);
+        paint.setShader(new android.graphics.BitmapShader(
+                android.graphics.Bitmap.createScaledBitmap(
+                        sq, size, size, true),
+                android.graphics.Shader.TileMode.CLAMP,
+                android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint);
+        return out;
+    }
+
+    private void refreshPersonaPreview() {
+        if (personaPreview == null) {
+            return;
+        }
+        java.io.File f = new java.io.File(
+                getFilesDir(), PERSONA_INTERNAL);
+        android.graphics.Bitmap bmp = f.isFile()
+                ? android.graphics.BitmapFactory.decodeFile(
+                        f.getAbsolutePath()) : null;
+        if (bmp != null) {
+            personaPreview.setBackground(null);
+            personaPreview.setImageBitmap(
+                    personaCircle(bmp, 96));
+        } else {
+            personaPreview.setImageBitmap(null);
+            personaPreview.setBackground(rounded(
+                    Color.rgb(226, 232, 240), dp(999)));
+        }
+    }
+
+    /** 选中的图片：裁方缩到 192，内部一份（设置预览）、
+     * 公开目录一份（SystemUI 读）。成功返回 null。 */
+    private String importPersonaImage(Uri uri) {
+        android.graphics.Bitmap raw;
+        try {
+            InputStream in = getContentResolver()
+                    .openInputStream(uri);
+            if (in == null) {
+                return "读不到这个文件";
+            }
+            try {
+                raw = android.graphics.BitmapFactory
+                        .decodeStream(in);
+            } finally {
+                in.close();
+            }
+        } catch (Throwable t) {
+            return "读取失败：" + t.getMessage();
+        }
+        if (raw == null) {
+            return "这不是一张能读的图片";
+        }
+        int side = Math.min(raw.getWidth(), raw.getHeight());
+        android.graphics.Bitmap sq =
+                android.graphics.Bitmap.createScaledBitmap(
+                        android.graphics.Bitmap.createBitmap(
+                                raw, (raw.getWidth() - side) / 2,
+                                (raw.getHeight() - side) / 2,
+                                side, side),
+                        192, 192, true);
+        java.io.File internal = new java.io.File(
+                getFilesDir(), PERSONA_INTERNAL);
+        try {
+            OutputStream out = new FileOutputStream(internal);
+            try {
+                sq.compress(
+                        android.graphics.Bitmap.CompressFormat
+                                .PNG, 100, out);
+            } finally {
+                out.close();
+            }
+        } catch (Throwable t) {
+            return "保存失败：" + t.getMessage();
+        }
+        java.io.File pub = new java.io.File(
+                SettingsStore.DIR_PUBLIC, "persona.png");
+        boolean ok = soundCopyFile(internal, pub)
+                && pub.isFile() && pub.length() > 0;
+        if (!ok) {
+            ok = soundCopyViaSu(internal, pub);
+        }
+        if (!ok) {
+            return "保存失败：公开目录写不进去";
+        }
+        personaWriteName();
+        return null;
+    }
+
+    /** 名字写公开目录 persona.txt（SystemUI 读）。 */
+    private void personaWriteName() {
+        try {
+            String name = getSharedPreferences(
+                    "flymebobo_ai", MODE_PRIVATE).getString(
+                    "aiPersonaName", "");
+            java.io.File tmp = new java.io.File(
+                    getFilesDir(), "persona_name.txt");
+            OutputStream out = new FileOutputStream(tmp);
+            try {
+                out.write(name.getBytes("UTF-8"));
+            } finally {
+                out.close();
+            }
+            java.io.File pub = new java.io.File(
+                    SettingsStore.DIR_PUBLIC, "persona.txt");
+            if (!soundCopyFile(tmp, pub)) {
+                soundCopyViaSu(tmp, pub);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void clearPersona() {
+        try {
+            new java.io.File(getFilesDir(), PERSONA_INTERNAL)
+                    .delete();
+            new java.io.File(SettingsStore.DIR_PUBLIC,
+                    "persona.png").delete();
+            new java.io.File(SettingsStore.DIR_PUBLIC,
+                    "persona.txt").delete();
+            try {
+                Runtime.getRuntime().exec(new String[]{
+                        "su", "-c", "rm -f "
+                                + SettingsStore.DIR_PUBLIC
+                                + "/persona.png "
+                                + SettingsStore.DIR_PUBLIC
+                                + "/persona.txt"});
+            } catch (Throwable ignored) {
+            }
+            getSharedPreferences("flymebobo_ai", MODE_PRIVATE)
+                    .edit().remove("aiPersonaName").apply();
+            if (personaNameIn != null) {
+                personaNameIn.setText("");
+            }
+            refreshPersonaPreview();
+            Toast.makeText(this, "已清除形象",
+                    Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** ⚠ v628 测试包种子（wei 本人版）：公开目录还没有
+     * 形象时，把 assets/kai_persona.png 种进去、名字
+     * Kai。发版前连同 SEED_KAI_PERSONA 一起删除。 */
+    private void seedKaiPersonaIfAbsent() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    java.io.File pub = new java.io.File(
+                            SettingsStore.DIR_PUBLIC,
+                            "persona.png");
+                    if (pub.isFile()) {
+                        return;
+                    }
+                    InputStream in = getAssets().open(
+                            "kai_persona.png");
+                    android.graphics.Bitmap raw;
+                    try {
+                        raw = android.graphics.BitmapFactory
+                                .decodeStream(in);
+                    } finally {
+                        in.close();
+                    }
+                    if (raw == null) {
+                        return;
+                    }
+                    java.io.File internal = new java.io.File(
+                            getFilesDir(), PERSONA_INTERNAL);
+                    OutputStream out =
+                            new FileOutputStream(internal);
+                    try {
+                        raw.compress(android.graphics.Bitmap
+                                .CompressFormat.PNG, 100, out);
+                    } finally {
+                        out.close();
+                    }
+                    boolean ok = soundCopyFile(internal, pub)
+                            && pub.isFile() && pub.length() > 0;
+                    if (!ok) {
+                        soundCopyViaSu(internal, pub);
+                    }
+                    getSharedPreferences("flymebobo_ai",
+                            MODE_PRIVATE).edit().putString(
+                            "aiPersonaName", "Kai").apply();
+                    personaWriteName();
+                } catch (Throwable ignored) {
+                }
             }
         }).start();
     }
