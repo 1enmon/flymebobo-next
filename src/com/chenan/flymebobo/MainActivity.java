@@ -3002,11 +3002,6 @@ public class MainActivity extends Activity {
         dglp.topMargin = dp(14);
         digestLabel.setLayoutParams(dglp);
         body.addView(digestLabel);
-        body.addView(buildSubSwitch(new Feature(
-                "digestOn", "昨日回顾",
-                "早报里附一段昨天的通知回顾（本地统计，不用 AI 也能出）",
-                "", Color.rgb(37, 99, 235), "顾", true,
-                null)));
         View digestAiRow = buildSubSwitch(new Feature(
                 "digestAi", "昨日回顾用 AI 写",
                 "让 AI 读昨天的通知，像朋友一样写成一段回顾",
@@ -3987,6 +3982,15 @@ public class MainActivity extends Activity {
                 });
         morningCityRow.addView(morningCitySave);
         body.addView(morningCityRow);
+
+        // v639: 昨日回顾搬到轻气泡卡、和早报并列（wei
+        // 定）；AI 卡只留两个「用 AI 写」开关。（v638
+        // 脚本失手只升了版本号，此版才是真搬。）
+        body.addView(buildSubSwitch(new Feature(
+                "digestOn", "昨日回顾",
+                "早报里附一段昨天的通知回顾（本地统计，不用 AI 也能出）",
+                "", Color.rgb(37, 99, 235), "顾", true,
+                null)));
 
         // v572: 打开方式单独设计（预览定稿）——两张示意图
         // 卡：小窗（浮窗图）/ 全局（全屏图），点选即切换，
