@@ -192,6 +192,10 @@ public class FeatureFlags {
     // msgRemindContent 子开关决定带不带内容（默认不带）。
     public static volatile boolean msgRemind = true;
     public static volatile boolean msgRemindContent = false;
+    // v653: 保留原通知（wei 转达用户需求）——开了之后
+    // 被收纳的通知在通知栏也留一份，音乐/下载同理；
+    // 默认关，保持现行「收进来就藏」的干净口径。
+    public static volatile boolean keepOriginal = false;
 
     // v600: 轻气泡 AI 助手（wei 定：收纳摘要 + 语义打
     // 标进轻气泡，DeepSeek 预设、自带 Key）——总开关
@@ -554,6 +558,10 @@ public class FeatureFlags {
             msgRemindContent = enabled;
             FileLog.i("Light msgRemindContent -> "
                     + (enabled ? "on" : "off"));
+        } else if ("keepOriginal".equals(key)) {
+            keepOriginal = enabled;
+            FileLog.i("Light keepOriginal -> "
+                    + (enabled ? "on" : "off"));
         } else if ("aiEnabled".equals(key)) {
             aiEnabled = enabled;
             FileLog.i("Light ai -> "
@@ -664,6 +672,8 @@ public class FeatureFlags {
                     "msgRemind", prefs, true);
             msgRemindContent = fileOrPrefsBool(
                     "msgRemindContent", prefs, false);
+            keepOriginal = fileOrPrefsBool(
+                    "keepOriginal", prefs, false);
             aiEnabled = fileOrPrefsBool(
                     "aiEnabled", prefs, false);
             aiSummary = fileOrPrefsBool(

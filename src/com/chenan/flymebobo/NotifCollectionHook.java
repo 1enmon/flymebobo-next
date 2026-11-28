@@ -123,7 +123,8 @@ public final class NotifCollectionHook {
                     // 是另一条管线，歌词/进度读取不受影响
                     // （CallNotifSuppress 同款口径）。
                     try {
-                        if (FeatureFlags.lightMode) {
+                        if (FeatureFlags.lightMode
+                                && !FeatureFlags.keepOriginal) {
                             StatusBarNotification msbn =
                                     (StatusBarNotification)
                                             chain.getArg(0);
@@ -153,6 +154,7 @@ public final class NotifCollectionHook {
                     // 通知两头不到。
                     try {
                         if (FeatureFlags.lightMode
+                                && !FeatureFlags.keepOriginal
                                 && FeatureFlags.notif
                                 && FeatureFlags.dl) {
                             StatusBarNotification dsbn =

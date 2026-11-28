@@ -3813,6 +3813,15 @@ public class MainActivity extends Activity {
                 "", Color.rgb(59, 130, 246), "文", false,
                 "msgRemind")));
 
+        // v653: 保留原通知（wei 转达的用户需求：既要
+        // 原通知又要我们的）——收纳照常进面板，但原
+        // 通知也在通知栏留一份；音乐/下载同理不藏。
+        body.addView(buildSubSwitch(new Feature(
+                "keepOriginal", "保留原通知",
+                "收纳后原通知在通知栏也留一份，两边都能点开；音乐、下载也照留",
+                "", Color.rgb(59, 130, 246), "留", false,
+                null)));
+
         // v631: 每日早报（wei 预览定版）——开关/时间/
         // 城市存 flymebobo_morning，改完立即重排闹钟。
         final android.content.SharedPreferences morningPrefs =

@@ -5369,6 +5369,7 @@ public class NotificationService extends NotificationListenerService {
                 }
                 boolean z13 = z10;
                 boolean z14 = false;
+                boolean keepOrigShade = false;
                 if (!z6 && !z13) {
                     try {
                         if (getSharedPreferences("flymebobo_features", 0).getBoolean("lightMode", false)) {
@@ -5377,11 +5378,18 @@ public class NotificationService extends NotificationListenerService {
                             if (z14) {
                                 FileLog.i("Light release keep shade pkg=" + statusBarNotification.getPackageName());
                             }
+                            // v653: 保留原通知开着——收纳
+                            // 照常，但 NS 不再撤这条，原通知
+                            // 留在通知栏，两边都能点开。
+                            keepOrigShade = getSharedPreferences("flymebobo_features", 0).getBoolean("keepOriginal", false);
+                            if (keepOrigShade) {
+                                FileLog.i("KeepOriginal keep shade pkg=" + statusBarNotification.getPackageName());
+                            }
                         }
                     } catch (Throwable th25) {
                     }
                 }
-                if (!z6 && !z13 && FeatureFlags.notif && !z14) {
+                if (!z6 && !z13 && FeatureFlags.notif && !z14 && !keepOrigShade) {
                     try {
                         cancelNotif(statusBarNotification);
                     } catch (Throwable th26) {
