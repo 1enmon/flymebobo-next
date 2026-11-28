@@ -7054,6 +7054,12 @@ public class BubbleWindow {
         if (body == null || body.isEmpty()) {
             return;
         }
+        // v635: AI 富化版可能迟到——同一天的早报已经
+        // 看过就别再拿迟到的版本把它顶出来。
+        if (lightMorningSeen && dateStr != null
+                && dateStr.equals(lightMorningDate)) {
+            return;
+        }
         lightMorningLine = line;
         lightMorningBody = body;
         lightMorningDate = dateStr;

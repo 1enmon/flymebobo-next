@@ -192,10 +192,13 @@ public class MorningReceiver extends BroadcastReceiver {
                         "flymebobo_features",
                         Context.MODE_PRIVATE);
         // v634: 昨日回顾（本地统计；开关在 AI 卡）。
-        Digest dg = null;
-        if (features.getBoolean("digestOn", true)) {
-            dg = buildDigest(ctx);
-        }
+        // v635: 流水先全量读出来——回顾关着时，AI 记
+        // 忆也要靠它更新。
+        Digest dgAll = buildDigest(ctx);
+        Digest dg = features.getBoolean("digestOn", true)
+                ? dgAll : null;
+        // v635: 位置采样（学家里/常去地，权限没给就跳过）。
+        samplePlace(ctx);
         boolean light = false;
         try {
             light = features.getBoolean("lightMode",
@@ -227,7 +230,10 @@ public class MorningReceiver extends BroadcastReceiver {
                 "morningAi", false);
         boolean wantDAi = aiMaster && dg != null
                 && features.getBoolean("digestAi", false);
-        if (!wantMAi && !wantDAi) {
+        // v635: 记忆本开关（AI 卡）——有流水才更新。
+        boolean wantMem = aiMaster && dgAll != null
+                && features.getBoolean("aiMemory", false);
+        if (!wantMAi && !wantDAi && !wantMem) {
             ctx.sendBroadcast(report);
             FileLog.i("Morning report sent (light)");
             return;
@@ -277,14 +283,30 @@ public class MorningReceiver extends BroadcastReceiver {
             prep.putExtra("digestHead", dg.head);
             prep.putExtra("digestText", dg.text);
             prep.putExtra("digestChips", dg.chips);
-            prep.putExtra("aiBlob", dg.aiBlob);
+        }
+        if (dgAll != null) {
+            prep.putExtra("aiBlob", dgAll.aiBlob);
         }
         prep.putExtra("wantMorningAi", wantMAi);
         prep.putExtra("wantDigestAi", wantDAi);
+        prep.putExtra("wantMemory", wantMem);
+        prep.putExtra("yday", new SimpleDateFormat(
+                "yyyy-MM-dd", Locale.US)
+                .format(new java.util.Date(
+                        System.currentTimeMillis()
+                                - 86400000L)));
+        android.content.SharedPreferences places =
+                ctx.getSharedPreferences("flymebobo_places",
+                        Context.MODE_PRIVATE);
+        prep.putExtra("placeNow",
+                places.getString("placeNow", ""));
+        prep.putExtra("homeText",
+                places.getString("homeText", ""));
         ctx.sendBroadcast(prep);
         boolean got = false;
         try {
-            got = latch.await(30,
+            // v635: 带记忆时多一步更新调用，多等一会。
+            got = latch.await(wantMem ? 75 : 30,
                     java.util.concurrent.TimeUnit.SECONDS);
         } catch (Throwable ignored) {
         }
@@ -591,6 +613,162 @@ public class MorningReceiver extends BroadcastReceiver {
             case 95: return "雷阵雨";
             case 96: case 99: return "冰雹";
             default: return "多云";
+        }
+    }
+
+    /** v635: 位置采样——取一次最近位置（粗定位、
+     * 约百米精度），攒样本学「家」：凌晨 0-5 点出现
+     * 最多的点（≥3 次）算家。结果存 flymebobo_places
+     * （placeNow/homeText），喂给 AI 记忆更新。权限
+     * 没给或拿不到位置就静默跳过。NS 的 AI 分析路径
+     * 也会调（3 小时节流），样本才攒得起来。 */
+    public static void samplePlace(Context ctx) {
+        try {
+            if (ctx.checkSelfPermission(
+                    android.Manifest.permission
+                            .ACCESS_COARSE_LOCATION)
+                    != android.content.pm.PackageManager
+                            .PERMISSION_GRANTED) {
+                return;
+            }
+            android.content.SharedPreferences places =
+                    ctx.getSharedPreferences(
+                            "flymebobo_places",
+                            Context.MODE_PRIVATE);
+            long now = System.currentTimeMillis();
+            if (now - places.getLong("lastSampleAt", 0)
+                    < 3L * 3600000L) {
+                return;
+            }
+            android.location.LocationManager lm =
+                    (android.location.LocationManager)
+                            ctx.getSystemService(
+                                    Context.LOCATION_SERVICE);
+            if (lm == null) {
+                return;
+            }
+            android.location.Location loc = null;
+            try {
+                loc = lm.getLastKnownLocation(
+                        android.location.LocationManager
+                                .NETWORK_PROVIDER);
+            } catch (Throwable ignored) {
+            }
+            if (loc == null) {
+                try {
+                    loc = lm.getLastKnownLocation(
+                            android.location.LocationManager
+                                    .GPS_PROVIDER);
+                } catch (Throwable ignored) {
+                }
+            }
+            if (loc == null || now - loc.getTime()
+                    > 24L * 3600000L) {
+                return;
+            }
+            double la = Math.round(
+                    loc.getLatitude() * 1000.0) / 1000.0;
+            double lo = Math.round(
+                    loc.getLongitude() * 1000.0) / 1000.0;
+            String key = la + "," + lo;
+            org.json.JSONArray arr;
+            try {
+                arr = new org.json.JSONArray(
+                        places.getString("samples", "[]"));
+            } catch (Throwable t) {
+                arr = new org.json.JSONArray();
+            }
+            org.json.JSONObject one =
+                    new org.json.JSONObject();
+            one.put("t", now);
+            one.put("k", key);
+            arr.put(one);
+            while (arr.length() > 80) {
+                arr.remove(0);
+            }
+            android.content.SharedPreferences.Editor ed =
+                    places.edit();
+            ed.putString("samples", arr.toString());
+            ed.putLong("lastSampleAt", now);
+            // 现在的地名（按点缓存反查）
+            String geoKey = "geo:" + key;
+            String placeText = places.getString(geoKey,
+                    "");
+            if (placeText.isEmpty()) {
+                placeText = reversePlace(la, lo);
+                if (!placeText.isEmpty()) {
+                    ed.putString(geoKey, placeText);
+                }
+            }
+            if (!placeText.isEmpty()) {
+                ed.putString("placeNow", placeText);
+            }
+            // 学家：凌晨样本最多的点
+            java.util.Map<String, Integer> night =
+                    new java.util.HashMap<>();
+            for (int i = 0; i < arr.length(); i++) {
+                org.json.JSONObject o =
+                        arr.optJSONObject(i);
+                if (o == null) {
+                    continue;
+                }
+                java.util.Calendar c =
+                        java.util.Calendar.getInstance();
+                c.setTimeInMillis(o.optLong("t", 0));
+                int h = c.get(
+                        java.util.Calendar.HOUR_OF_DAY);
+                if (h >= 0 && h < 5) {
+                    String k = o.optString("k", "");
+                    Integer n = night.get(k);
+                    night.put(k, n == null ? 1 : n + 1);
+                }
+            }
+            String homeKey = null;
+            int homeN = 2;
+            for (java.util.Map.Entry<String, Integer> e
+                    : night.entrySet()) {
+                if (e.getValue() > homeN) {
+                    homeN = e.getValue();
+                    homeKey = e.getKey();
+                }
+            }
+            if (homeKey != null && !homeKey.equals(
+                    places.getString("homeKey", ""))) {
+                String[] parts = homeKey.split(",");
+                String ht = reversePlace(
+                        Double.parseDouble(parts[0]),
+                        Double.parseDouble(parts[1]));
+                ed.putString("homeKey", homeKey);
+                if (!ht.isEmpty()) {
+                    ed.putString("homeText", ht);
+                    FileLog.i("Morning learned home " + ht);
+                }
+            }
+            ed.apply();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 经纬度反查区县名（BigDataCloud 免费接口）。 */
+    private static String reversePlace(double la,
+            double lo) {
+        try {
+            JSONObject o = new JSONObject(get(
+                    "https://api.bigdatacloud.net/data/"
+                            + "reverse-geocode-client"
+                            + "?latitude=" + la
+                            + "&longitude=" + lo
+                            + "&localityLanguage=zh"));
+            String city = o.optString("city", "");
+            String loc = o.optString("locality", "");
+            if (loc.isEmpty()) {
+                loc = o.optString(
+                        "principalSubdivision", "");
+            }
+            String t = city + (loc.equals(city) ? "" : loc);
+            return t == null ? "" : t.trim();
+        } catch (Throwable t) {
+            return "";
         }
     }
 

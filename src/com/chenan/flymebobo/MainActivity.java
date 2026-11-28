@@ -3016,6 +3016,33 @@ public class MainActivity extends Activity {
                 null));
         lightAiSubViews.put("morningAiFast", morningFastRow);
         body.addView(morningFastRow);
+        // v635: 记忆本（wei 预览定版 + 扩围：记习惯、
+        // 位置、家、日常）——开关 + 查看入口。
+        View memRow = buildSubSwitch(new Feature(
+                "aiMemory", "记忆本",
+                "让它记住没了结的事、习惯、家和日常，写早报和回顾时带上",
+                "", Color.rgb(37, 99, 235), "忆", false,
+                null));
+        lightAiSubViews.put("aiMemory", memRow);
+        body.addView(memRow);
+        TextView memBtn = buildWhitePillButton(
+                "查看记忆本", Color.rgb(37, 99, 235));
+        LinearLayout.LayoutParams memBtnLp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        memBtnLp.topMargin = dp(8);
+        memBtn.setLayoutParams(memBtnLp);
+        memBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        startActivity(new Intent(
+                                MainActivity.this,
+                                MemoryActivity.class));
+                    }
+                });
+        body.addView(memBtn);
         // v609: 网络歌词兜底已按 wei 的话移去音乐
         // 卡片那边（FEATURES 表 parent=music），AI
         // 卡里不再放这一行。
@@ -8920,6 +8947,7 @@ public class MainActivity extends Activity {
         if ("morningAi".equals(key)) return false;
         if ("digestAiFast".equals(key)) return false;
         if ("morningAiFast".equals(key)) return false;
+        if ("aiMemory".equals(key)) return false;
         for (Feature f : FEATURES) {
             if (f.key.equals(key)) return f.def;
         }

@@ -3335,45 +3335,181 @@ public class NotificationService extends NotificationListenerService {
                 String name = morningPersonaName();
                 String who = name.isEmpty()
                         ? "贴身助理" : "「" + name + "」";
-                if (in.getBooleanExtra("wantMorningAi",
-                        false)) {
+                String blob = in.getStringExtra("aiBlob");
+                boolean wantMAi = in.getBooleanExtra(
+                        "wantMorningAi", false);
+                boolean wantDAi = in.getBooleanExtra(
+                        "wantDigestAi", false);
+                boolean wantMem = in.getBooleanExtra(
+                        "wantMemory", false);
+                boolean digestEnabled =
+                        in.getStringExtra("digestHead")
+                                != null;
+                boolean digestDone = false;
+                org.json.JSONObject memObj = wantMem
+                        ? AiMemory.load(this) : null;
+                // 1) 记忆更新：开了回顾 AI 就合并成一次
+                // 调用（记忆+回顾一起出），否则单独更。
+                if (wantMem && blob != null
+                        && !blob.isEmpty()) {
+                    boolean combined = wantDAi
+                            && digestEnabled;
                     aiFastOverride.set(Boolean.valueOf(
                             feats.getBoolean(
-                                    "morningAiFast", false)));
-                    String prompt = "城市："
-                            + in.getStringExtra("city")
-                            + "；日期："
-                            + in.getStringExtra("dateStr")
-                            + "；天气："
-                            + in.getStringExtra("cond")
-                            + "；最低 "
-                            + in.getStringExtra("tmin")
-                            + "°C，最高 "
-                            + in.getStringExtra("tmax")
-                            + "°C；降雨概率 "
-                            + in.getStringExtra("pp")
-                            + "%；空气质量 AQI "
-                            + in.getStringExtra("aqi")
-                            + "。请以" + who
-                            + "的身份写一段晨间早报正文，"
-                            + "2-3 句，第一人称、像朋友一样"
-                            + "亲切提醒；只用上面给的数据，"
-                            + "不许编造其他数字；可以给一句"
-                            + "生活建议。只输出正文。";
+                                    "digestAiFast", false)));
+                    String placeFacts = "";
+                    String pn = in.getStringExtra(
+                            "placeNow");
+                    String hm = in.getStringExtra(
+                            "homeText");
+                    if ((pn != null && !pn.isEmpty())
+                            || (hm != null
+                                    && !hm.isEmpty())) {
+                        placeFacts = "\n补充事实："
+                                + (pn != null && !pn.isEmpty()
+                                        ? "用户现在大概在 "
+                                                + pn + "；"
+                                        : "")
+                                + (hm != null && !hm.isEmpty()
+                                        ? "学到的家在 " + hm
+                                                + "（供参考）。"
+                                        : "");
+                    }
+                    String yday = in.getStringExtra("yday");
+                    if (yday == null) {
+                        yday = "";
+                    }
+                    String prompt = "你现在的记忆本"
+                            + "（JSON）："
+                            + memObj.toString()
+                            + placeFacts
+                            + "\n昨天（" + yday
+                            + "）的通知流水（应用｜标题｜"
+                            + "正文）：\n" + blob
+                            + "\n请输出一个新的完整 JSON："
+                            + "{\"memory\":{\"pending\":"
+                            + "[{\"text\":\"\",\"since\":"
+                            + "\"yyyy-MM-dd\"}],"
+                            + "\"habits\":[],\"places\":[],"
+                            + "\"daily\":[]}"
+                            + (combined
+                                    ? ",\"digest\":\"昨日回顾"
+                                            + "\",\"highlights"
+                                            + "\":[\"重点\"]"
+                                    : "")
+                            + "}。规矩：pending 只留还没了"
+                            + "结、值得日后提醒的事（有人找"
+                            + "没回、快递待取、将到的行程/"
+                            + "账单/停水停电），办完的、超"
+                            + "过 3 天没下文的删掉，新记的 "
+                            + "since 填 " + yday
+                            + "，老条目保留原 since；habits"
+                            + " 记长期习惯，places 记家和常"
+                            + "去的地方（结合补充事实与通知"
+                            + "里的地址），daily 记日常节奏"
+                            + "（出门/回家时间、每周固定安"
+                            + "排）；没有新发现就保留原来的"
+                            + "，不许编造；每组最多 8 条。"
+                            + (combined
+                                    ? "digest 用第一人称口语"
+                                            + "写两三句，像朋友一"
+                                            + "样概括昨天，并自然"
+                                            + "带上还没了结的事提"
+                                            + "醒；highlights 最多"
+                                            + " 3 条，只挑真正重要"
+                                            + "的。"
+                                    : "")
+                            + "只输出 JSON。";
                     String r = useAicy
                             ? aicyAsk("你是" + who
-                                    + "，只输出正文。", prompt)
+                                    + "，只输出 JSON。", prompt)
                             : aiChatOnce(apiBase, apiKey,
                                     apiModel, prompt);
-                    if (r != null && r.trim().length() >= 8
-                            && r.trim().length() <= 400) {
-                        out.putExtra("body", r.trim());
-                        FileLog.i("Morning ai body ok");
+                    if (r != null) {
+                        try {
+                            int l = r.indexOf('{');
+                            int rr = r.lastIndexOf('}');
+                            if (l >= 0 && rr > l) {
+                                org.json.JSONObject o =
+                                        new org.json.JSONObject(
+                                                r.substring(l,
+                                                        rr + 1));
+                                org.json.JSONObject nm =
+                                        o.optJSONObject(
+                                                "memory");
+                                if (nm != null) {
+                                    for (String k
+                                            : AiMemory.KEYS) {
+                                        org.json.JSONArray a =
+                                                nm.optJSONArray(
+                                                        k);
+                                        if (a == null) {
+                                            nm.put(k,
+                                                    new org.json
+                                                            .JSONArray());
+                                        } else if (a.length()
+                                                > 8) {
+                                            org.json.JSONArray
+                                                    cut =
+                                                    new org.json
+                                                            .JSONArray();
+                                            for (int i = 0;
+                                                    i < 8; i++) {
+                                                cut.put(a
+                                                        .get(i));
+                                            }
+                                            nm.put(k, cut);
+                                        }
+                                    }
+                                    AiMemory.save(this, nm);
+                                    memObj = nm;
+                                    FileLog.i("Morning memory updated");
+                                }
+                                if (combined) {
+                                    String dg = o.optString(
+                                            "digest", "");
+                                    if (!dg.isEmpty()) {
+                                        out.putExtra(
+                                                "digestText",
+                                                dg);
+                                        digestDone = true;
+                                    }
+                                    org.json.JSONArray hl =
+                                            o.optJSONArray(
+                                                    "highlights");
+                                    if (hl != null
+                                            && hl.length()
+                                                    > 0) {
+                                        StringBuilder cb =
+                                                new StringBuilder();
+                                        for (int i = 0;
+                                                i < hl.length()
+                                                        && i < 3;
+                                                i++) {
+                                            if (i > 0) {
+                                                cb.append(
+                                                        "\u0001");
+                                            }
+                                            cb.append(hl
+                                                    .optString(
+                                                            i, ""));
+                                        }
+                                        out.putExtra(
+                                                "digestChips",
+                                                cb.toString());
+                                    }
+                                }
+                            }
+                        } catch (Throwable t) {
+                            FileLog.i("Morning memory parse fail");
+                        }
                     }
                 }
-                String blob = in.getStringExtra("aiBlob");
-                if (in.getBooleanExtra("wantDigestAi",
-                        false) && blob != null
+                String memText = memObj != null
+                        ? AiMemory.promptText(memObj) : "";
+                // 2) 回顾单独调用（没合并成时）。
+                if (wantDAi && digestEnabled && !digestDone
+                        && blob != null
                         && !blob.isEmpty()) {
                     aiFastOverride.set(Boolean.valueOf(
                             feats.getBoolean(
@@ -3381,13 +3517,17 @@ public class NotificationService extends NotificationListenerService {
                     String prompt = "下面是昨天的通知流水"
                             + "（应用｜标题｜正文）：\n"
                             + blob
+                            + (memText.isEmpty() ? ""
+                                    : "\n你的记忆本：\n"
+                                            + memText + "\n")
                             + "\n请以" + who
                             + "的身份输出 JSON："
                             + "{\"digest\":\"昨日回顾\","
                             + "\"highlights\":[\"重点\"]}"
                             + "。digest 用第一人称口语写两三"
                             + "句，像朋友提醒一样概括昨天谁"
-                            + "找过用户、有什么要紧事；"
+                            + "找过用户、有什么要紧事，并自"
+                            + "然带上记忆里还没了结的事；"
                             + "highlights 只挑真正重要的（有"
                             + "人找、待办、票证、账单、风险）"
                             + "，最多 3 条，没有给空数组。"
@@ -3440,6 +3580,49 @@ public class NotificationService extends NotificationListenerService {
                         } catch (Throwable t) {
                             FileLog.i("Morning ai digest parse fail");
                         }
+                    }
+                }
+                // 3) 早报正文（带上记忆，今要紧的顺带提）。
+                if (wantMAi) {
+                    aiFastOverride.set(Boolean.valueOf(
+                            feats.getBoolean(
+                                    "morningAiFast", false)));
+                    String prompt = "城市："
+                            + in.getStringExtra("city")
+                            + "；日期："
+                            + in.getStringExtra("dateStr")
+                            + "；天气："
+                            + in.getStringExtra("cond")
+                            + "；最低 "
+                            + in.getStringExtra("tmin")
+                            + "°C，最高 "
+                            + in.getStringExtra("tmax")
+                            + "°C；降雨概率 "
+                            + in.getStringExtra("pp")
+                            + "%；空气质量 AQI "
+                            + in.getStringExtra("aqi")
+                            + "。请以" + who
+                            + "的身份写一段晨间早报正文，"
+                            + "2-3 句，第一人称、像朋友一样"
+                            + "亲切提醒；只用上面给的数据，"
+                            + "不许编造其他数字；可以给一句"
+                            + "生活建议。"
+                            + (memText.isEmpty() ? ""
+                                    : "你的记忆本：\n"
+                                            + memText
+                                            + "\n如果里面有今天要"
+                                            + "紧的事，在正文里顺"
+                                            + "带一句提醒。")
+                            + "只输出正文。";
+                    String r = useAicy
+                            ? aicyAsk("你是" + who
+                                    + "，只输出正文。", prompt)
+                            : aiChatOnce(apiBase, apiKey,
+                                    apiModel, prompt);
+                    if (r != null && r.trim().length() >= 8
+                            && r.trim().length() <= 400) {
+                        out.putExtra("body", r.trim());
+                        FileLog.i("Morning ai body ok");
                     }
                 }
             }
@@ -3526,6 +3709,9 @@ public class NotificationService extends NotificationListenerService {
 
     private void handleAiAnalyze(
             final android.content.Intent intent) {
+        // v635: 顺带攒位置样本（自带 3 小时节流），
+        // 记忆本学「家」靠它。
+        MorningReceiver.samplePlace(this);
         final String sig = intent.getStringExtra("sig");
         final String blob = intent.getStringExtra("blob");
         final boolean wantSummary =

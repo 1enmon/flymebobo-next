@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <queries>
         <intent>
@@ -23,6 +24,7 @@
         </activity>
         <activity android:exported="false" android:name=".AppRulesActivity" android:label="应用规则"/>
         <activity android:exported="false" android:name=".SceneExceptionsActivity" android:label="场景例外"/>
+        <activity android:exported="false" android:name=".MemoryActivity" android:label="记忆本"/>
         <activity android:exported="false" android:name=".TempSilenceActivity" android:label="临时静默"/>
         <receiver android:exported="false" android:name=".TempSilenceAlarmReceiver"/>
         <receiver android:exported="false" android:name=".InfoRemindReceiver">
