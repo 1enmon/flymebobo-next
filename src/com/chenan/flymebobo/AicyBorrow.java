@@ -148,20 +148,47 @@ public class AicyBorrow {
                     + "[2] 标题：95588 正文：您的账户涉嫌洗钱，请点击链接验证身份\n"
                     + "[3] 标题：购物App 正文：大促最后一天，全场五折\n"
                     + "输出格式：{\"summary\":\"一句话总结这些通知（中文，30字以内，没有值得总结的就空字符串）\"}";
-            Method c = findChatMethod(client.getClass());
-            // v622: 请求类的真实运行时名是 d7.i（jadx 因与 d7.I
-            // 大小写冲突改的名 C2117i/C6336i 在真机不存在）——
-            // 直接从客户端 c 方法的参数类型取 Class，不再写死类名。
+            // v625: 改走流式 a()——c() 的参数类型是具体的
+            // ContinuationImpl（日志 84 实证 Proxy 被拒），而
+            // Flow 的 collect 与 collector.emit 参数都是
+            // Continuation 接口（dex 实证），Proxy 可用。
+            Method a = null;
+            for (Method m : client.getClass()
+                    .getDeclaredMethods()) {
+                if ("a".equals(m.getName())
+                        && m.getParameterTypes().length == 1) {
+                    a = m;
+                    break;
+                }
+            }
+            if (a == null) {
+                throw new NoSuchMethodException("a/1");
+            }
+            a.setAccessible(true);
             Object request = buildRequest(system, user,
-                    c.getParameterTypes()[0]);
-            log("test ask sending caller=QUICKPASS_SUMMARY");
-            Object cont = makeContinuation();
-            Object ret = c.invoke(client, request, cont);
+                    a.getParameterTypes()[0]);
+            log("test ask streaming caller=QUICKPASS_SUMMARY");
+            Object flow = a.invoke(client, request);
+            Object collector = makeCollector();
+            Method collect = null;
+            for (Method m : flow.getClass().getMethods()) {
+                if ("b".equals(m.getName())
+                        && m.getParameterTypes().length == 2) {
+                    collect = m;
+                    break;
+                }
+            }
+            if (collect == null) {
+                throw new NoSuchMethodException("flow collect b/2");
+            }
+            collect.setAccessible(true);
+            Object ret = collect.invoke(flow, collector,
+                    makeContinuation());
             Object suspended = coroutineSuspended();
             if (ret != null && ret != suspended) {
-                dumpResult("immediate", ret);
+                log("test collect returned immediately " + ret);
             } else {
-                log("test ask suspended, waiting resume");
+                log("test collect suspended, waiting chunks");
             }
         } catch (Throwable t) {
             Throwable cause = t;
@@ -171,17 +198,6 @@ public class AicyBorrow {
             }
             log("test ask err " + t + " cause=" + cause);
         }
-    }
-
-    private Method findChatMethod(Class<?> kClass) throws Exception {
-        for (Method m : kClass.getDeclaredMethods()) {
-            if ("c".equals(m.getName())
-                    && m.getParameterTypes().length == 2) {
-                m.setAccessible(true);
-                return m;
-            }
-        }
-        throw new NoSuchMethodException("c/2");
     }
 
     private Object coroutineSuspended() {
@@ -194,6 +210,26 @@ public class AicyBorrow {
         } catch (Throwable t) {
             return null;
         }
+    }
+
+    private Object makeCollector() throws Exception {
+        Class<?> collectorClass = Class.forName(
+                "kotlinx.coroutines.flow.i", false, cl);
+        Class<?> unitClass = Class.forName("kotlin.Unit", false, cl);
+        final Object unit = unitClass.getField("INSTANCE").get(null);
+        InvocationHandler handler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method,
+                    Object[] args) {
+                if ("emit".equals(method.getName())
+                        && args != null && args.length >= 1) {
+                    dumpResult("chunk", args[0]);
+                }
+                return unit;
+            }
+        };
+        return Proxy.newProxyInstance(cl,
+                new Class<?>[]{collectorClass}, handler);
     }
 
     private Object makeContinuation() throws Exception {
