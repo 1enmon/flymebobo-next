@@ -614,13 +614,6 @@ public class MainActivity extends Activity {
             "persona_avatar.png";
     private android.widget.ImageView personaPreview;
     private EditText personaNameIn;
-    // ⚠⚠ v628 测试包专用种子（wei 本人版）：首次打开
-    // App 时把 assets/kai_persona.png 种成摘要形象、
-    // 名字 Kai。【发版前必须删除】：本常量、
-    // seedKaiPersonaIfAbsent 的调用与方法本体、
-    // assets/kai_persona.png 三处一起删，缺一不可
-    // ——上传版默认必须什么都没有（wei 2026-11-28 定）。
-    private static final boolean SEED_KAI_PERSONA = true;
     private static final String SOUND_CUSTOM_INTERNAL =
             "bubble_custom_sound";
     private static final long SOUND_MAX_CUSTOM_BYTES =
@@ -1150,9 +1143,6 @@ public class MainActivity extends Activity {
         // 两页，只要设置页（三栏外壳与镜像页代码留树里
         // 停用，面板里的收纳/时光机不受影响）。
         setContentView(scroll);
-        if (SEED_KAI_PERSONA) {
-            seedKaiPersonaIfAbsent();
-        }
         // v572: 切换动画的入场衔接——新页先盖一层新底色，
         // 380ms 淡出，落点与动画的漫换色不断层。
         if (pendingModeAnimIn) {
@@ -6151,56 +6141,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** ⚠ v628 测试包种子（wei 本人版）：公开目录还没有
-     * 形象时，把 assets/kai_persona.png 种进去、名字
-     * Kai。发版前连同 SEED_KAI_PERSONA 一起删除。 */
-    private void seedKaiPersonaIfAbsent() {
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    java.io.File pub = new java.io.File(
-                            SettingsStore.DIR_PUBLIC,
-                            "persona.png");
-                    if (pub.isFile()) {
-                        return;
-                    }
-                    InputStream in = getAssets().open(
-                            "kai_persona.png");
-                    android.graphics.Bitmap raw;
-                    try {
-                        raw = android.graphics.BitmapFactory
-                                .decodeStream(in);
-                    } finally {
-                        in.close();
-                    }
-                    if (raw == null) {
-                        return;
-                    }
-                    java.io.File internal = new java.io.File(
-                            getFilesDir(), PERSONA_INTERNAL);
-                    OutputStream out =
-                            new FileOutputStream(internal);
-                    try {
-                        raw.compress(android.graphics.Bitmap
-                                .CompressFormat.PNG, 100, out);
-                    } finally {
-                        out.close();
-                    }
-                    boolean ok = soundCopyFile(internal, pub)
-                            && pub.isFile() && pub.length() > 0;
-                    if (!ok) {
-                        soundCopyViaSu(internal, pub);
-                    }
-                    getSharedPreferences("flymebobo_ai",
-                            MODE_PRIVATE).edit().putString(
-                            "aiPersonaName", "Kai").apply();
-                    personaWriteName();
-                } catch (Throwable ignored) {
-                }
-            }
-        }).start();
-    }
 
     /** 把选中的音频拷成两份并切到 custom（照 v535 子页版）：
      * App 私有目录给本卡试听，/sdcard/flymebobo/ 公开目录给
