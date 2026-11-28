@@ -293,6 +293,16 @@ public class MorningReceiver extends BroadcastReceiver {
                 ? dgAll : null;
         // v635: 位置采样（学家里/常去地，权限没给就跳过）。
         samplePlace(ctx);
+        // v641: 每周回顾（周一才有；开关在 AI 卡
+        // 「AI 管家」节，AI 写与否都先出本地统计版）。
+        Weekly wk = null;
+        if (java.util.Calendar.getInstance().get(
+                java.util.Calendar.DAY_OF_WEEK)
+                == java.util.Calendar.MONDAY
+                && features.getBoolean("aiWeekly",
+                        false)) {
+            wk = buildWeekly(ctx);
+        }
         boolean light = false;
         try {
             light = features.getBoolean("lightMode",
@@ -303,6 +313,9 @@ public class MorningReceiver extends BroadcastReceiver {
             String full = body.toString();
             if (dg != null) {
                 full += "\n" + dg.head + "：" + dg.text;
+            }
+            if (wk != null) {
+                full += "\n" + wk.head + "：" + wk.text;
             }
             postNotification(ctx, line, full);
             FileLog.i("Morning report posted (classic)");
@@ -318,6 +331,10 @@ public class MorningReceiver extends BroadcastReceiver {
             report.putExtra("digestText", dg.text);
             report.putExtra("digestChips", dg.chips);
         }
+        if (wk != null) {
+            report.putExtra("weeklyHead", wk.head);
+            report.putExtra("weeklyText", wk.text);
+        }
         boolean aiMaster = features.getBoolean(
                 "aiEnabled", false);
         boolean wantMAi = aiMaster && features.getBoolean(
@@ -327,7 +344,9 @@ public class MorningReceiver extends BroadcastReceiver {
         // v635: 记忆本开关（AI 卡）——有流水才更新。
         boolean wantMem = aiMaster && dgAll != null
                 && features.getBoolean("aiMemory", false);
-        if (!wantMAi && !wantDAi && !wantMem) {
+        boolean wantWeekly = aiMaster && wk != null;
+        if (!wantMAi && !wantDAi && !wantMem
+                && !wantWeekly) {
             ctx.sendBroadcast(report);
             FileLog.i("Morning report sent (light)");
             return;
@@ -378,6 +397,12 @@ public class MorningReceiver extends BroadcastReceiver {
             prep.putExtra("digestText", dg.text);
             prep.putExtra("digestChips", dg.chips);
         }
+        if (wk != null) {
+            prep.putExtra("weeklyHead", wk.head);
+            prep.putExtra("weeklyText", wk.text);
+            prep.putExtra("weeklyBlob", wk.aiBlob);
+        }
+        prep.putExtra("wantWeekly", wantWeekly);
         if (dgAll != null) {
             prep.putExtra("aiBlob", dgAll.aiBlob);
         }
@@ -709,6 +734,126 @@ public class MorningReceiver extends BroadcastReceiver {
             case 95: return "雷阵雨";
             case 96: case 99: return "冰雹";
             default: return "多云";
+        }
+    }
+
+    /** v641: 一周统计（本地版）：过去 7 天流水的
+     * 总数/应用 Top3/验证码次数 + 采样流水给 AI。 */
+    static class Weekly {
+        String head;
+        String text;
+        String aiBlob;
+    }
+
+    private static Weekly buildWeekly(Context ctx) {
+        try {
+            SimpleDateFormat df = new SimpleDateFormat(
+                    "yyyy-MM-dd", Locale.US);
+            int total = 0;
+            int codeCount = 0;
+            Map<String, Integer> byLabel =
+                    new LinkedHashMap<>();
+            StringBuilder blob = new StringBuilder();
+            int blobLines = 0;
+            long dayMs = 86400000L;
+            long now = System.currentTimeMillis();
+            for (int back = 7; back >= 1; back--) {
+                String ds = df.format(new java.util.Date(
+                        now - back * dayMs));
+                File f = new File(SettingsStore.DIR_PUBLIC
+                        + "/journal-" + ds + ".txt");
+                if (!f.exists()) {
+                    continue;
+                }
+                BufferedReader br = new BufferedReader(
+                        new InputStreamReader(
+                                new FileInputStream(f),
+                                "UTF-8"));
+                String ln;
+                while ((ln = br.readLine()) != null) {
+                    String[] parts = ln.split("\u0001",
+                            -1);
+                    if (parts.length < 6) {
+                        continue;
+                    }
+                    total++;
+                    if ("1".equals(parts[5])) {
+                        codeCount++;
+                        continue;
+                    }
+                    Integer c = byLabel.get(parts[2]);
+                    byLabel.put(parts[2],
+                            c == null ? 1 : c + 1);
+                    if (blobLines < 60) {
+                        blob.append(parts[2]).append("｜")
+                                .append(parts[3])
+                                .append("｜")
+                                .append(parts[4].length()
+                                        > 60
+                                        ? parts[4]
+                                                .substring(0,
+                                                        60)
+                                        : parts[4])
+                                .append("\n");
+                        blobLines++;
+                    }
+                }
+                br.close();
+            }
+            if (total == 0) {
+                return null;
+            }
+            Weekly w = new Weekly();
+            java.text.SimpleDateFormat md =
+                    new java.text.SimpleDateFormat(
+                            "M月d日", Locale.US);
+            w.head = "上周小结 · " + md.format(
+                    new java.util.Date(now - 7 * dayMs))
+                    + "–" + md.format(new java.util.Date(
+                            now - dayMs));
+            StringBuilder t = new StringBuilder();
+            t.append("上周共收 ").append(total)
+                    .append(" 条通知。");
+            java.util.List<Map.Entry<String, Integer>>
+                    top = new ArrayList<>(
+                            byLabel.entrySet());
+            for (int i = 0; i < 3 && i < top.size();
+                    i++) {
+                int best = i;
+                for (int j = i + 1; j < top.size(); j++) {
+                    if (top.get(j).getValue()
+                            > top.get(best).getValue()) {
+                        best = j;
+                    }
+                }
+                Map.Entry<String, Integer> tmp =
+                        top.get(i);
+                top.set(i, top.get(best));
+                top.set(best, tmp);
+            }
+            StringBuilder names = new StringBuilder();
+            for (int i = 0; i < 3 && i < top.size();
+                    i++) {
+                if (i > 0) {
+                    names.append("、");
+                }
+                names.append(top.get(i).getKey())
+                        .append(" ")
+                        .append(top.get(i).getValue())
+                        .append(" 条");
+            }
+            if (!top.isEmpty()) {
+                t.append(names).append(" 最多。");
+            }
+            if (codeCount > 0) {
+                t.append("验证码 ").append(codeCount)
+                        .append(" 次。");
+            }
+            w.text = t.toString();
+            w.aiBlob = blob.toString();
+            return w;
+        } catch (Throwable t) {
+            return null;
         }
     }
 

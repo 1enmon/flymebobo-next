@@ -2990,7 +2990,7 @@ public class MainActivity extends Activity {
         // 免费档；两个各有自己的快速模式开关，默认
         // 关——让它慢慢想，像 Kai 一样用心写）。
         TextView digestLabel = new TextView(this);
-        digestLabel.setText("每日回顾 / 早报");
+        digestLabel.setText("AI 管家");
         digestLabel.setTextSize(13);
         digestLabel.setTextColor(L_INK);
         digestLabel.setTypeface(digestLabel.getTypeface(),
@@ -3043,20 +3043,6 @@ public class MainActivity extends Activity {
                     }
                 });
         body.addView(memBtn);
-        // v640: AI 管家一节（wei 定：这批都放进 AI）。
-        TextView butlerLabel = new TextView(this);
-        butlerLabel.setText("AI 管家");
-        butlerLabel.setTextSize(14);
-        butlerLabel.setTextColor(L_INK);
-        butlerLabel.setTypeface(butlerLabel.getTypeface(),
-                android.graphics.Typeface.BOLD);
-        LinearLayout.LayoutParams bllp =
-                new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT);
-        bllp.topMargin = dp(14);
-        butlerLabel.setLayoutParams(bllp);
-        body.addView(butlerLabel);
         View nudgeRow = buildSubSwitch(new Feature(
                 "aiNudge", "主动提醒",
                 "傍晚时从没了结的事里挑一件，主动闪你一下",
@@ -3071,6 +3057,13 @@ public class MainActivity extends Activity {
                 null));
         lightAiSubViews.put("aiTodo", todoRow);
         body.addView(todoRow);
+        View weeklyRow = buildSubSwitch(new Feature(
+                "aiWeekly", "每周回顾",
+                "周一早报里附一段上周小结，AI 像朋友一样写",
+                "", Color.rgb(37, 99, 235), "周", false,
+                null));
+        lightAiSubViews.put("aiWeekly", weeklyRow);
+        body.addView(weeklyRow);
         // v609: 网络歌词兜底已按 wei 的话移去音乐
         // 卡片那边（FEATURES 表 parent=music），AI
         // 卡里不再放这一行。
@@ -8908,6 +8901,7 @@ public class MainActivity extends Activity {
         if ("aiMemory".equals(key)) return false;
         if ("aiNudge".equals(key)) return false;
         if ("aiTodo".equals(key)) return false;
+        if ("aiWeekly".equals(key)) return false;
         if ("aiSummaryFast".equals(key)
                 || "aiTagsFast".equals(key)) {
             return getSharedPreferences("flymebobo_ai",
