@@ -68,6 +68,12 @@ public class XposedEntry extends XposedModule {
             // (ModuleRoute.notifyNaviInfo) for turn + distance.
             log(4, TAG, "flymebobo 2.0 loaded in Amap");
             hookAppOnCreateAmap();
+        } else if ("com.meizu.voiceassistant".equals(pkg)) {
+            // v620: Aicy 借道侦察——截获 LLM 路由客户端实例，
+            // 自动发一条测试请求验证借道链路（见 AicyBorrow）。
+            log(4, TAG, "flymebobo 2.0 loaded in Aicy");
+            aicyClassLoader = param.getDefaultClassLoader();
+            hookAppOnCreateAicy();
         } else if ("com.meizu.media.music".equals(pkg)) {
             // v334: QQ音乐 Flyme 版免费听（自动补时长到 4 小时）。
             // 开关在 APP 里，只有一个，叫“QQ音乐flyme版免费听”。
@@ -81,6 +87,57 @@ public class XposedEntry extends XposedModule {
     // Application.onCreate + 立即从当前 Application 初始化（进程
     // 可能已经跑起来了，onCreate 早过了）。
     private static volatile boolean qqFreeInitialized = false;
+    // v620: Aicy 借道（同 QQ 套路：onCreate 钩子 + 立即初始化）。
+    private static volatile boolean aicyInitialized = false;
+    private static ClassLoader aicyClassLoader;
+
+    private void hookAppOnCreateAicy() {
+        try {
+            Method onCreate = Application.class.getMethod("onCreate");
+            hook(onCreate).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        Object thisObj = chain.getThisObject();
+                        if (thisObj instanceof Application) {
+                            tryInitAicy((Application) thisObj);
+                        }
+                    } catch (Throwable t) {
+                        log(6, TAG, "flymebobo aicy init error", t);
+                    }
+                    return result;
+                }
+            });
+        } catch (Throwable t) {
+            log(6, TAG, "flymebobo failed to hook Application.onCreate (aicy)", t);
+        }
+        tryInitAicyNow();
+    }
+
+    private void tryInitAicy(Application app) {
+        if (aicyInitialized) {
+            return;
+        }
+        aicyInitialized = true;
+        try {
+            new AicyBorrow(this, app, aicyClassLoader).install();
+        } catch (Throwable t) {
+            log(6, TAG, "AicyBorrow install failed", t);
+        }
+    }
+
+    private void tryInitAicyNow() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Method m = at.getMethod("currentApplication");
+            Object app = m.invoke(null);
+            if (app instanceof Application) {
+                tryInitAicy((Application) app);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
     // v337: standalone qqfreemode 用 param 的 classloader；app.getClassLoader()
     // 在某些进程里拿到的不是 QQ 音乐的 loader，这里直接用 param 的。
     private static ClassLoader qqFreeClassLoader;
@@ -340,6 +397,8 @@ public class XposedEntry extends XposedModule {
         // (see ACTION_CANCEL_DIAG) — log it in SystemUI so it
         // lands in the log the user sends.
         filter.addAction(NotificationService.ACTION_CANCEL_DIAG);
+        // v620: Aicy 进程的侦察日志（其 FileLog 不落盘）。
+        filter.addAction(AicyBorrow.ACTION_AICY_LOG);
         // v320: Amap bus live navigation.
         filter.addAction(NotificationService.ACTION_BUS_INFO);
         filter.addAction(NotificationService.ACTION_BUS_ROUTE);
@@ -411,6 +470,12 @@ public class XposedEntry extends XposedModule {
                         // show again too.
                         bw.refreshLightDot();
                     }
+                    return;
+                }
+                // v620: Aicy 借道侦察日志，原样落盘。
+                if (AicyBorrow.ACTION_AICY_LOG.equals(
+                        intent.getAction())) {
+                    FileLog.i("Aicy " + intent.getStringExtra("msg"));
                     return;
                 }
                 // v541: the APP played the scene-mode
