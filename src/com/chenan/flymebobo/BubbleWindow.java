@@ -1632,6 +1632,9 @@ public class BubbleWindow {
     private String lightMorningCity;
     private boolean lightMorningSeen = true;
     private boolean lightMorningShown;
+    private String lightMorningDigestHead;
+    private String lightMorningDigest;
+    private String[] lightMorningChips;
     private boolean lightMorningPillShowing;
     private int lightMorningPulseCount;
     // v632: 早报过期（wei 定：中午 12 点自动收）。
@@ -2028,11 +2031,78 @@ public class BubbleWindow {
         }
     }
 
+    /** v634: 按日流水——收纳到的新通知逐条追加到
+     * /sdcard/flymebobo/journal-yyyy-MM-dd.txt（时间、
+     * 包名、应用名、标题、正文、带码标记），保留 7
+     * 天滚动删除。早报进程据此做昨日回顾统计。 */
+    private static String lightJournalDay = "";
+
+    private static String safeJ(String v) {
+        return v == null ? "" : v.replace('\u0001', ' ')
+                .replace('\n', ' ').replace('\r', ' ');
+    }
+
+    private void journalAppend(NotifData d) {
+        try {
+            long when = d.postTime > 0 ? d.postTime
+                    : System.currentTimeMillis();
+            String day = new java.text.SimpleDateFormat(
+                    "yyyy-MM-dd", java.util.Locale.US)
+                    .format(new java.util.Date(when));
+            if (!day.equals(lightJournalDay)) {
+                lightJournalDay = day;
+                pruneJournalFiles();
+            }
+            String line = when + "\u0001" + safeJ(d.pkg)
+                    + "\u0001"
+                    + safeJ(lightAppLabel(
+                            lightDisplayPkg(d), d))
+                    + "\u0001" + safeJ(d.title)
+                    + "\u0001" + safeJ(d.text)
+                    + "\u0001" + (d.code != null ? "1" : "0")
+                    + "\n";
+            java.io.FileWriter w = new java.io.FileWriter(
+                    new java.io.File(SettingsStore.DIR_PUBLIC
+                            + "/journal-" + day + ".txt"),
+                    true);
+            w.write(line);
+            w.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void pruneJournalFiles() {
+        try {
+            java.io.File[] fs = new java.io.File(
+                    SettingsStore.DIR_PUBLIC).listFiles();
+            if (fs == null) {
+                return;
+            }
+            String cutoff = new java.text.SimpleDateFormat(
+                    "yyyy-MM-dd", java.util.Locale.US)
+                    .format(new java.util.Date(
+                            System.currentTimeMillis()
+                                    - 7L * 86400000L));
+            for (java.io.File f : fs) {
+                String n = f.getName();
+                if (n.startsWith("journal-")
+                        && n.endsWith(".txt")
+                        && n.length() >= 22
+                        && n.substring(8, 18)
+                                .compareTo(cutoff) < 0) {
+                    f.delete();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void lightCollect(final NotifData d) {
         if (d == null || !FeatureFlags.lightMode
                 || !isOrdinaryForLight(d)) {
             return;
         }
+        boolean wasUpdate = false;
         if (d.key != null) {
             java.util.Iterator<NotifData> it =
                     lightStack.iterator();
@@ -2040,6 +2110,7 @@ public class BubbleWindow {
                 NotifData o = it.next();
                 if (o != null && d.key.equals(o.key)) {
                     it.remove();
+                    wasUpdate = true;
                 }
             }
         }
@@ -2052,6 +2123,11 @@ public class BubbleWindow {
         }
         FileLog.i("Light collect pkg=" + d.pkg
                 + " n=" + lightStack.size());
+        // v634: 按日流水（昨日回顾的数据源）——只记
+        // 新条目，同 key 更新不重复计。
+        if (!wasUpdate) {
+            journalAppend(d);
+        }
         maybeMakeInfoCard(d);
         refreshLightDot();
         // v595: wei 定——安静规则设了「收纳」(EDGE，含走
@@ -6973,7 +7049,8 @@ public class BubbleWindow {
     /** v631: 早报送达（XposedEntry 转发）——存卡 + 排
      * 队闪（优先级最低，空了才上）。 */
     public void onMorningReport(String line, String body,
-            String dateStr, String city) {
+            String dateStr, String city, String digestHead,
+            String digestText, String digestChips) {
         if (body == null || body.isEmpty()) {
             return;
         }
@@ -6981,6 +7058,11 @@ public class BubbleWindow {
         lightMorningBody = body;
         lightMorningDate = dateStr;
         lightMorningCity = city;
+        lightMorningDigestHead = digestHead;
+        lightMorningDigest = digestText;
+        lightMorningChips = digestChips == null
+                || digestChips.isEmpty() ? null
+                : digestChips.split("\u0001", -1);
         lightMorningSeen = false;
         lightMorningPulseCount = 0;
         // v632: 排到下一个中午 12 点自动过期。
@@ -7153,6 +7235,76 @@ public class BubbleWindow {
         blp.topMargin = dp(3);
         body.setLayoutParams(blp);
         card.addView(body);
+        // v634: 昨日回顾段（有才出）——统计或 AI 文案
+        // + 重点条目小行。
+        if (lightMorningDigest != null
+                && !lightMorningDigest.isEmpty()) {
+            View div = new View(app);
+            div.setBackgroundColor(lpWhite()
+                    ? Color.rgb(219, 234, 254)
+                    : Color.rgb(51, 65, 85));
+            android.widget.LinearLayout.LayoutParams divLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            dp(1));
+            divLp.topMargin = dp(8);
+            divLp.bottomMargin = dp(7);
+            div.setLayoutParams(divLp);
+            card.addView(div);
+            if (lightMorningDigestHead != null) {
+                android.widget.TextView dh =
+                        new android.widget.TextView(app);
+                dh.setText(lightMorningDigestHead);
+                dh.setTextSize(12);
+                dh.setTextColor(lpWhite()
+                        ? Color.rgb(37, 99, 235)
+                        : Color.rgb(147, 197, 253));
+                dh.setTypeface(
+                        android.graphics.Typeface.DEFAULT_BOLD);
+                card.addView(dh);
+            }
+            android.widget.TextView dt =
+                    new android.widget.TextView(app);
+            dt.setText(lightMorningDigest);
+            dt.setTextSize(13);
+            dt.setTextColor(lpTitleC());
+            dt.setLineSpacing(0, 1.25f);
+            android.widget.LinearLayout.LayoutParams dtLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT);
+            dtLp.topMargin = dp(3);
+            dt.setLayoutParams(dtLp);
+            card.addView(dt);
+            if (lightMorningChips != null) {
+                for (String chip : lightMorningChips) {
+                    if (chip == null || chip.isEmpty()) {
+                        continue;
+                    }
+                    android.widget.TextView cv =
+                            new android.widget.TextView(app);
+                    cv.setText("· " + chip);
+                    cv.setTextSize(11.5f);
+                    cv.setTextColor(lpFaintC());
+                    android.widget.LinearLayout.LayoutParams
+                            cvLp =
+                            new android.widget.LinearLayout
+                                    .LayoutParams(
+                                    android.widget.LinearLayout
+                                            .LayoutParams
+                                            .MATCH_PARENT,
+                                    android.widget.LinearLayout
+                                            .LayoutParams
+                                            .WRAP_CONTENT);
+                    cvLp.topMargin = dp(3);
+                    cv.setLayoutParams(cvLp);
+                    card.addView(cv);
+                }
+            }
+        }
         android.widget.TextView foot =
                 new android.widget.TextView(app);
         foot.setText("每日早报"

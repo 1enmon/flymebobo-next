@@ -13,13 +13,19 @@ import android.content.SharedPreferences;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /** v631: 每日早报（wei 预览定版）——App 进程精确闹钟
  * 到点拉 Open-Meteo 天气（免费无 Key），组装一句话 +
@@ -33,6 +39,10 @@ public class MorningReceiver extends BroadcastReceiver {
             "com.chenan.flymebobo.MORNING_FIRE";
     public static final String ACTION_REPORT =
             "com.chenan.flymebobo.MORNING_REPORT";
+    // v634: 托 NS 用当前 AI 通道富化早报（NS 回广播
+    // ACTION_REPORT 为正式版；30 秒没回就发规则版）。
+    public static final String ACTION_MORNING_PREP =
+            "com.chenan.flymebobo.MORNING_PREP";
     public static final String PREFS = "flymebobo_morning";
     private static final String CHANNEL = "morning_report";
     private static final int REQ = 7717;
@@ -177,25 +187,266 @@ public class MorningReceiver extends BroadcastReceiver {
         String dateStr = new SimpleDateFormat(
                 "M月d日 E", Locale.CHINA)
                 .format(new java.util.Date());
+        android.content.SharedPreferences features =
+                ctx.getSharedPreferences(
+                        "flymebobo_features",
+                        Context.MODE_PRIVATE);
+        // v634: 昨日回顾（本地统计；开关在 AI 卡）。
+        Digest dg = null;
+        if (features.getBoolean("digestOn", true)) {
+            dg = buildDigest(ctx);
+        }
         boolean light = false;
         try {
-            light = ctx.getSharedPreferences(
-                    "flymebobo_features",
-                    Context.MODE_PRIVATE)
-                    .getBoolean("lightMode", false);
+            light = features.getBoolean("lightMode",
+                    false);
         } catch (Throwable ignored) {
         }
-        if (light) {
-            Intent it = new Intent(ACTION_REPORT);
-            it.putExtra("line", line);
-            it.putExtra("body", body.toString());
-            it.putExtra("dateStr", dateStr);
-            it.putExtra("city", city);
-            ctx.sendBroadcast(it);
-            FileLog.i("Morning report sent (light)");
-        } else {
-            postNotification(ctx, line, body.toString());
+        if (!light) {
+            String full = body.toString();
+            if (dg != null) {
+                full += "\n" + dg.head + "：" + dg.text;
+            }
+            postNotification(ctx, line, full);
             FileLog.i("Morning report posted (classic)");
+            return;
+        }
+        Intent report = new Intent(ACTION_REPORT);
+        report.putExtra("line", line);
+        report.putExtra("body", body.toString());
+        report.putExtra("dateStr", dateStr);
+        report.putExtra("city", city);
+        if (dg != null) {
+            report.putExtra("digestHead", dg.head);
+            report.putExtra("digestText", dg.text);
+            report.putExtra("digestChips", dg.chips);
+        }
+        boolean aiMaster = features.getBoolean(
+                "aiEnabled", false);
+        boolean wantMAi = aiMaster && features.getBoolean(
+                "morningAi", false);
+        boolean wantDAi = aiMaster && dg != null
+                && features.getBoolean("digestAi", false);
+        if (!wantMAi && !wantDAi) {
+            ctx.sendBroadcast(report);
+            FileLog.i("Morning report sent (light)");
+            return;
+        }
+        // 要 AI 富化：先托 NS，等它回正式 REPORT；
+        // 30 秒没等到就自己发规则版，不开天窗。
+        final java.util.concurrent.CountDownLatch latch =
+                new java.util.concurrent.CountDownLatch(1);
+        android.content.BroadcastReceiver once =
+                new android.content.BroadcastReceiver() {
+                    @Override
+                    public void onReceive(Context c,
+                            Intent i) {
+                        latch.countDown();
+                    }
+                };
+        try {
+            android.content.IntentFilter f =
+                    new android.content.IntentFilter(
+                            ACTION_REPORT);
+            try {
+                java.lang.reflect.Method m =
+                        Context.class.getMethod(
+                                "registerReceiver",
+                                android.content.BroadcastReceiver
+                                        .class,
+                                android.content.IntentFilter
+                                        .class,
+                                Integer.TYPE);
+                m.invoke(ctx, once, f, 2);
+            } catch (Throwable t) {
+                ctx.registerReceiver(once, f);
+            }
+        } catch (Throwable ignored) {
+        }
+        Intent prep = new Intent(ACTION_MORNING_PREP);
+        prep.putExtra("line", line);
+        prep.putExtra("body", body.toString());
+        prep.putExtra("dateStr", dateStr);
+        prep.putExtra("city", city);
+        prep.putExtra("cond", w[0]);
+        prep.putExtra("tmin", w[1]);
+        prep.putExtra("tmax", w[2]);
+        prep.putExtra("pp", String.valueOf(pp));
+        prep.putExtra("aqi", String.valueOf(aqi));
+        if (dg != null) {
+            prep.putExtra("digestHead", dg.head);
+            prep.putExtra("digestText", dg.text);
+            prep.putExtra("digestChips", dg.chips);
+            prep.putExtra("aiBlob", dg.aiBlob);
+        }
+        prep.putExtra("wantMorningAi", wantMAi);
+        prep.putExtra("wantDigestAi", wantDAi);
+        ctx.sendBroadcast(prep);
+        boolean got = false;
+        try {
+            got = latch.await(30,
+                    java.util.concurrent.TimeUnit.SECONDS);
+        } catch (Throwable ignored) {
+        }
+        try {
+            ctx.unregisterReceiver(once);
+        } catch (Throwable ignored) {
+        }
+        if (got) {
+            FileLog.i("Morning report via ai prep");
+        } else {
+            ctx.sendBroadcast(report);
+            FileLog.i("Morning report sent (prep timeout)");
+        }
+    }
+
+    /** v634: 昨日回顾的一份数据（本地统计产出）。 */
+    private static class Digest {
+        String head;
+        String text;
+        String chips;
+        String aiBlob;
+    }
+
+    /** v634: 读昨天的按日流水做统计回顾：总数、应用
+     * 排行、验证码次数、待取快递、今日行程；同时攒
+     * 一份给 AI 的流水文本（带码条目只计数不入文本）。 */
+    private Digest buildDigest(Context ctx) {
+        try {
+            String yday = new SimpleDateFormat(
+                    "yyyy-MM-dd", Locale.US)
+                    .format(new java.util.Date(
+                            System.currentTimeMillis()
+                                    - 86400000L));
+            File f = new File(SettingsStore.DIR_PUBLIC
+                    + "/journal-" + yday + ".txt");
+            if (!f.exists()) {
+                return null;
+            }
+            BufferedReader r = new BufferedReader(
+                    new InputStreamReader(
+                            new FileInputStream(f), "UTF-8"));
+            Map<String, Integer> counts =
+                    new LinkedHashMap<>();
+            int total = 0;
+            int codeCount = 0;
+            int courierPending = 0;
+            int blobLines = 0;
+            List<String> chips = new ArrayList<>();
+            StringBuilder blob = new StringBuilder();
+            String today = new SimpleDateFormat(
+                    "yyyy-MM-dd", Locale.US)
+                    .format(new java.util.Date());
+            SimpleDateFormat dayFmt =
+                    new SimpleDateFormat("yyyy-MM-dd",
+                            Locale.US);
+            String ln;
+            while ((ln = r.readLine()) != null) {
+                String[] parts = ln.split("\u0001", -1);
+                if (parts.length < 6) {
+                    continue;
+                }
+                total++;
+                String label = parts[2];
+                String title = parts[3];
+                String text = parts[4];
+                Integer c0 = counts.get(label);
+                counts.put(label, c0 == null ? 1
+                        : c0 + 1);
+                if ("1".equals(parts[5])) {
+                    codeCount++;
+                    continue;
+                }
+                if (blobLines < 50) {
+                    blob.append(label).append("｜")
+                            .append(title).append("｜")
+                            .append(text.length() > 80
+                                    ? text.substring(0, 80)
+                                    : text)
+                            .append("\n");
+                    blobLines++;
+                }
+                try {
+                    long when = Long.parseLong(parts[0]);
+                    InfoParse.Card card =
+                            InfoParse.tryParse(parts[1],
+                                    title, text, when);
+                    if (card != null) {
+                        if ("courier".equals(card.kind)) {
+                            courierPending++;
+                            if (chips.size() < 3) {
+                                chips.add("待取 · "
+                                        + (card.title != null
+                                                ? card.title
+                                                : label));
+                            }
+                        } else if (("train".equals(card.kind)
+                                || "flight".equals(
+                                        card.kind))
+                                && card.eventTime > 0
+                                && today.equals(dayFmt.format(
+                                        new java.util.Date(
+                                                card.eventTime)))
+                                && chips.size() < 3) {
+                            chips.add("今日出行 · "
+                                    + (card.title != null
+                                            ? card.title
+                                            : ""));
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            r.close();
+            if (total == 0) {
+                return null;
+            }
+            StringBuilder tx = new StringBuilder();
+            for (int k = 0; k < 3; k++) {
+                String best = null;
+                int bestN = 0;
+                for (Map.Entry<String, Integer> e
+                        : counts.entrySet()) {
+                    if (e.getValue() > bestN) {
+                        bestN = e.getValue();
+                        best = e.getKey();
+                    }
+                }
+                if (best == null) {
+                    break;
+                }
+                counts.put(best, 0);
+                if (k > 0) {
+                    tx.append("、");
+                }
+                tx.append(best).append(" ").append(bestN)
+                        .append(" 条");
+            }
+            tx.append("。");
+            if (codeCount > 0) {
+                tx.append("验证码 ").append(codeCount)
+                        .append(" 次，已自动复制。");
+            }
+            if (courierPending > 0) {
+                tx.append("快递 ").append(courierPending)
+                        .append(" 件待取。");
+            }
+            Digest dg = new Digest();
+            dg.head = "昨日回顾 · 共 " + total + " 条";
+            dg.text = tx.toString();
+            StringBuilder cb = new StringBuilder();
+            for (int i = 0; i < chips.size(); i++) {
+                if (i > 0) {
+                    cb.append("\u0001");
+                }
+                cb.append(chips.get(i));
+            }
+            dg.chips = cb.toString();
+            dg.aiBlob = blob.toString();
+            return dg;
+        } catch (Throwable t) {
+            FileLog.i("Morning digest fail " + t);
+            return null;
         }
     }
 

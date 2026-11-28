@@ -1242,7 +1242,13 @@ public class XposedEntry extends XposedModule {
                                 intent.getStringExtra("line"),
                                 intent.getStringExtra("body"),
                                 intent.getStringExtra("dateStr"),
-                                intent.getStringExtra("city"));
+                                intent.getStringExtra("city"),
+                                intent.getStringExtra(
+                                        "digestHead"),
+                                intent.getStringExtra(
+                                        "digestText"),
+                                intent.getStringExtra(
+                                        "digestChips"));
                     }
                     return;
                 }

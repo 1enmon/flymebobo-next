@@ -2977,6 +2977,7 @@ public class NotificationService extends NotificationListenerService {
     @Override // android.service.notification.NotificationListenerService
     public void onListenerConnected() {
         FileLog.i("Listener connected, FileLog ready");
+        ensureMorningReceiver();
         FileLog.i("Version: " + appVersion());
         startUpdateCheck();
         try {
@@ -3144,6 +3145,12 @@ public class NotificationService extends NotificationListenerService {
     private final java.util.Map<String, Object[]> aicyPending =
             new java.util.concurrent.ConcurrentHashMap<>();
     private volatile boolean aicyReceiverReady = false;
+    // v634: 早报 AI 富化（MorningReceiver 托 NS 问 AI）
+    private volatile boolean morningReceiverReady = false;
+    // v634: 本次调用的快速模式覆盖（早报/回顾各有自
+    // 己的快速开关，不跟全局 aiAicyFast）。
+    private final ThreadLocal<Boolean> aiFastOverride =
+            new ThreadLocal<>();
 
     private boolean aiUseAicy() {
         try {
@@ -3221,6 +3228,229 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    /** v634: 早报 prep 接收——MorningReceiver 把规
+     * 则版早报 + 天气数据 + 昨日流水托过来，NS 用当
+     * 前 AI 通道（哪个开着用哪个）富化后广播正式
+     * REPORT；无论成败都回一份，发送方有超时兜底。 */
+    private final android.content.BroadcastReceiver
+            morningPrepReceiver =
+            new android.content.BroadcastReceiver() {
+                @Override
+                public void onReceive(
+                        android.content.Context c,
+                        final android.content.Intent intent) {
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            handleMorningPrep(intent);
+                        }
+                    }, "morning-prep").start();
+                }
+            };
+
+    private void ensureMorningReceiver() {
+        if (morningReceiverReady) {
+            return;
+        }
+        morningReceiverReady = true;
+        try {
+            android.content.IntentFilter filter =
+                    new android.content.IntentFilter(
+                            MorningReceiver.ACTION_MORNING_PREP);
+            try {
+                java.lang.reflect.Method m = android.content
+                        .Context.class.getMethod(
+                                "registerReceiver",
+                                android.content.BroadcastReceiver
+                                        .class,
+                                android.content.IntentFilter
+                                        .class,
+                                Integer.TYPE);
+                m.invoke(this, morningPrepReceiver, filter,
+                        2);
+            } catch (Throwable t) {
+                registerReceiver(morningPrepReceiver,
+                        filter);
+            }
+        } catch (Throwable t) {
+            FileLog.i("Morning prep receiver fail " + t);
+        }
+    }
+
+    private String morningPersonaName() {
+        try {
+            java.io.File f = new java.io.File(
+                    SettingsStore.DIR_PUBLIC
+                            + "/persona.txt");
+            if (!f.exists()) {
+                return "";
+            }
+            java.io.FileInputStream in =
+                    new java.io.FileInputStream(f);
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            in.close();
+            return n > 0 ? new String(buf, 0, n, "UTF-8")
+                    .trim() : "";
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private void handleMorningPrep(
+            android.content.Intent in) {
+        android.content.Intent out =
+                new android.content.Intent(
+                        MorningReceiver.ACTION_REPORT);
+        out.putExtra("line", in.getStringExtra("line"));
+        out.putExtra("body", in.getStringExtra("body"));
+        out.putExtra("dateStr",
+                in.getStringExtra("dateStr"));
+        out.putExtra("city", in.getStringExtra("city"));
+        out.putExtra("digestHead",
+                in.getStringExtra("digestHead"));
+        out.putExtra("digestText",
+                in.getStringExtra("digestText"));
+        out.putExtra("digestChips",
+                in.getStringExtra("digestChips"));
+        try {
+            android.content.SharedPreferences aiPrefs =
+                    getSharedPreferences("flymebobo_ai",
+                            android.content.Context
+                                    .MODE_PRIVATE);
+            String apiKey = AiKey.decrypt(
+                    aiPrefs.getString("aiKey", ""));
+            boolean useAicy = aiUseAicy();
+            if (useAicy || (apiKey != null
+                    && !apiKey.isEmpty())) {
+                String apiBase = aiPrefs.getString(
+                        "aiBase", "https://api.deepseek.com");
+                String apiModel = aiPrefs.getString(
+                        "aiModel", "deepseek-chat");
+                android.content.SharedPreferences feats =
+                        getSharedPreferences(
+                                "flymebobo_features",
+                                android.content.Context
+                                        .MODE_PRIVATE);
+                String name = morningPersonaName();
+                String who = name.isEmpty()
+                        ? "贴身助理" : "「" + name + "」";
+                if (in.getBooleanExtra("wantMorningAi",
+                        false)) {
+                    aiFastOverride.set(Boolean.valueOf(
+                            feats.getBoolean(
+                                    "morningAiFast", false)));
+                    String prompt = "城市："
+                            + in.getStringExtra("city")
+                            + "；日期："
+                            + in.getStringExtra("dateStr")
+                            + "；天气："
+                            + in.getStringExtra("cond")
+                            + "；最低 "
+                            + in.getStringExtra("tmin")
+                            + "°C，最高 "
+                            + in.getStringExtra("tmax")
+                            + "°C；降雨概率 "
+                            + in.getStringExtra("pp")
+                            + "%；空气质量 AQI "
+                            + in.getStringExtra("aqi")
+                            + "。请以" + who
+                            + "的身份写一段晨间早报正文，"
+                            + "2-3 句，第一人称、像朋友一样"
+                            + "亲切提醒；只用上面给的数据，"
+                            + "不许编造其他数字；可以给一句"
+                            + "生活建议。只输出正文。";
+                    String r = useAicy
+                            ? aicyAsk("你是" + who
+                                    + "，只输出正文。", prompt)
+                            : aiChatOnce(apiBase, apiKey,
+                                    apiModel, prompt);
+                    if (r != null && r.trim().length() >= 8
+                            && r.trim().length() <= 400) {
+                        out.putExtra("body", r.trim());
+                        FileLog.i("Morning ai body ok");
+                    }
+                }
+                String blob = in.getStringExtra("aiBlob");
+                if (in.getBooleanExtra("wantDigestAi",
+                        false) && blob != null
+                        && !blob.isEmpty()) {
+                    aiFastOverride.set(Boolean.valueOf(
+                            feats.getBoolean(
+                                    "digestAiFast", false)));
+                    String prompt = "下面是昨天的通知流水"
+                            + "（应用｜标题｜正文）：\n"
+                            + blob
+                            + "\n请以" + who
+                            + "的身份输出 JSON："
+                            + "{\"digest\":\"昨日回顾\","
+                            + "\"highlights\":[\"重点\"]}"
+                            + "。digest 用第一人称口语写两三"
+                            + "句，像朋友提醒一样概括昨天谁"
+                            + "找过用户、有什么要紧事；"
+                            + "highlights 只挑真正重要的（有"
+                            + "人找、待办、票证、账单、风险）"
+                            + "，最多 3 条，没有给空数组。"
+                            + "只输出 JSON。";
+                    String r = useAicy
+                            ? aicyAsk("你是" + who
+                                    + "，只输出 JSON。", prompt)
+                            : aiChatOnce(apiBase, apiKey,
+                                    apiModel, prompt);
+                    if (r != null) {
+                        try {
+                            int l = r.indexOf('{');
+                            int rr = r.lastIndexOf('}');
+                            if (l >= 0 && rr > l) {
+                                org.json.JSONObject o =
+                                        new org.json.JSONObject(
+                                                r.substring(l,
+                                                        rr + 1));
+                                String dg = o.optString(
+                                        "digest", "");
+                                if (!dg.isEmpty()) {
+                                    out.putExtra("digestText",
+                                            dg);
+                                }
+                                org.json.JSONArray hl =
+                                        o.optJSONArray(
+                                                "highlights");
+                                if (hl != null
+                                        && hl.length() > 0) {
+                                    StringBuilder cb =
+                                            new StringBuilder();
+                                    for (int i = 0;
+                                            i < hl.length()
+                                                    && i < 3;
+                                            i++) {
+                                        if (i > 0) {
+                                            cb.append(
+                                                    "\u0001");
+                                        }
+                                        cb.append(hl
+                                                .optString(i,
+                                                        ""));
+                                    }
+                                    out.putExtra(
+                                            "digestChips",
+                                            cb.toString());
+                                }
+                                FileLog.i("Morning ai digest ok");
+                            }
+                        } catch (Throwable t) {
+                            FileLog.i("Morning ai digest parse fail");
+                        }
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            FileLog.i("Morning prep fail " + t);
+        } finally {
+            aiFastOverride.remove();
+        }
+        sendBroadcast(out);
+    }
+
     private boolean aicyPing() {
         ensureAicyReceiver();
         String id = "ping-" + java.util.UUID.randomUUID();
@@ -3261,10 +3491,16 @@ public class NotificationService extends NotificationListenerService {
             it.putExtra("system", system);
             it.putExtra("user", user);
             // v627: Aicy 快速模式开关（AI 卡，默认开）。
-            it.putExtra("fast", getSharedPreferences(
-                    "flymebobo_ai",
-                    android.content.Context.MODE_PRIVATE)
-                    .getBoolean("aiAicyFast", true));
+            // v634: 早报/回顾的 prep 调用带自己的快速
+            // 开关（ThreadLocal 覆盖），不跟全局。
+            Boolean fastOv = aiFastOverride.get();
+            it.putExtra("fast", fastOv != null
+                    ? fastOv.booleanValue()
+                    : getSharedPreferences(
+                            "flymebobo_ai",
+                            android.content.Context
+                                    .MODE_PRIVATE)
+                            .getBoolean("aiAicyFast", true));
             sendBroadcast(it);
             boolean done =
                     ((java.util.concurrent.CountDownLatch)

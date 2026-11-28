@@ -2966,6 +2966,56 @@ public class MainActivity extends Activity {
                 "", Color.rgb(37, 99, 235), "标", true, null));
         lightAiSubViews.put("aiTags", aiTagRow);
         body.addView(aiTagRow);
+        // v634: 昨日回顾 + 早报的 AI 开关（wei 定：
+        // 都放 AI 卡里；用 AI 时走当前选的通道，不挑
+        // 免费档；两个各有自己的快速模式开关，默认
+        // 关——让它慢慢想，像 Kai 一样用心写）。
+        TextView digestLabel = new TextView(this);
+        digestLabel.setText("每日回顾 / 早报");
+        digestLabel.setTextSize(13);
+        digestLabel.setTextColor(L_INK);
+        digestLabel.setTypeface(digestLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams dglp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        dglp.topMargin = dp(14);
+        digestLabel.setLayoutParams(dglp);
+        body.addView(digestLabel);
+        body.addView(buildSubSwitch(new Feature(
+                "digestOn", "昨日回顾",
+                "早报里附一段昨天的通知回顾（本地统计，不用 AI 也能出）",
+                "", Color.rgb(37, 99, 235), "顾", true,
+                null)));
+        View digestAiRow = buildSubSwitch(new Feature(
+                "digestAi", "昨日回顾用 AI 写",
+                "让 AI 读昨天的通知，像朋友一样写成一段回顾",
+                "", Color.rgb(37, 99, 235), "顾", false,
+                null));
+        lightAiSubViews.put("digestAi", digestAiRow);
+        body.addView(digestAiRow);
+        View digestFastRow = buildSubSwitch(new Feature(
+                "digestAiFast", "昨日回顾快速模式",
+                "回顾用 AI 写时关掉思考过程，出得快一些",
+                "", Color.rgb(37, 99, 235), "速", false,
+                null));
+        lightAiSubViews.put("digestAiFast", digestFastRow);
+        body.addView(digestFastRow);
+        View morningAiRow = buildSubSwitch(new Feature(
+                "morningAi", "早报用 AI 写",
+                "天气数据不变，AI 把早报正文写成人话",
+                "", Color.rgb(37, 99, 235), "报", false,
+                null));
+        lightAiSubViews.put("morningAi", morningAiRow);
+        body.addView(morningAiRow);
+        View morningFastRow = buildSubSwitch(new Feature(
+                "morningAiFast", "早报快速模式",
+                "早报用 AI 写时关掉思考过程，出得快一些",
+                "", Color.rgb(37, 99, 235), "速", false,
+                null));
+        lightAiSubViews.put("morningAiFast", morningFastRow);
+        body.addView(morningFastRow);
         // v609: 网络歌词兜底已按 wei 的话移去音乐
         // 卡片那边（FEATURES 表 parent=music），AI
         // 卡里不再放这一行。
@@ -8865,6 +8915,11 @@ public class MainActivity extends Activity {
         if ("aiEnabled".equals(key)) return false;
         // v631: 消息提醒带内容默认关（只报谁，隐私优先）。
         if ("msgRemindContent".equals(key)) return false;
+        // v634: 早报/回顾的 AI 与快速开关默认关。
+        if ("digestAi".equals(key)) return false;
+        if ("morningAi".equals(key)) return false;
+        if ("digestAiFast".equals(key)) return false;
+        if ("morningAiFast".equals(key)) return false;
         for (Feature f : FEATURES) {
             if (f.key.equals(key)) return f.def;
         }
