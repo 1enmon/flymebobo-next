@@ -3746,6 +3746,245 @@ public class MainActivity extends Activity {
                 "", Color.rgb(59, 130, 246), "亮", false,
                 null)));
 
+        // v631: 消息提醒（wei 定版）——消息类应用到达
+        // 时形象药丸报「X 给你发消息了」，取代到达闪；
+        // 子开关管带不带内容（默认不带）。
+        body.addView(buildSubSwitch(new Feature(
+                "msgRemind", "消息提醒",
+                "微信/QQ/短信等消息来了，药丸报谁找你（取代应用到达闪）",
+                "", Color.rgb(59, 130, 246), "信", true,
+                null)));
+        body.addView(buildSubSwitch(new Feature(
+                "msgRemindContent", "消息提醒带内容",
+                "提醒时带上消息开头一句；关着只报谁、不露内容",
+                "", Color.rgb(59, 130, 246), "文", false,
+                "msgRemind")));
+
+        // v631: 每日早报（wei 预览定版）——开关/时间/
+        // 城市存 flymebobo_morning，改完立即重排闹钟。
+        final android.content.SharedPreferences morningPrefs =
+                getSharedPreferences(MorningReceiver.PREFS,
+                        MODE_PRIVATE);
+        TextView morningLabel = new TextView(this);
+        morningLabel.setText("每日早报");
+        morningLabel.setTextSize(13);
+        morningLabel.setTextColor(L_INK);
+        morningLabel.setTypeface(morningLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams mlp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.topMargin = dp(14);
+        morningLabel.setLayoutParams(mlp);
+        body.addView(morningLabel);
+        android.widget.LinearLayout morningRow =
+                new android.widget.LinearLayout(this);
+        morningRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        morningRow.setGravity(
+                android.view.Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams morningRowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        morningRowLp.topMargin = dp(6);
+        morningRow.setLayoutParams(morningRowLp);
+        android.widget.LinearLayout morningTexts =
+                new android.widget.LinearLayout(this);
+        morningTexts.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        TextView morningTitle = new TextView(this);
+        morningTitle.setText("到点发早报");
+        morningTitle.setTextSize(14);
+        morningTitle.setTextColor(L_INK);
+        morningTexts.addView(morningTitle);
+        TextView morningSub = new TextView(this);
+        morningSub.setText("天气 + 一句建议，进面板早报卡，小签闪一下");
+        morningSub.setTextSize(12);
+        morningSub.setTextColor(L_SUB);
+        morningTexts.addView(morningSub);
+        morningRow.addView(morningTexts,
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f));
+        final android.widget.FrameLayout morningTrack =
+                new android.widget.FrameLayout(this);
+        final TextView morningKnob = new TextView(this);
+        morningKnob.setBackground(rounded(Color.WHITE,
+                dp(999)));
+        android.widget.FrameLayout.LayoutParams mKnobLp =
+                new android.widget.FrameLayout.LayoutParams(
+                        dp(23), dp(23));
+        mKnobLp.topMargin = dp(2);
+        mKnobLp.bottomMargin = dp(2);
+        morningKnob.setLayoutParams(mKnobLp);
+        morningTrack.addView(morningKnob);
+        morningRow.addView(morningTrack,
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(46), dp(27)));
+        final Runnable paintMorning = new Runnable() {
+            @Override
+            public void run() {
+                boolean on = morningPrefs.getBoolean(
+                        "on", false);
+                morningTrack.setBackground(rounded(on
+                        ? Color.rgb(61, 123, 214)
+                        : Color.rgb(199, 203, 209), dp(999)));
+                android.widget.FrameLayout.LayoutParams lp =
+                        (android.widget.FrameLayout.LayoutParams)
+                                morningKnob.getLayoutParams();
+                lp.gravity = on
+                        ? (android.view.Gravity.RIGHT
+                                | android.view.Gravity
+                                        .CENTER_VERTICAL)
+                        : (android.view.Gravity.LEFT
+                                | android.view.Gravity
+                                        .CENTER_VERTICAL);
+                lp.leftMargin = on ? 0 : dp(2);
+                lp.rightMargin = on ? dp(2) : 0;
+                morningKnob.setLayoutParams(lp);
+            }
+        };
+        paintMorning.run();
+        morningRow.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        boolean on = morningPrefs.getBoolean(
+                                "on", false);
+                        morningPrefs.edit()
+                                .putBoolean("on", !on).apply();
+                        paintMorning.run();
+                        MorningReceiver.reschedule(
+                                MainActivity.this);
+                    }
+                });
+        body.addView(morningRow);
+        // 时间行
+        android.widget.LinearLayout morningTimeRow =
+                new android.widget.LinearLayout(this);
+        morningTimeRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        morningTimeRow.setGravity(
+                android.view.Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams mtRowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        mtRowLp.topMargin = dp(8);
+        morningTimeRow.setLayoutParams(mtRowLp);
+        TextView morningTimeLabel = new TextView(this);
+        morningTimeLabel.setText("时间");
+        morningTimeLabel.setTextSize(14);
+        morningTimeLabel.setTextColor(L_INK);
+        morningTimeRow.addView(morningTimeLabel);
+        final TextView morningTimeVal = new TextView(this);
+        morningTimeVal.setText(morningPrefs.getString(
+                "time", "07:30"));
+        morningTimeVal.setTextSize(14);
+        morningTimeVal.setTextColor(L_SUB);
+        android.widget.LinearLayout.LayoutParams mtValLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f);
+        mtValLp.leftMargin = dp(10);
+        morningTimeVal.setLayoutParams(mtValLp);
+        morningTimeVal.setGravity(android.view.Gravity.END);
+        morningTimeRow.addView(morningTimeVal);
+        morningTimeRow.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        String t = morningPrefs.getString(
+                                "time", "07:30");
+                        int hh = 7, mm = 30;
+                        try {
+                            String[] parts = t.split(":");
+                            hh = Integer.parseInt(parts[0]);
+                            mm = Integer.parseInt(parts[1]);
+                        } catch (Throwable ignored) {
+                        }
+                        new android.app.TimePickerDialog(
+                                MainActivity.this,
+                                new android.app.TimePickerDialog
+                                        .OnTimeSetListener() {
+                                    @Override
+                                    public void onTimeSet(
+                                            android.widget
+                                                    .TimePicker view,
+                                            int hourOfDay,
+                                            int minute) {
+                                        String nt = String.format(
+                                                java.util.Locale.US,
+                                                "%02d:%02d",
+                                                hourOfDay, minute);
+                                        morningPrefs.edit()
+                                                .putString(
+                                                        "time", nt)
+                                                .apply();
+                                        morningTimeVal.setText(nt);
+                                        MorningReceiver.reschedule(
+                                                MainActivity.this);
+                                    }
+                                }, hh, mm, true).show();
+                    }
+                });
+        body.addView(morningTimeRow);
+        // 城市行
+        android.widget.LinearLayout morningCityRow =
+                new android.widget.LinearLayout(this);
+        morningCityRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        morningCityRow.setGravity(
+                android.view.Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams mcRowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        mcRowLp.topMargin = dp(8);
+        morningCityRow.setLayoutParams(mcRowLp);
+        final EditText morningCityIn = new EditText(this);
+        morningCityIn.setHint("城市，比如 重庆");
+        morningCityIn.setSingleLine(true);
+        morningCityIn.setTextSize(14);
+        morningCityIn.setText(morningPrefs.getString(
+                "city", "重庆"));
+        morningCityIn.setBackground(rounded(
+                Color.rgb(243, 244, 246), dp(10)));
+        morningCityIn.setPadding(dp(10), dp(7), dp(10),
+                dp(7));
+        morningCityRow.addView(morningCityIn,
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f));
+        TextView morningCitySave = buildWhitePillButton(
+                "保存", Color.rgb(37, 99, 235));
+        android.widget.LinearLayout.LayoutParams mcSaveLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        mcSaveLp.leftMargin = dp(8);
+        morningCitySave.setLayoutParams(mcSaveLp);
+        morningCitySave.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        String c = morningCityIn.getText()
+                                .toString().trim();
+                        if (!c.isEmpty()) {
+                            morningPrefs.edit()
+                                    .putString("city", c)
+                                    .apply();
+                            Toast.makeText(MainActivity.this,
+                                    "城市已保存",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+        morningCityRow.addView(morningCitySave);
+        body.addView(morningCityRow);
+
         // v572: 打开方式单独设计（预览定稿）——两张示意图
         // 卡：小窗（浮窗图）/ 全局（全屏图），点选即切换，
         // 与经典共用 miniwindow 设置（通用元素）。
@@ -8631,6 +8870,8 @@ public class MainActivity extends Activity {
         // v600: AI 助手总开关默认关（同 lightDotSteady
         // 的特判理由：不在 FEATURES 表里）。
         if ("aiEnabled".equals(key)) return false;
+        // v631: 消息提醒带内容默认关（只报谁，隐私优先）。
+        if ("msgRemindContent".equals(key)) return false;
         for (Feature f : FEATURES) {
             if (f.key.equals(key)) return f.def;
         }

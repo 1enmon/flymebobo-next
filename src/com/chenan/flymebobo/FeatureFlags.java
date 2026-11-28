@@ -186,6 +186,11 @@ public class FeatureFlags {
     // 径）。布尔键 "lightDotSteady"，文件镜像同
     // lightDotGlow 口径。
     public static volatile boolean lightDotSteady = false;
+    // v631: 消息提醒（wei 定版）——消息类应用到达时形
+    // 象药丸报「X 给你发消息了」，取代该应用的到达闪；
+    // msgRemindContent 子开关决定带不带内容（默认不带）。
+    public static volatile boolean msgRemind = true;
+    public static volatile boolean msgRemindContent = false;
 
     // v600: 轻气泡 AI 助手（wei 定：收纳摘要 + 语义打
     // 标进轻气泡，DeepSeek 预设、自带 Key）——总开关
@@ -538,6 +543,14 @@ public class FeatureFlags {
             lightDotSteady = enabled;
             FileLog.i("Light dotSteady -> "
                     + (enabled ? "on" : "off"));
+        } else if ("msgRemind".equals(key)) {
+            msgRemind = enabled;
+            FileLog.i("Light msgRemind -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("msgRemindContent".equals(key)) {
+            msgRemindContent = enabled;
+            FileLog.i("Light msgRemindContent -> "
+                    + (enabled ? "on" : "off"));
         } else if ("aiEnabled".equals(key)) {
             aiEnabled = enabled;
             FileLog.i("Light ai -> "
@@ -642,6 +655,10 @@ public class FeatureFlags {
                     "lightDotGlow", prefs, true);
             lightDotSteady = fileOrPrefsBool(
                     "lightDotSteady", prefs, false);
+            msgRemind = fileOrPrefsBool(
+                    "msgRemind", prefs, true);
+            msgRemindContent = fileOrPrefsBool(
+                    "msgRemindContent", prefs, false);
             aiEnabled = fileOrPrefsBool(
                     "aiEnabled", prefs, false);
             aiSummary = fileOrPrefsBool(

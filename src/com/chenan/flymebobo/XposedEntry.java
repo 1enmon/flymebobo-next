@@ -379,6 +379,7 @@ public class XposedEntry extends XposedModule {
         filter.addAction(NotificationService.ACTION_AI_RESULT);
         filter.addAction(
                 NotificationService.ACTION_AI_INFO_RESULT);
+        filter.addAction(MorningReceiver.ACTION_REPORT);
         filter.addAction(NotificationService.ACTION_LIGHT_OPEN);
         filter.addAction(NotificationService.ACTION_LIGHT_RECALL_OPEN);
         filter.addAction(NotificationService.ACTION_APP_RULES);
@@ -1228,6 +1229,20 @@ public class XposedEntry extends XposedModule {
                                 intent.getStringExtra(
                                         "summaryText"),
                                 intent.getStringExtra("tagsBlob"));
+                    }
+                    return;
+                }
+                // v631: 每日早报（App 进程拉完天气广播
+                // 回来）——交给 BubbleWindow 成卡 + 闪。
+                if (MorningReceiver.ACTION_REPORT.equals(
+                        intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onMorningReport(
+                                intent.getStringExtra("line"),
+                                intent.getStringExtra("body"),
+                                intent.getStringExtra("dateStr"),
+                                intent.getStringExtra("city"));
                     }
                     return;
                 }

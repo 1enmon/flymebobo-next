@@ -1532,6 +1532,7 @@ public class BubbleWindow {
             lightPulsing = false;
             lightFlashKey = null;
             lightAiPillShowing = false;
+            lightMorningPillShowing = false;
             if (lightPill != null) {
                 lightPill.setVisibility(View.GONE);
             }
@@ -1555,6 +1556,9 @@ public class BubbleWindow {
             // v611: AI 摘要续闪——没被到达/歌词占住就
             // 接着闪（放歌跟词时 maybe 里让路、不闪）。
             maybeFlashLightSummary();
+            // v631: 早报续闪排最后（到达/歌词/摘要优先，
+            // 都空了才轮到它，最多 4 轮）。
+            maybeFlashMorning();
         }
     };
     // 收纳面板（根=全屏透明层，盒在小签同侧）。
@@ -1619,6 +1623,17 @@ public class BubbleWindow {
     // 进程分析，结果回来存这里。标签值 suspect /
     // promo / important，按通知 key 存。
     private String lightAiSummary;
+    // v631: 每日早报（App 进程广播送达）——面板早报卡
+    // + 小签闪（排在到达/歌词/摘要之后）；面板看过一
+    // 次（关闭时标记 seen）就不再出现，闪最多 4 轮。
+    private String lightMorningLine;
+    private String lightMorningBody;
+    private String lightMorningDate;
+    private String lightMorningCity;
+    private boolean lightMorningSeen = true;
+    private boolean lightMorningShown;
+    private boolean lightMorningPillShowing;
+    private int lightMorningPulseCount;
     // v628: 摘要形象（wei 定：默认什么都没有，用户在
     // AI 卡「摘要形象」里自己设）：头像
     // /sdcard/flymebobo/persona.png + 名字 persona.txt，
@@ -2026,7 +2041,16 @@ public class BubbleWindow {
         // v595: wei 定——安静规则设了「收纳」(EDGE，含走
         // 「全部应用」默认落到收纳的）的新通知直接进面
         // 板、只提示角标，不闪药丸；跟随的照旧闪。
-        if (AppRules.modeFor(d.pkg) == AppRules.EDGE) {
+        // v631: 消息提醒（wei 定版）——消息类应用且能
+        // 认出发送者时，形象药丸报「X 给你发消息了」，
+        // 取代到达闪；收纳档也照样报（只报谁、不露内
+        // 容时无隐私问题）。其余仍按 v595 两档走。
+        if (FeatureFlags.msgRemind && isLightMsgApp(d.pkg)
+                && d.title != null
+                && !d.title.trim().isEmpty()) {
+            flashLightMsgRemind(d);
+        } else if (AppRules.modeFor(d.pkg)
+                == AppRules.EDGE) {
             FileLog.i("Light collect quiet pkg=" + d.pkg);
         } else {
             flashLightPill(d);
@@ -4997,6 +5021,11 @@ public class BubbleWindow {
     }
 
     private void dismissLightPanel() {
+        // v631: 早报在面板里露过面，关掉就算看过。
+        if (lightMorningShown) {
+            lightMorningSeen = true;
+            lightMorningShown = false;
+        }
         dismissLightCodeStage();
         handler.removeCallbacks(lightMusicTickRunnable);
         handler.removeCallbacks(lightCodeTickRunnable);
@@ -5432,6 +5461,11 @@ public class BubbleWindow {
             dismissLightPanel();
             hideLightDot();
             return;
+        }
+        // v631: 早报卡排最前（当天的问候，看过即收）。
+        if (lightMorningBody != null && !lightMorningSeen) {
+            lightPanelBox.addView(buildLightMorningCard());
+            lightMorningShown = true;
         }
         // v605: 面板卡片顺序（wei 定）：AI 开了的话
         // AI 摘要卡放最上面，音乐第二，其他卡片第三。
@@ -6792,6 +6826,277 @@ public class BubbleWindow {
         handler.removeCallbacks(lightPulseEndRunnable);
         handler.postDelayed(lightPulseEndRunnable, 11200);
         FileLog.i("Light lyric line " + line);
+    }
+
+    /** v631: 消息类应用名单（能认出发送者的）。 */
+    private static boolean isLightMsgApp(String pkg) {
+        if (pkg == null) {
+            return false;
+        }
+        switch (pkg) {
+            case "com.tencent.mm":
+            case "com.tencent.mobileqq":
+            case "com.tencent.tim":
+            case "com.tencent.wework":
+            case "com.alibaba.android.rimet":
+            case "org.telegram.messenger":
+            case "com.whatsapp":
+            case "com.android.mms":
+            case "com.google.android.apps.messaging":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** v631: 拆发送者与内容——群聊时标题是群名、正文
+     * 前缀「名字：」是发言人，拼成「群名 · 名字」。 */
+    private static String[] msgSenderParts(NotifData d) {
+        String title = d.title == null
+                ? "" : d.title.trim();
+        String text = d.text == null ? "" : d.text;
+        String sender = title;
+        String content = text;
+        int idx = -1;
+        int sepLen = 1;
+        int c1 = text.indexOf('：');
+        if (c1 > 0 && c1 <= 12) {
+            idx = c1;
+            sepLen = 1;
+        }
+        int c2 = text.indexOf(": ");
+        if (c2 > 0 && c2 <= 12 && (idx < 0 || c2 < idx)) {
+            idx = c2;
+            sepLen = 2;
+        }
+        if (idx > 0) {
+            String maybe = text.substring(0, idx).trim();
+            if (!maybe.isEmpty() && !maybe.equals(title)) {
+                sender = title + " · " + maybe;
+                content = text.substring(idx + sepLen)
+                        .trim();
+            }
+        }
+        return new String[]{sender, content};
+    }
+
+    /** v631: 消息提醒药丸——形象打头，只报谁（带内容
+     * 开关开了且未打码才带一句内容）。占位与收尾走
+     * 到达闪同一套（lightFlashKey / 脉冲收尾）。 */
+    private void flashLightMsgRemind(NotifData d) {
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null) {
+            return;
+        }
+        String[] parts = msgSenderParts(d);
+        String label;
+        if (FeatureFlags.msgRemindContent
+                && !PrivacyMask.shouldMask(app)
+                && parts[1] != null
+                && !parts[1].isEmpty()) {
+            String c = parts[1].length() > 18
+                    ? parts[1].substring(0, 18) + "…"
+                    : parts[1];
+            label = parts[0] + "：" + c;
+        } else {
+            label = parts[0] + " 给你发消息了";
+        }
+        refreshLightPersona();
+        if (lightPersonaBmp != null) {
+            lightPillIcon.setImageBitmap(lightPersonaBmp);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            String dpkg = lightDisplayPkg(d);
+            android.graphics.drawable.Drawable icon =
+                    lightAppIcon(dpkg, d);
+            if (icon != null) {
+                lightPillIcon.setImageDrawable(icon);
+                lightPillIcon.setVisibility(View.VISIBLE);
+            } else {
+                lightPillIcon.setVisibility(View.GONE);
+            }
+        }
+        setLightPillLyricMode(true);
+        lightPillLabel.setText(label);
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightPulsing = true;
+        lightFlashKey = d.key;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+        FileLog.i("Light msg remind pkg=" + d.pkg);
+    }
+
+    /** v631: 早报送达（XposedEntry 转发）——存卡 + 排
+     * 队闪（优先级最低，空了才上）。 */
+    public void onMorningReport(String line, String body,
+            String dateStr, String city) {
+        if (body == null || body.isEmpty()) {
+            return;
+        }
+        lightMorningLine = line;
+        lightMorningBody = body;
+        lightMorningDate = dateStr;
+        lightMorningCity = city;
+        lightMorningSeen = false;
+        lightMorningPulseCount = 0;
+        FileLog.i("Morning report in");
+        if (lightPanelAdded && !lightPanelRecallMode) {
+            rebuildLightPanelRows();
+        } else {
+            maybeFlashMorning();
+        }
+    }
+
+    private void maybeFlashMorning() {
+        if (lightMorningBody == null || lightMorningSeen
+                || lightMorningPulseCount >= 4
+                || lightPanelAdded
+                || lightFlashKey != null || lightPulsing) {
+            return;
+        }
+        if (lightMusicData != null && lightLyricFollow) {
+            return;
+        }
+        flashMorningPill();
+    }
+
+    private void flashMorningPill() {
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null
+                || !lightDotAdded) {
+            return;
+        }
+        refreshLightPersona();
+        if (lightPersonaBmp != null) {
+            lightPillIcon.setImageBitmap(lightPersonaBmp);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightPillIcon.setVisibility(View.GONE);
+        }
+        setLightPillLyricMode(true);
+        lightPillLabel.setText(
+                (lightPersonaName.isEmpty()
+                        ? "早报：" : lightPersonaName + "：")
+                        + (lightMorningLine == null
+                                ? "" : lightMorningLine));
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        updateLightBadge();
+        lightPulsing = true;
+        lightMorningPillShowing = true;
+        lightMorningPulseCount++;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+    }
+
+    /** v631: 早报卡（面板第一张；看过关闭后不再出）。 */
+    private android.widget.LinearLayout buildLightMorningCard() {
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(lpWhite()
+                ? Color.rgb(255, 255, 255)
+                : Color.rgb(23, 32, 54));
+        bg.setCornerRadius(dp(14));
+        if (lpWhite()) {
+            bg.setStroke(dp(1), Color.rgb(191, 219, 254));
+        }
+        card.setBackground(bg);
+        card.setPadding(dp(12), dp(9), dp(12), dp(9));
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        android.widget.LinearLayout head =
+                new android.widget.LinearLayout(app);
+        head.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        refreshLightPersona();
+        if (lightPersonaBmp != null) {
+            android.widget.ImageView av =
+                    new android.widget.ImageView(app);
+            av.setImageBitmap(lightPersonaBmp);
+            android.widget.LinearLayout.LayoutParams avLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            dp(22), dp(22));
+            avLp.rightMargin = dp(6);
+            av.setLayoutParams(avLp);
+            head.addView(av);
+        }
+        android.widget.TextView label =
+                new android.widget.TextView(app);
+        label.setText(lightPersonaName.isEmpty()
+                ? "每日早报"
+                : lightPersonaName + " 的早报");
+        label.setTextSize(11);
+        label.setTextColor(lpWhite()
+                ? Color.rgb(37, 99, 235)
+                : Color.rgb(147, 197, 253));
+        label.setTypeface(
+                android.graphics.Typeface.DEFAULT_BOLD);
+        head.addView(label);
+        if (lightMorningDate != null) {
+            android.widget.TextView date =
+                    new android.widget.TextView(app);
+            date.setText(lightMorningDate);
+            date.setTextSize(10.5f);
+            date.setTextColor(lpFaintC());
+            android.widget.LinearLayout.LayoutParams dLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT,
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT);
+            dLp.leftMargin = dp(6);
+            date.setLayoutParams(dLp);
+            head.addView(date);
+        }
+        card.addView(head);
+        android.widget.TextView body =
+                new android.widget.TextView(app);
+        body.setText(lightMorningBody);
+        body.setTextSize(13);
+        body.setTextColor(lpTitleC());
+        body.setLineSpacing(0, 1.25f);
+        android.widget.LinearLayout.LayoutParams blp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        blp.topMargin = dp(3);
+        body.setLayoutParams(blp);
+        card.addView(body);
+        android.widget.TextView foot =
+                new android.widget.TextView(app);
+        foot.setText("每日早报"
+                + (lightMorningCity != null
+                        ? " · " + lightMorningCity : ""));
+        foot.setTextSize(10);
+        foot.setTextColor(lpFaintC());
+        android.widget.LinearLayout.LayoutParams flp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        flp.topMargin = dp(4);
+        foot.setLayoutParams(flp);
+        card.addView(foot);
+        return card;
     }
 
     /** v611: AI 摘要药丸（wei 定：摘要完成就闪、一
