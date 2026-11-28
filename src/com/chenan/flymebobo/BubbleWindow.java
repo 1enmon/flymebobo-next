@@ -1539,6 +1539,9 @@ public class BubbleWindow {
                 lightDotTab.setVisibility(View.VISIBLE);
             }
             refreshLightDot();
+            // v630: 摘要闪的这一轮结束了：先恢复角标，
+            // 下面若续闪会再藏回去。
+            updateLightBadge();
             // v577: 刚才是通知在闪——它闪完收纳了，歌词
             // 回来把当前行再亮出来，接着跟随（歌词自己的
             // 闪结束时 wasArrival=false，不会自循环）。
@@ -4500,6 +4503,12 @@ public class BubbleWindow {
         if (lightBadge == null) {
             return;
         }
+        // v630: AI 摘要闪烁时角标整个隐藏（wei 定），
+        // 闪停后由收尾路径再调本方法恢复。
+        if (lightAiPillShowing) {
+            lightBadge.setVisibility(View.GONE);
+            return;
+        }
         int n = lightStack.size();
         if (n <= 0) {
             lightBadge.setVisibility(View.GONE);
@@ -6814,9 +6823,10 @@ public class BubbleWindow {
                 + lightAiFlashText);
         lightPill.setVisibility(View.VISIBLE);
         lightDotTab.setVisibility(View.GONE);
+        // v630: 先置位再刷角标，角标才会当场藏起来。
+        lightAiPillShowing = true;
         updateLightBadge();
         lightPulsing = true;
-        lightAiPillShowing = true;
         handler.removeCallbacks(lightPulseEndRunnable);
         handler.postDelayed(lightPulseEndRunnable, 11200);
     }
@@ -6841,6 +6851,7 @@ public class BubbleWindow {
         if (lightAiFlashText == null) {
             return;
         }
+        boolean wasShowing = lightAiPillShowing;
         lightAiFlashText = null;
         if (lightAiPillShowing) {
             lightAiPillShowing = false;
@@ -6852,6 +6863,10 @@ public class BubbleWindow {
             if (lightDotTab != null && !lightSubShowing) {
                 lightDotTab.setVisibility(View.VISIBLE);
             }
+        }
+        // v630: 摘要闪停了，角标恢复（v630 隐藏的配对）。
+        if (wasShowing) {
+            updateLightBadge();
         }
     }
 
