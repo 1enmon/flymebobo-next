@@ -67,7 +67,6 @@ public class AicyBorrow {
     private final ClassLoader cl;
     private final Map<String, Object> clients =
             new ConcurrentHashMap<>();
-    private volatile boolean askOkLogged = false;
 
     public AicyBorrow(XposedModule module, Application app,
             ClassLoader cl) {
@@ -160,10 +159,12 @@ public class AicyBorrow {
                     final String system =
                             intent.getStringExtra("system");
                     final String user = intent.getStringExtra("user");
+                    final boolean fast = intent.getBooleanExtra(
+                            "fast", false);
                     new Thread(new Runnable() {
                         @Override
                         public void run() {
-                            handleAsk(id, system, user);
+                            handleAsk(id, system, user, fast);
                         }
                     }, "aicy-ask").start();
                 }
@@ -198,7 +199,8 @@ public class AicyBorrow {
         }
     }
 
-    private void handleAsk(String id, String system, String user) {
+    private void handleAsk(String id, String system, String user,
+            boolean fast) {
         if (id == null) {
             return;
         }
@@ -225,12 +227,13 @@ public class AicyBorrow {
             }
             a.setAccessible(true);
             Object request = buildRequest(system, user,
-                    a.getParameterTypes()[0]);
+                    a.getParameterTypes()[0], fast);
             Object flow = a.invoke(client, request);
             final StringBuilder content = new StringBuilder();
+            final int[] thinkChunks = new int[1];
             final CountDownLatch done = new CountDownLatch(1);
             final String[] error = new String[1];
-            Object collector = makeCollector(content);
+            Object collector = makeCollector(content, thinkChunks);
             Object continuation =
                     makeContinuation(done, error);
             Method collect = null;
@@ -257,10 +260,9 @@ public class AicyBorrow {
                 reply(id, null, error[0]);
                 return;
             }
-            if (!askOkLogged) {
-                askOkLogged = true;
-                log("ask ok len=" + content.length());
-            }
+            log("ask ok len=" + content.length()
+                    + " thinkChunks=" + thinkChunks[0]
+                    + " fast=" + fast);
             reply(id, content.toString(), null);
         } catch (Throwable t) {
             Throwable cause = t;
@@ -275,14 +277,15 @@ public class AicyBorrow {
 
     // ---- Proxy collector / continuation ----
 
-    private Object makeCollector(final StringBuilder content)
-            throws Exception {
+    private Object makeCollector(final StringBuilder content,
+            final int[] thinkChunks) throws Exception {
         Class<?> collectorClass = Class.forName(
                 "kotlinx.coroutines.flow.i", false, cl);
         Class<?> unitClass = Class.forName("kotlin.Unit", false, cl);
         final Object unit = unitClass.getField("INSTANCE").get(null);
         InvocationHandler handler = new InvocationHandler() {
             private Field contentField;
+            private Field thinkField;
 
             @Override
             public Object invoke(Object proxy, Method method,
@@ -295,10 +298,18 @@ public class AicyBorrow {
                             contentField = args[0].getClass()
                                     .getDeclaredField("a");
                             contentField.setAccessible(true);
+                            thinkField = args[0].getClass()
+                                    .getDeclaredField("b");
+                            thinkField.setAccessible(true);
                         }
                         Object v = contentField.get(args[0]);
                         if (v instanceof String) {
                             content.append((String) v);
+                        }
+                        Object rv = thinkField.get(args[0]);
+                        if (rv instanceof String
+                                && !((String) rv).isEmpty()) {
+                            thinkChunks[0]++;
                         }
                     } catch (Throwable ignored) {
                     }
@@ -405,7 +416,7 @@ public class AicyBorrow {
     }
 
     private Object buildRequest(String system, String user,
-            Class<?> reqClass) throws Exception {
+            Class<?> reqClass, boolean fast) throws Exception {
         List<Object> messages = new ArrayList<>();
         if (system != null && !system.isEmpty()) {
             messages.add(buildMessage("SYSTEM", system));
@@ -429,6 +440,11 @@ public class AicyBorrow {
         Class<?>[] pt = ctor.getParameterTypes();
         Object[] args = new Object[pt.length];
         int mask = (1 << 0) | (1 << 5);
+        if (fast) {
+            // v627: 快速模式——真实参数 15 = ThinkingMode，
+            // 置 bit15 并填 OFF，关掉思考过程提速。
+            mask |= (1 << 15);
+        }
         args[0] = Integer.valueOf(mask);
         for (int i = 1; i < pt.length; i++) {
             args[i] = defaultFor(pt[i]);
@@ -445,6 +461,19 @@ public class AicyBorrow {
             }
         }
         args[6] = caller;
+        if (fast) {
+            Class<?> tmClass = Class.forName(
+                    "com.flyme.agentos.llm.api.model.ThinkingMode",
+                    false, cl);
+            Object off = null;
+            for (Object e : tmClass.getEnumConstants()) {
+                if (((Enum<?>) e).name().equalsIgnoreCase("off")) {
+                    off = e;
+                    break;
+                }
+            }
+            args[16] = off;
+        }
         return ctor.newInstance(args);
     }
 

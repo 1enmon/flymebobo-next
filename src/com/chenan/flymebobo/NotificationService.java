@@ -3260,6 +3260,11 @@ public class NotificationService extends NotificationListenerService {
             it.putExtra("id", id);
             it.putExtra("system", system);
             it.putExtra("user", user);
+            // v627: Aicy 快速模式开关（AI 卡，默认开）。
+            it.putExtra("fast", getSharedPreferences(
+                    "flymebobo_ai",
+                    android.content.Context.MODE_PRIVATE)
+                    .getBoolean("aiAicyFast", true));
             sendBroadcast(it);
             boolean done =
                     ((java.util.concurrent.CountDownLatch)

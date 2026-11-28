@@ -3027,6 +3027,85 @@ public class MainActivity extends Activity {
         aiAicyNote.setTextSize(12.5f);
         aiAicyNote.setTextColor(L_SUB);
         aiAicyBox.addView(aiAicyNote);
+        // v627: 快速模式开关（wei 定：加个开关）——关掉
+        // Aicy 的思考过程，摘要/打标更快；默认开。存
+        // flymebobo_ai.aiAicyFast，NS 发问时带给 Aicy 侧。
+        android.widget.LinearLayout aiFastRow =
+                new android.widget.LinearLayout(this);
+        aiFastRow.setOrientation(
+                android.widget.LinearLayout.HORIZONTAL);
+        aiFastRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        android.widget.LinearLayout.LayoutParams aiFastRowLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        aiFastRowLp.topMargin = dp(10);
+        aiFastRow.setLayoutParams(aiFastRowLp);
+        android.widget.LinearLayout aiFastTexts =
+                new android.widget.LinearLayout(this);
+        aiFastTexts.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        TextView aiFastTitle = new TextView(this);
+        aiFastTitle.setText("快速模式");
+        aiFastTitle.setTextSize(14);
+        aiFastTitle.setTextColor(L_INK);
+        aiFastTexts.addView(aiFastTitle);
+        TextView aiFastSub = new TextView(this);
+        aiFastSub.setText("关掉 Aicy 的思考过程，摘要和打标出得更快");
+        aiFastSub.setTextSize(12);
+        aiFastSub.setTextColor(L_SUB);
+        aiFastTexts.addView(aiFastSub);
+        aiFastRow.addView(aiFastTexts,
+                new android.widget.LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f));
+        final android.widget.FrameLayout aiFastTrack =
+                new android.widget.FrameLayout(this);
+        final TextView aiFastKnob = new TextView(this);
+        aiFastKnob.setBackground(rounded(Color.WHITE, dp(999)));
+        android.widget.FrameLayout.LayoutParams aiKnobLp =
+                new android.widget.FrameLayout.LayoutParams(
+                        dp(23), dp(23));
+        aiKnobLp.topMargin = dp(2);
+        aiKnobLp.bottomMargin = dp(2);
+        aiFastKnob.setLayoutParams(aiKnobLp);
+        aiFastTrack.addView(aiFastKnob);
+        aiFastRow.addView(aiFastTrack,
+                new android.widget.LinearLayout.LayoutParams(
+                        dp(46), dp(27)));
+        final Runnable paintAiFast = new Runnable() {
+            @Override
+            public void run() {
+                boolean on = aiPrefsCh.getBoolean(
+                        "aiAicyFast", true);
+                aiFastTrack.setBackground(rounded(on
+                        ? Color.rgb(61, 123, 214)
+                        : Color.rgb(199, 203, 209), dp(999)));
+                android.widget.FrameLayout.LayoutParams lp =
+                        (android.widget.FrameLayout.LayoutParams)
+                                aiFastKnob.getLayoutParams();
+                lp.gravity = on
+                        ? (android.view.Gravity.RIGHT
+                                | android.view.Gravity.CENTER_VERTICAL)
+                        : (android.view.Gravity.LEFT
+                                | android.view.Gravity.CENTER_VERTICAL);
+                lp.leftMargin = on ? 0 : dp(2);
+                lp.rightMargin = on ? dp(2) : 0;
+                aiFastKnob.setLayoutParams(lp);
+            }
+        };
+        paintAiFast.run();
+        aiFastRow.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean on = aiPrefsCh.getBoolean(
+                        "aiAicyFast", true);
+                aiPrefsCh.edit().putBoolean("aiAicyFast", !on)
+                        .apply();
+                paintAiFast.run();
+            }
+        });
+        aiAicyBox.addView(aiFastRow);
         body.addView(aiAicyBox);
         final Runnable refreshAiChannel = new Runnable() {
             @Override
