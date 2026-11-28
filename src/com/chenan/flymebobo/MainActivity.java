@@ -2919,25 +2919,26 @@ public class MainActivity extends Activity {
         body.addView(aiModelFastIn);
         // v614: 模型自动识别（wei 提）——拿地址+Key 拉
         // /models 列表点选，免手打模型名。
-        LinearLayout aiPickRow = new LinearLayout(this);
-        aiPickRow.setOrientation(LinearLayout.HORIZONTAL);
+        // v623: 三个按钮改全宽竖排（wei 两次截图报「选摘要/
+        // 选打标/保存」三钮视觉重叠——横排两钮与保存钮在
+        // 滚动截图里贴成一片；竖排 + 明确间距后任何情况下
+        // 都不可能再叠）。功能与点击逻辑不变。
         TextView aiPickSummary = buildWhitePillButton(
                 "选摘要模型", L_ACCENT);
         LinearLayout.LayoutParams aiPickLp1 =
-                new LinearLayout.LayoutParams(0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1);
-        aiPickLp1.setMargins(0, dp(6), dp(10), 0);
-        aiPickRow.addView(aiPickSummary, aiPickLp1);
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        aiPickLp1.setMargins(0, dp(10), 0, 0);
+        body.addView(aiPickSummary, aiPickLp1);
         TextView aiPickFast = buildWhitePillButton(
                 "选打标模型", L_ACCENT);
         LinearLayout.LayoutParams aiPickLp2 =
-                new LinearLayout.LayoutParams(0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1);
-        aiPickLp2.setMargins(dp(10), dp(6), 0, 0);
-        aiPickRow.addView(aiPickFast, aiPickLp2);
-        body.addView(aiPickRow);
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        aiPickLp2.setMargins(0, dp(10), 0, 0);
+        body.addView(aiPickFast, aiPickLp2);
         aiPickSummary.setOnClickListener(
                 new View.OnClickListener() {
             @Override
@@ -2985,7 +2986,12 @@ public class MainActivity extends Activity {
                 }
             }
         });
-        body.addView(aiSave);
+        LinearLayout.LayoutParams aiSaveLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        aiSaveLp.setMargins(0, dp(10), 0, 0);
+        body.addView(aiSave, aiSaveLp);
         TextView aiNote = new TextView(this);
         aiNote.setText("API Key 加密储存在本机（系统密钥"
                 + "库托管），不会上传到任何服务器。只在收纳"
