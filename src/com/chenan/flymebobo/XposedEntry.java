@@ -44,6 +44,36 @@ public class XposedEntry extends XposedModule {
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
         String pkg = param.getPackageName();
         if ("com.android.systemui".equals(pkg)) {
+            // v650: 崩溃哨兵（诊断包）——SystemUI 进程
+            // 里装默认未捕获异常处理器，先把堆栈落
+            // FileLog 再交回原处理器（不改变崩溃行为，
+            // 只留证）。定位「常亮+空栈点呼吸灯重启」
+            // 用，定位后撤。
+            try {
+                final Thread.UncaughtExceptionHandler prev =
+                        Thread.getDefaultUncaughtExceptionHandler();
+                Thread.setDefaultUncaughtExceptionHandler(
+                        new Thread.UncaughtExceptionHandler() {
+                            @Override
+                            public void uncaughtException(
+                                    Thread t, Throwable e) {
+                                try {
+                                    FileLog.i("FATAL thread="
+                                            + t.getName()
+                                            + "\n"
+                                            + android.util.Log
+                                                    .getStackTraceString(
+                                                            e));
+                                } catch (Throwable ignored) {
+                                }
+                                if (prev != null) {
+                                    prev.uncaughtException(t, e);
+                                }
+                            }
+                        });
+                FileLog.i("Crash sentinel installed");
+            } catch (Throwable ignored) {
+            }
             log(4, TAG, "flymebobo 2.0 loaded in SystemUI");
             hookAppOnCreate(false);
         } else if ("com.android.incallui".equals(pkg)) {
