@@ -247,6 +247,22 @@ public class MorningReceiver extends BroadcastReceiver {
             FileLog.i("Morning fetch fail city=" + city);
             return;
         }
+        // v655: 天气快照落盘给轻气泡今日卡读（当天
+        // 有效；SystemUI 读 /sdcard/flymebobo）。
+        try {
+            java.io.FileWriter wr = new java.io.FileWriter(
+                    new java.io.File(
+                            SettingsStore.DIR_PUBLIC
+                                    + "/weather_cache.txt"),
+                    false);
+            wr.write(city + "\u0001" + w[0] + "\u0001"
+                    + w[1] + "\u0001" + w[2] + "\u0001"
+                    + new SimpleDateFormat("yyyy-MM-dd",
+                            Locale.CHINA)
+                                    .format(new java.util.Date()));
+            wr.close();
+        } catch (Throwable ignored) {
+        }
         int code = Integer.parseInt(w[5]);
         int pp = Integer.parseInt(w[3]);
         int aqi = Integer.parseInt(w[4]);

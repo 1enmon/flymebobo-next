@@ -196,6 +196,9 @@ public class FeatureFlags {
     // 被收纳的通知在通知栏也留一份，音乐/下载同理；
     // 默认关，保持现行「收进来就藏」的干净口径。
     public static volatile boolean keepOriginal = false;
+    // v655: 今日卡（面板顶部常驻）与边缘滑动呼出。
+    public static volatile boolean lightTodayCard = true;
+    public static volatile boolean lightSummonSwipe = true;
 
     // v600: 轻气泡 AI 助手（wei 定：收纳摘要 + 语义打
     // 标进轻气泡，DeepSeek 预设、自带 Key）——总开关
@@ -562,6 +565,14 @@ public class FeatureFlags {
             keepOriginal = enabled;
             FileLog.i("Light keepOriginal -> "
                     + (enabled ? "on" : "off"));
+        } else if ("lightTodayCard".equals(key)) {
+            lightTodayCard = enabled;
+            FileLog.i("Light todayCard -> "
+                    + (enabled ? "on" : "off"));
+        } else if ("lightSummonSwipe".equals(key)) {
+            lightSummonSwipe = enabled;
+            FileLog.i("Light summonSwipe -> "
+                    + (enabled ? "on" : "off"));
         } else if ("aiEnabled".equals(key)) {
             aiEnabled = enabled;
             FileLog.i("Light ai -> "
@@ -674,6 +685,10 @@ public class FeatureFlags {
                     "msgRemindContent", prefs, false);
             keepOriginal = fileOrPrefsBool(
                     "keepOriginal", prefs, false);
+            lightTodayCard = fileOrPrefsBool(
+                    "lightTodayCard", prefs, true);
+            lightSummonSwipe = fileOrPrefsBool(
+                    "lightSummonSwipe", prefs, true);
             aiEnabled = fileOrPrefsBool(
                     "aiEnabled", prefs, false);
             aiSummary = fileOrPrefsBool(

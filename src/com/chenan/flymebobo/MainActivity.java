@@ -3811,6 +3811,18 @@ public class MainActivity extends Activity {
                 "", Color.rgb(59, 130, 246), "亮", false,
                 null)));
 
+        // v655: 今日卡 + 边缘滑动呼出（wei 预览定版）。
+        body.addView(buildSubSwitch(new Feature(
+                "lightTodayCard", "今日卡",
+                "面板顶部常驻：时间、日期、天气和最近行程倒计时",
+                "", Color.rgb(59, 130, 246), "今", true,
+                null)));
+        body.addView(buildSubSwitch(new Feature(
+                "lightSummonSwipe", "边缘滑动呼出",
+                "没有通知时，从小签那侧边缘向内滑，也能呼出面板",
+                "", Color.rgb(59, 130, 246), "呼", true,
+                null)));
+
         // v631: 消息提醒（wei 定版）——消息类应用到达
         // 时形象药丸报「X 给你发消息了」，取代到达闪；
         // 子开关管带不带内容（默认不带）。

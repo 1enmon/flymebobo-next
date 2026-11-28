@@ -1523,6 +1523,12 @@ public class BubbleWindow {
     private android.widget.TextView lightBadge;
     private WindowManager.LayoutParams lightDotParams;
     private boolean lightDotAdded;
+    // v655: 边缘呼出带（小签隐藏时才在）+ 呼出面板
+    // 标记（呼出的空面板不被显隐同步误关）。
+    private View lightSwipeZone;
+    private boolean lightSwipeZoneAdded;
+    private WindowManager.LayoutParams lightSwipeParams;
+    private boolean lightPanelSummoned;
     private android.animation.ValueAnimator lightBreath;
     private boolean lightPulsing;
     // v575: 正在闪的到达药丸/副药丸是哪一条——点开它时
@@ -3453,6 +3459,7 @@ public class BubbleWindow {
         }
         if (!FeatureFlags.lightMode) {
             hideLightDot();
+            hideLightSwipeZone();
             if (lightPanelAdded) {
                 dismissLightPanel();
             }
@@ -3475,18 +3482,21 @@ public class BubbleWindow {
                 && lightDownloads.isEmpty()
                 && lightInfoCards.isEmpty()) {
             hideLightDot();
-            if (lightPanelAdded) {
+            if (lightPanelAdded && !lightPanelSummoned) {
                 dismissLightPanel();
             }
+            showLightSwipeZone();
             return;
         }
         if (!isScreenInteractive()) {
             hideLightDot();
+            hideLightSwipeZone();
             if (lightPanelAdded) {
                 dismissLightPanel();
             }
             return;
         }
+        hideLightSwipeZone();
         ensureLightDot();
         if (!lightDotAdded && lightDotRoot != null) {
             try {
@@ -4280,6 +4290,103 @@ public class BubbleWindow {
         lightGlowAdded = false;
     }
 
+    /** v655: 边缘呼出带——小签因栈空隐藏时，在它
+     * 原来的位置留一条看不见的窄带，从边缘向内滑
+     * 一下呼出面板（wei 定：没通知时也能呼出来看
+     * 东西）。小签在时不建，免得跟点小签打架。 */
+    private void ensureLightSwipeZone() {
+        if (lightSwipeZone != null) {
+            return;
+        }
+        lightSwipeZone = new View(app);
+        lightSwipeZone.setOnTouchListener(
+                new View.OnTouchListener() {
+            private float downX;
+            private float downY;
+            private boolean fired;
+            @Override
+            public boolean onTouch(View v,
+                    android.view.MotionEvent e) {
+                if (lightPanelAdded) {
+                    return true;
+                }
+                boolean right = FeatureFlags.lightDotRight();
+                switch (e.getActionMasked()) {
+                    case android.view.MotionEvent.ACTION_DOWN:
+                        downX = e.getRawX();
+                        downY = e.getRawY();
+                        fired = false;
+                        return true;
+                    case android.view.MotionEvent.ACTION_MOVE:
+                        if (!fired) {
+                            float dx = e.getRawX() - downX;
+                            float dy = e.getRawY() - downY;
+                            float inward = right ? -dx : dx;
+                            if (inward > dp(28)
+                                    && Math.abs(dy) < dp(48)) {
+                                fired = true;
+                                FileLog.i("Light summon swipe");
+                                hideLightSwipeZone();
+                                showLightPanelSummoned();
+                            }
+                        }
+                        return true;
+                    default:
+                        return true;
+                }
+            }
+        });
+        lightSwipeParams = new WindowManager.LayoutParams(
+                dp(16), dp(150),
+                WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams
+                                .FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT);
+        lightSwipeParams.setTitle("flymebobo-swzone");
+    }
+
+    private void showLightSwipeZone() {
+        if (app == null || wm == null
+                || !FeatureFlags.lightMode
+                || !FeatureFlags.lightSummonSwipe
+                || lightDotAdded || lightPanelAdded
+                || !isScreenInteractive()
+                || !lightStack.isEmpty()
+                || lightMusicData != null
+                || !lightDownloads.isEmpty()
+                || !lightInfoCards.isEmpty()) {
+            return;
+        }
+        ensureLightSwipeZone();
+        if (lightSwipeZone == null || lightSwipeZoneAdded) {
+            return;
+        }
+        boolean right = FeatureFlags.lightDotRight();
+        int h = app.getResources().getDisplayMetrics()
+                .heightPixels;
+        lightSwipeParams.gravity = (right ? Gravity.END
+                : Gravity.START) | Gravity.TOP;
+        lightSwipeParams.y = Math.max(0, Math.round(
+                h * FeatureFlags.lightDotYFrac()) - dp(75));
+        try {
+            wm.addView(lightSwipeZone, lightSwipeParams);
+            lightSwipeZoneAdded = true;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void hideLightSwipeZone() {
+        if (lightSwipeZoneAdded && lightSwipeZone != null
+                && wm != null) {
+            try {
+                wm.removeViewImmediate(lightSwipeZone);
+            } catch (Throwable ignored) {
+            }
+        }
+        lightSwipeZoneAdded = false;
+    }
+
     private void hideLightDot() {
         removeLightGlow();
         handler.removeCallbacks(lightPulseEndRunnable);
@@ -4965,6 +5072,16 @@ public class BubbleWindow {
      * 收掉菜单等）。场景中打开 = 只读（行点不动，防跳出游戏/
      * 视频，wei 定）。 */
     private void showLightPanel() {
+        showLightPanelInternal(false);
+    }
+
+    /** v655: 主动呼出（边缘内滑）——没通知时也能开
+     * 面板看今日卡/时光机，全空也开。 */
+    private void showLightPanelSummoned() {
+        showLightPanelInternal(true);
+    }
+
+    private void showLightPanelInternal(boolean summoned) {
         if (app == null || wm == null
                 || !FeatureFlags.lightMode) {
             return;
@@ -4977,7 +5094,9 @@ public class BubbleWindow {
         // v640: 主动提醒同理，开面板即停。
         stopLightNudgeFlash();
         loadLightInfoCards();
-        if (lightStack.isEmpty() && lightMusicData == null
+        if (!summoned && !FeatureFlags.lightTodayCard
+                && lightStack.isEmpty()
+                && lightMusicData == null
                 && lightDownloads.isEmpty()
                 && lightInfoCards.isEmpty()) {
             return;
@@ -4997,6 +5116,8 @@ public class BubbleWindow {
                 && lightDotAdded) ? lightDotParams.y : -1;
         closeOverlays();
         dismissLightPanel();
+        // v655: 标记要在 dismiss 之后落（dismiss 会清）。
+        lightPanelSummoned = summoned;
         lightPanelRecallMode = false;
         lightPanelReadOnly = sceneGuard != null
                 && sceneGuard.isSuppressed();
@@ -5246,6 +5367,7 @@ public class BubbleWindow {
     }
 
     private void dismissLightPanel() {
+        lightPanelSummoned = false;
         // v631: 早报在面板里露过面，关掉就算看过。
         if (lightMorningShown) {
             lightMorningSeen = true;
@@ -5281,6 +5403,7 @@ public class BubbleWindow {
             lightMusicLyricBtn = null;
             lightMusicLyricView = null;
         }
+        showLightSwipeZone();
     }
 
     /** v564: 面板内容重建——音乐卡永远置顶（收纳视图），
@@ -5682,10 +5805,15 @@ public class BubbleWindow {
             }
         }
         if (lightStack.isEmpty() && lightMusicData == null
-                && lightDownloads.isEmpty()) {
+                && lightDownloads.isEmpty()
+                && !FeatureFlags.lightTodayCard) {
             dismissLightPanel();
             hideLightDot();
             return;
+        }
+        // v655: 今日卡常驻置顶（wei 预览定版）。
+        if (FeatureFlags.lightTodayCard) {
+            lightPanelBox.addView(buildLightTodayCard());
         }
         // v631: 早报卡排最前（当天的问候，看过即收）。
         if (lightMorningBody != null && !lightMorningSeen) {
@@ -7269,6 +7397,182 @@ public class BubbleWindow {
     }
 
     /** v631: 早报卡（面板第一张；看过关闭后不再出）。 */
+    /** v655: 读早报天气快照（MorningReceiver 落盘，
+     * 当天有效）。返回 {城市, 状况, 最低, 最高}。 */
+    private String[] readWeatherCache() {
+        try {
+            java.io.File f = new java.io.File(
+                    SettingsStore.DIR_PUBLIC
+                            + "/weather_cache.txt");
+            if (!f.exists()) {
+                return null;
+            }
+            java.io.BufferedReader br =
+                    new java.io.BufferedReader(
+                            new java.io.FileReader(f));
+            String line = br.readLine();
+            br.close();
+            if (line == null) {
+                return null;
+            }
+            String[] parts = line.split("\u0001");
+            if (parts.length < 5) {
+                return null;
+            }
+            String today = new java.text.SimpleDateFormat(
+                    "yyyy-MM-dd", java.util.Locale.CHINA)
+                            .format(new java.util.Date());
+            if (!today.equals(parts[4])) {
+                return null;
+            }
+            return new String[]{parts[0], parts[1],
+                    parts[2], parts[3]};
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** v655: 最近行程行——信息卡里最近的未来火车/
+     * 飞机事件。没有返回 null。 */
+    private String nearestTripLine() {
+        long now = System.currentTimeMillis();
+        InfoParse.Card best = null;
+        for (InfoParse.Card c : lightInfoCards.values()) {
+            if (c != null && c.eventTime > now
+                    && ("train".equals(c.kind)
+                            || "flight".equals(c.kind))
+                    && (best == null
+                            || c.eventTime < best.eventTime)) {
+                best = c;
+            }
+        }
+        if (best == null) {
+            return null;
+        }
+        long mins = (best.eventTime - now) / 60000L;
+        String dur;
+        if (mins >= 60) {
+            dur = (mins / 60) + " 小时 " + (mins % 60) + " 分";
+        } else {
+            dur = Math.max(1, mins) + " 分钟";
+        }
+        String verb = "train".equals(best.kind)
+                ? "发车" : "起飞";
+        String head = best.title != null ? best.title : "";
+        return "距 " + head + " " + verb + "还有 " + dur;
+    }
+
+    /** v655: 今日卡（wei 预览定版）——面板顶部常
+     * 驻。内容全空时完整版（大字时间+日期+天气+
+     * 行程），有卡片/通知时收成一行细条。 */
+    private android.widget.LinearLayout buildLightTodayCard() {
+        android.widget.LinearLayout card =
+                new android.widget.LinearLayout(app);
+        card.setOrientation(
+                android.widget.LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(lpWhite()
+                ? Color.rgb(255, 255, 255)
+                : Color.rgb(23, 32, 54));
+        bg.setCornerRadius(dp(14));
+        if (lpWhite()) {
+            bg.setStroke(dp(1), Color.rgb(191, 219, 254));
+        }
+        card.setBackground(bg);
+        android.widget.LinearLayout.LayoutParams cardLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams
+                                .MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams
+                                .WRAP_CONTENT);
+        cardLp.bottomMargin = dp(8);
+        card.setLayoutParams(cardLp);
+        int ink = lpWhite() ? Color.rgb(15, 23, 42)
+                : Color.WHITE;
+        java.util.Date now = new java.util.Date();
+        String hhmm = new java.text.SimpleDateFormat(
+                "HH:mm", java.util.Locale.CHINA).format(now);
+        String dateStr = new java.text.SimpleDateFormat(
+                "M月d日 E", java.util.Locale.CHINA)
+                        .format(now);
+        String dowStr = new java.text.SimpleDateFormat(
+                "E", java.util.Locale.CHINA).format(now);
+        String[] w = readWeatherCache();
+        String weather = w == null ? null
+                : w[0] + " " + w[1] + " " + w[2] + "~"
+                        + w[3] + "°";
+        boolean full = lightStack.isEmpty()
+                && lightMusicData == null
+                && lightDownloads.isEmpty()
+                && lightInfoCards.isEmpty()
+                && !(FeatureFlags.aiEnabled
+                        && FeatureFlags.aiSummary
+                        && lightAiSummary != null
+                        && !lightAiSummary.isEmpty())
+                && !(lightMorningBody != null
+                        && !lightMorningSeen);
+        if (full) {
+            card.setPadding(dp(14), dp(12), dp(14), dp(12));
+            android.widget.TextView t =
+                    new android.widget.TextView(app);
+            t.setText(hhmm);
+            t.setTextSize(34);
+            t.setTextColor(ink);
+            t.setTypeface(
+                    android.graphics.Typeface.DEFAULT_BOLD);
+            card.addView(t);
+            android.widget.TextView d =
+                    new android.widget.TextView(app);
+            d.setText(weather != null
+                    ? dateStr + " · " + weather : dateStr);
+            d.setTextSize(12.5f);
+            d.setTextColor(lpFaintC());
+            android.widget.LinearLayout.LayoutParams dLp =
+                    new android.widget.LinearLayout.LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT);
+            dLp.topMargin = dp(2);
+            d.setLayoutParams(dLp);
+            card.addView(d);
+            String trip = nearestTripLine();
+            if (trip != null) {
+                android.widget.TextView tr =
+                        new android.widget.TextView(app);
+                tr.setText(trip);
+                tr.setTextSize(12);
+                tr.setTextColor(lpLinkC());
+                tr.setSingleLine(true);
+                tr.setEllipsize(
+                        android.text.TextUtils.TruncateAt.END);
+                android.widget.LinearLayout.LayoutParams trLp =
+                        new android.widget.LinearLayout.LayoutParams(
+                                android.widget.LinearLayout
+                                        .LayoutParams.MATCH_PARENT,
+                                android.widget.LinearLayout
+                                        .LayoutParams.WRAP_CONTENT);
+                trLp.topMargin = dp(4);
+                tr.setLayoutParams(trLp);
+                card.addView(tr);
+            }
+        } else {
+            card.setPadding(dp(12), dp(7), dp(12), dp(7));
+            android.widget.TextView t =
+                    new android.widget.TextView(app);
+            t.setText(weather != null
+                    ? hhmm + " · " + dowStr + " · " + weather
+                    : hhmm + " · " + dateStr);
+            t.setTextSize(12);
+            t.setTextColor(lpFaintC());
+            t.setSingleLine(true);
+            t.setEllipsize(
+                    android.text.TextUtils.TruncateAt.END);
+            card.addView(t);
+        }
+        return card;
+    }
+
     private android.widget.LinearLayout buildLightMorningCard() {
         android.widget.LinearLayout card =
                 new android.widget.LinearLayout(app);
