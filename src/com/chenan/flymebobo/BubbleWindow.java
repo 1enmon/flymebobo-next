@@ -7470,15 +7470,10 @@ public class BubbleWindow {
                 new android.widget.LinearLayout(app);
         card.setOrientation(
                 android.widget.LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(lpWhite()
-                ? Color.rgb(255, 255, 255)
-                : Color.rgb(23, 32, 54));
-        bg.setCornerRadius(dp(14));
-        if (lpWhite()) {
-            bg.setStroke(dp(1), Color.rgb(191, 219, 254));
-        }
-        card.setBackground(bg);
+        // v658: 黑底只给完整形态；缩小成细条后不要
+        // 黑色背景板（wei 定）——细条透明、只留一行
+        // 字直接落在面板上（同预览稿）。底的设置挪
+        // 进 full 分支里。
         android.widget.LinearLayout.LayoutParams cardLp =
                 new android.widget.LinearLayout.LayoutParams(
                         android.widget.LinearLayout.LayoutParams
@@ -7512,6 +7507,16 @@ public class BubbleWindow {
                 && !(lightMorningBody != null
                         && !lightMorningSeen);
         if (full) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(lpWhite()
+                    ? Color.rgb(255, 255, 255)
+                    : Color.rgb(23, 32, 54));
+            bg.setCornerRadius(dp(14));
+            if (lpWhite()) {
+                bg.setStroke(dp(1),
+                        Color.rgb(191, 219, 254));
+            }
+            card.setBackground(bg);
             card.setPadding(dp(14), dp(12), dp(14), dp(12));
             android.widget.TextView t =
                     new android.widget.TextView(app);
