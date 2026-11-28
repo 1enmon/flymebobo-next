@@ -93,6 +93,13 @@ public final class CallNotifSuppress {
     }
 
     private boolean shouldDrop(Object arg0) {
+        // v656: 轻气泡不碰来电（wei 定）；经典来电
+        // 总开关关着时也不碰——系统来电界面全量放行。
+        // 此前这里没有任何开关门，来电通知在轻气泡
+        // 下也被吞，电话没法接（wei 实测成未接来电）。
+        if (FeatureFlags.lightMode || !FeatureFlags.live) {
+            return false;
+        }
         if (!(arg0 instanceof StatusBarNotification)) {
             return false;
         }

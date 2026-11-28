@@ -85,6 +85,11 @@ public final class CallBannerSuppress {
     }
 
     private boolean shouldDrop(Object entry) {
+        // v656: 同 CallNotifSuppress——轻气泡不碰
+        // 来电、经典来电总开关关着也不碰。
+        if (FeatureFlags.lightMode || !FeatureFlags.live) {
+            return false;
+        }
         if (entry == null) {
             return false;
         }

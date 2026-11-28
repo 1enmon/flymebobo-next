@@ -11043,7 +11043,11 @@ public class BubbleWindow {
         if (data != null && data.isDownload && !FeatureFlags.dl) {
             return;
         }
-        if (data != null && data.isCall && !FeatureFlags.live) {
+        if (data != null && data.isCall
+                && (!FeatureFlags.live
+                        || FeatureFlags.lightMode)) {
+            // v656: 轻气泡不碰来电——经典来电胶囊在
+            // 轻气泡下也不许冒头（wei 定）。
             return;
         }
         // v244: recognize a verification / pickup code in the

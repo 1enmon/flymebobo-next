@@ -261,6 +261,21 @@ public final class InCallUiHide {
         if (!incoming) {
             return false;
         }
+        // v656: 轻气泡不碰来电（wei 定）；经典来电
+        // 总开关关着时也不碰。本进程读不到模块
+        // prefs，走设置镜像文件判这两个开关。
+        try {
+            Boolean lm = SettingsStore.fileFeature(
+                    "lightMode");
+            if (lm != null && lm) {
+                return false;
+            }
+            Boolean lv = SettingsStore.fileFeature("live");
+            if (lv != null && !lv) {
+                return false;
+            }
+        } catch (Throwable ignored) {
+        }
         Context ctx = context != null ? context : app;
         return screenUsable(ctx) && !deviceLocked(ctx);
     }
