@@ -5372,18 +5372,20 @@ public class NotificationService extends NotificationListenerService {
                 boolean keepOrigShade = false;
                 if (!z6 && !z13) {
                     try {
+                        // v654: 保留原通知是通用开关（wei
+                        // 定：两边通用）——经典/轻气泡都读，
+                        // 不再嵌在 lightMode 分支里。开着时
+                        // 气泡/收纳照常，但 NS 不撤这条，
+                        // 原通知留在通知栏，两边都能点开。
+                        keepOrigShade = getSharedPreferences("flymebobo_features", 0).getBoolean("keepOriginal", false);
+                        if (keepOrigShade) {
+                            FileLog.i("KeepOriginal keep shade pkg=" + statusBarNotification.getPackageName());
+                        }
                         if (getSharedPreferences("flymebobo_features", 0).getBoolean("lightMode", false)) {
                             AppRules.load(this);
                             z14 = AppRules.modeFor(statusBarNotification.getPackageName()) == 3;
                             if (z14) {
                                 FileLog.i("Light release keep shade pkg=" + statusBarNotification.getPackageName());
-                            }
-                            // v653: 保留原通知开着——收纳
-                            // 照常，但 NS 不再撤这条，原通知
-                            // 留在通知栏，两边都能点开。
-                            keepOrigShade = getSharedPreferences("flymebobo_features", 0).getBoolean("keepOriginal", false);
-                            if (keepOrigShade) {
-                                FileLog.i("KeepOriginal keep shade pkg=" + statusBarNotification.getPackageName());
                             }
                         }
                     } catch (Throwable th25) {
