@@ -110,6 +110,124 @@ public class AicyBorrow {
             log("install failed " + t);
         }
         registerAskReceiver();
+        installOcrProbe();
+    }
+
+    /** v646: 识屏 OCR 探针（验证包）——在 Aicy 进程
+     * 里三处下网，截 ACTION_SEND_CAPTURE_CURRENT
+     * _SCREEN 广播的发送/接收，把来源应用 + OCR
+     * 全文长度 + 开头一截经日志通道递回 SystemUI：
+     * ① ContextWrapper.sendBroadcast（两个重载）
+     * ② ContextImpl.sendBroadcast
+     * ③ 能力实现自带 receiver 的 onReceive。 */
+    private static final String OCR_ACTION =
+            "com.meizu.voiceassistant"
+                    + ".ACTION_SEND_CAPTURE_CURRENT_SCREEN";
+
+    private void probeLogOcr(String where,
+            android.content.Intent it) {
+        try {
+            String appName = it.getStringExtra("KEY_APP_NAME");
+            String ocr = it.getStringExtra("KEY_OCR_DATA");
+            String head = "";
+            if (ocr != null) {
+                head = ocr.replace('\n', ' ')
+                        .replace('\r', ' ');
+                if (head.length() > 120) {
+                    head = head.substring(0, 120);
+                }
+            }
+            log("OcrHook " + where + " app=" + appName
+                    + " len=" + (ocr == null ? -1
+                            : ocr.length())
+                    + " head=" + head);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private XposedInterface.Hooker ocrSendHooker() {
+        return new XposedInterface.Hooker() {
+            @Override
+            public Object intercept(
+                    XposedInterface.Chain chain)
+                    throws Throwable {
+                try {
+                    Object a0 = chain.getArg(0);
+                    if (a0 instanceof android.content.Intent) {
+                        android.content.Intent it =
+                                (android.content.Intent) a0;
+                        if (OCR_ACTION.equals(it.getAction())) {
+                            probeLogOcr("send", it);
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+                return chain.proceed();
+            }
+        };
+    }
+
+    private void installOcrProbe() {
+        try {
+            java.lang.reflect.Method sb =
+                    android.content.ContextWrapper.class
+                            .getDeclaredMethod("sendBroadcast",
+                                    android.content.Intent.class);
+            module.hook(sb).intercept(ocrSendHooker());
+            java.lang.reflect.Method sb2 =
+                    android.content.ContextWrapper.class
+                            .getDeclaredMethod("sendBroadcast",
+                                    android.content.Intent.class,
+                                    String.class);
+            module.hook(sb2).intercept(ocrSendHooker());
+            log("OcrProbe send hook ok (ContextWrapper)");
+        } catch (Throwable t) {
+            log("OcrProbe send hook fail " + t);
+        }
+        try {
+            Class<?> ci = Class.forName(
+                    "android.app.ContextImpl", false, cl);
+            java.lang.reflect.Method sb = ci
+                    .getDeclaredMethod("sendBroadcast",
+                            android.content.Intent.class);
+            module.hook(sb).intercept(ocrSendHooker());
+            log("OcrProbe send hook ok (ContextImpl)");
+        } catch (Throwable t) {
+            log("OcrProbe ContextImpl hook fail " + t);
+        }
+        try {
+            Class<?> rc = Class.forName(
+                    "com.meizu.picker.currentscreencontentability"
+                            + ".CurrentScreenContentAbilityImpl"
+                            + "$broadcastReceiver$1",
+                    false, cl);
+            java.lang.reflect.Method orc = rc
+                    .getDeclaredMethod("onReceive",
+                            android.content.Context.class,
+                            android.content.Intent.class);
+            module.hook(orc).intercept(
+                    new XposedInterface.Hooker() {
+                        @Override
+                        public Object intercept(
+                                XposedInterface.Chain chain)
+                                throws Throwable {
+                            try {
+                                Object a1 = chain.getArg(1);
+                                if (a1 instanceof
+                                        android.content.Intent) {
+                                    probeLogOcr("recv",
+                                            (android.content
+                                                    .Intent) a1);
+                                }
+                            } catch (Throwable ignored) {
+                            }
+                            return chain.proceed();
+                        }
+                    });
+            log("OcrProbe recv hook ok");
+        } catch (Throwable t) {
+            log("OcrProbe recv hook fail " + t);
+        }
     }
 
     private void capture(Object client) {
