@@ -1639,6 +1639,8 @@ public class BubbleWindow {
     private boolean lightMorningSeen = true;
     private boolean lightMorningShown;
     private String lightMorningDigestHead;
+    private String lightMorningWeeklyHead;
+    private String lightMorningWeekly;
     private String lightMorningDigest;
     private String[] lightMorningChips;
     private boolean lightMorningPillShowing;
@@ -7079,7 +7081,8 @@ public class BubbleWindow {
      * 队闪（优先级最低，空了才上）。 */
     public void onMorningReport(String line, String body,
             String dateStr, String city, String digestHead,
-            String digestText, String digestChips) {
+            String digestText, String digestChips,
+            String weeklyHead, String weeklyText) {
         if (body == null || body.isEmpty()) {
             return;
         }
@@ -7094,6 +7097,8 @@ public class BubbleWindow {
         lightMorningDate = dateStr;
         lightMorningCity = city;
         lightMorningDigestHead = digestHead;
+        lightMorningWeeklyHead = weeklyHead;
+        lightMorningWeekly = weeklyText;
         lightMorningDigest = digestText;
         lightMorningChips = digestChips == null
                 || digestChips.isEmpty() ? null
@@ -7339,6 +7344,55 @@ public class BubbleWindow {
                     card.addView(cv);
                 }
             }
+        }
+        // v642: 上周小结段（周一才有）。
+        if (lightMorningWeekly != null
+                && !lightMorningWeekly.isEmpty()) {
+            View div2 = new View(app);
+            div2.setBackgroundColor(lpWhite()
+                    ? Color.rgb(219, 234, 254)
+                    : Color.rgb(51, 65, 85));
+            android.widget.LinearLayout.LayoutParams
+                    div2Lp =
+                    new android.widget.LinearLayout
+                            .LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            dp(1));
+            div2Lp.topMargin = dp(8);
+            div2Lp.bottomMargin = dp(7);
+            div2.setLayoutParams(div2Lp);
+            card.addView(div2);
+            if (lightMorningWeeklyHead != null) {
+                android.widget.TextView wh =
+                        new android.widget.TextView(app);
+                wh.setText(lightMorningWeeklyHead);
+                wh.setTextSize(12);
+                wh.setTextColor(lpWhite()
+                        ? Color.rgb(37, 99, 235)
+                        : Color.rgb(147, 197, 253));
+                wh.setTypeface(
+                        android.graphics.Typeface
+                                .DEFAULT_BOLD);
+                card.addView(wh);
+            }
+            android.widget.TextView wt =
+                    new android.widget.TextView(app);
+            wt.setText(lightMorningWeekly);
+            wt.setTextSize(13);
+            wt.setTextColor(lpTitleC());
+            wt.setLineSpacing(0, 1.25f);
+            android.widget.LinearLayout.LayoutParams
+                    wtLp =
+                    new android.widget.LinearLayout
+                            .LayoutParams(
+                            android.widget.LinearLayout
+                                    .LayoutParams.MATCH_PARENT,
+                            android.widget.LinearLayout
+                                    .LayoutParams.WRAP_CONTENT);
+            wtLp.topMargin = dp(3);
+            wt.setLayoutParams(wtLp);
+            card.addView(wt);
         }
         android.widget.TextView foot =
                 new android.widget.TextView(app);

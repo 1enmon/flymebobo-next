@@ -3495,6 +3495,10 @@ public class NotificationService extends NotificationListenerService {
                 in.getStringExtra("digestText"));
         out.putExtra("digestChips",
                 in.getStringExtra("digestChips"));
+        out.putExtra("weeklyHead",
+                in.getStringExtra("weeklyHead"));
+        out.putExtra("weeklyText",
+                in.getStringExtra("weeklyText"));
         try {
             android.content.SharedPreferences aiPrefs =
                     getSharedPreferences("flymebobo_ai",
@@ -3812,6 +3816,60 @@ public class NotificationService extends NotificationListenerService {
                             }
                         } catch (Throwable t) {
                             FileLog.i("Morning ai digest parse fail");
+                        }
+                    }
+                }
+                // 2.5) 每周回顾（周一）：AI 写成人话。
+                if (in.getBooleanExtra("wantWeekly",
+                        false)) {
+                    String wBlob = in.getStringExtra(
+                            "weeklyBlob");
+                    if (wBlob != null && !wBlob.isEmpty()) {
+                        aiFastOverride.set(Boolean.FALSE);
+                        String wp = "上周的通知统计："
+                                + in.getStringExtra(
+                                        "weeklyText")
+                                + "\n上周通知流水采样：\n"
+                                + wBlob
+                                + (memText.isEmpty() ? ""
+                                        : "\n你的记忆本：\n"
+                                                + memText
+                                                + "\n")
+                                + "\n请以" + who
+                                + "的身份输出 JSON："
+                                + "{\"weekly\":\"上周小结\"}"
+                                + "。weekly 用第一人称口语写"
+                                + "两三句，像朋友一样小结上周"
+                                + "：谁最常找用户、办了什么事"
+                                + "、还欠着什么。只输出 JSON。";
+                        String wr = useAicy
+                                ? aicyAsk("你是" + who
+                                        + "，只输出 JSON。", wp)
+                                : aiChatOnce(apiBase, apiKey,
+                                        apiModel, wp);
+                        if (wr != null) {
+                            try {
+                                int l = wr.indexOf('{');
+                                int rr = wr.lastIndexOf('}');
+                                if (l >= 0 && rr > l) {
+                                    String wv =
+                                            new org.json
+                                                    .JSONObject(
+                                                    wr.substring(
+                                                            l,
+                                                            rr + 1))
+                                                    .optString(
+                                                            "weekly",
+                                                            "");
+                                    if (!wv.isEmpty()) {
+                                        out.putExtra(
+                                                "weeklyText",
+                                                wv);
+                                        FileLog.i("Morning ai weekly ok");
+                                    }
+                                }
+                            } catch (Throwable ignored) {
+                            }
                         }
                     }
                 }

@@ -1249,7 +1249,11 @@ public class XposedEntry extends XposedModule {
                                 intent.getStringExtra(
                                         "digestText"),
                                 intent.getStringExtra(
-                                        "digestChips"));
+                                        "digestChips"),
+                                intent.getStringExtra(
+                                        "weeklyHead"),
+                                intent.getStringExtra(
+                                        "weeklyText"));
                     }
                     return;
                 }
