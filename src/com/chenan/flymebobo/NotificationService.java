@@ -3354,9 +3354,7 @@ public class NotificationService extends NotificationListenerService {
                         && !blob.isEmpty()) {
                     boolean combined = wantDAi
                             && digestEnabled;
-                    aiFastOverride.set(Boolean.valueOf(
-                            feats.getBoolean(
-                                    "digestAiFast", false)));
+                    aiFastOverride.set(Boolean.FALSE);
                     String placeFacts = "";
                     String pn = in.getStringExtra(
                             "placeNow");
@@ -3511,9 +3509,7 @@ public class NotificationService extends NotificationListenerService {
                 if (wantDAi && digestEnabled && !digestDone
                         && blob != null
                         && !blob.isEmpty()) {
-                    aiFastOverride.set(Boolean.valueOf(
-                            feats.getBoolean(
-                                    "digestAiFast", false)));
+                    aiFastOverride.set(Boolean.FALSE);
                     String prompt = "下面是昨天的通知流水"
                             + "（应用｜标题｜正文）：\n"
                             + blob
@@ -3584,9 +3580,7 @@ public class NotificationService extends NotificationListenerService {
                 }
                 // 3) 早报正文（带上记忆，今要紧的顺带提）。
                 if (wantMAi) {
-                    aiFastOverride.set(Boolean.valueOf(
-                            feats.getBoolean(
-                                    "morningAiFast", false)));
+                    aiFastOverride.set(Boolean.FALSE);
                     String prompt = "城市："
                             + in.getStringExtra("city")
                             + "；日期："
@@ -3654,6 +3648,21 @@ public class NotificationService extends NotificationListenerService {
         }
         aicyPending.remove(id);
         return Boolean.TRUE.equals(slot[3]);
+    }
+
+    /** v637: 某个功能的快速模式取值——功能自己的开
+     * 关（flymebobo_features）优先，没设过就承接原全
+     * 局 aiAicyFast（默认开）。 */
+    private boolean aiFastFor(String featureKey) {
+        android.content.SharedPreferences feats =
+                getSharedPreferences("flymebobo_features",
+                        android.content.Context.MODE_PRIVATE);
+        if (feats.contains(featureKey)) {
+            return feats.getBoolean(featureKey, true);
+        }
+        return getSharedPreferences("flymebobo_ai",
+                android.content.Context.MODE_PRIVATE)
+                .getBoolean("aiAicyFast", true);
     }
 
     private String aicyAsk(String system, String user) {
@@ -3765,6 +3774,8 @@ public class NotificationService extends NotificationListenerService {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
+                    aiFastOverride.set(Boolean.valueOf(
+                            aiFastFor("aiTagsFast")));
                     String prompt = "下面是手机通知收纳盒里的"
                             + itemCount
                             + "条通知，逐条打标后只输出一个 JSON 对象，不要解释。\n"
@@ -3833,6 +3844,8 @@ public class NotificationService extends NotificationListenerService {
             new Thread(new Runnable() {
                 @Override
                 public void run() {
+                    aiFastOverride.set(Boolean.valueOf(
+                            aiFastFor("aiSummaryFast")));
                     String prompt = "下面是手机通知收纳盒里的"
                             + itemCount
                             + "条通知，请处理后只输出一个 JSON 对象，不要解释。\n"

@@ -2963,12 +2963,28 @@ public class MainActivity extends Activity {
                 "", Color.rgb(37, 99, 235), "摘", true, null));
         lightAiSubViews.put("aiSummary", aiSumRow);
         body.addView(aiSumRow);
+        // v637: 快速模式归摘要/打标（wei 纠正：快速开
+        // 关是给这两个的，早报/回顾不需要）。
+        View aiSumFastRow = buildSubSwitch(new Feature(
+                "aiSummaryFast", "摘要快速模式",
+                "关掉思考过程，摘要出得更快",
+                "", Color.rgb(37, 99, 235), "速", false,
+                null));
+        lightAiSubViews.put("aiSummaryFast", aiSumFastRow);
+        body.addView(aiSumFastRow);
         View aiTagRow = buildSubSwitch(new Feature(
                 "aiTags", "语义打标",
                 "给收纳通知打疑似诈骗 / 促销 / 重要标签",
                 "", Color.rgb(37, 99, 235), "标", true, null));
         lightAiSubViews.put("aiTags", aiTagRow);
         body.addView(aiTagRow);
+        View aiTagFastRow = buildSubSwitch(new Feature(
+                "aiTagsFast", "打标快速模式",
+                "关掉思考过程，打标出得更快",
+                "", Color.rgb(37, 99, 235), "速", false,
+                null));
+        lightAiSubViews.put("aiTagsFast", aiTagFastRow);
+        body.addView(aiTagFastRow);
         // v634: 昨日回顾 + 早报的 AI 开关（wei 定：
         // 都放 AI 卡里；用 AI 时走当前选的通道，不挑
         // 免费档；两个各有自己的快速模式开关，默认
@@ -2998,13 +3014,6 @@ public class MainActivity extends Activity {
                 null));
         lightAiSubViews.put("digestAi", digestAiRow);
         body.addView(digestAiRow);
-        View digestFastRow = buildSubSwitch(new Feature(
-                "digestAiFast", "昨日回顾快速模式",
-                "回顾用 AI 写时关掉思考过程，出得快一些",
-                "", Color.rgb(37, 99, 235), "速", false,
-                null));
-        lightAiSubViews.put("digestAiFast", digestFastRow);
-        body.addView(digestFastRow);
         View morningAiRow = buildSubSwitch(new Feature(
                 "morningAi", "早报用 AI 写",
                 "天气数据不变，AI 把早报正文写成人话",
@@ -3012,13 +3021,6 @@ public class MainActivity extends Activity {
                 null));
         lightAiSubViews.put("morningAi", morningAiRow);
         body.addView(morningAiRow);
-        View morningFastRow = buildSubSwitch(new Feature(
-                "morningAiFast", "早报快速模式",
-                "早报用 AI 写时关掉思考过程，出得快一些",
-                "", Color.rgb(37, 99, 235), "速", false,
-                null));
-        lightAiSubViews.put("morningAiFast", morningFastRow);
-        body.addView(morningFastRow);
         // v635: 记忆本（wei 预览定版 + 扩围：记习惯、
         // 位置、家、日常）——开关 + 查看入口。
         View memRow = buildSubSwitch(new Feature(
@@ -3123,85 +3125,6 @@ public class MainActivity extends Activity {
         aiAicyNote.setTextSize(12.5f);
         aiAicyNote.setTextColor(L_SUB);
         aiAicyBox.addView(aiAicyNote);
-        // v627: 快速模式开关（wei 定：加个开关）——关掉
-        // Aicy 的思考过程，摘要/打标更快；默认开。存
-        // flymebobo_ai.aiAicyFast，NS 发问时带给 Aicy 侧。
-        android.widget.LinearLayout aiFastRow =
-                new android.widget.LinearLayout(this);
-        aiFastRow.setOrientation(
-                android.widget.LinearLayout.HORIZONTAL);
-        aiFastRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        android.widget.LinearLayout.LayoutParams aiFastRowLp =
-                new android.widget.LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT);
-        aiFastRowLp.topMargin = dp(10);
-        aiFastRow.setLayoutParams(aiFastRowLp);
-        android.widget.LinearLayout aiFastTexts =
-                new android.widget.LinearLayout(this);
-        aiFastTexts.setOrientation(
-                android.widget.LinearLayout.VERTICAL);
-        TextView aiFastTitle = new TextView(this);
-        aiFastTitle.setText("快速模式");
-        aiFastTitle.setTextSize(14);
-        aiFastTitle.setTextColor(L_INK);
-        aiFastTexts.addView(aiFastTitle);
-        TextView aiFastSub = new TextView(this);
-        aiFastSub.setText("关掉 Aicy 的思考过程，摘要和打标出得更快");
-        aiFastSub.setTextSize(12);
-        aiFastSub.setTextColor(L_SUB);
-        aiFastTexts.addView(aiFastSub);
-        aiFastRow.addView(aiFastTexts,
-                new android.widget.LinearLayout.LayoutParams(
-                        0, ViewGroup.LayoutParams.WRAP_CONTENT,
-                        1f));
-        final android.widget.FrameLayout aiFastTrack =
-                new android.widget.FrameLayout(this);
-        final TextView aiFastKnob = new TextView(this);
-        aiFastKnob.setBackground(rounded(Color.WHITE, dp(999)));
-        android.widget.FrameLayout.LayoutParams aiKnobLp =
-                new android.widget.FrameLayout.LayoutParams(
-                        dp(23), dp(23));
-        aiKnobLp.topMargin = dp(2);
-        aiKnobLp.bottomMargin = dp(2);
-        aiFastKnob.setLayoutParams(aiKnobLp);
-        aiFastTrack.addView(aiFastKnob);
-        aiFastRow.addView(aiFastTrack,
-                new android.widget.LinearLayout.LayoutParams(
-                        dp(46), dp(27)));
-        final Runnable paintAiFast = new Runnable() {
-            @Override
-            public void run() {
-                boolean on = aiPrefsCh.getBoolean(
-                        "aiAicyFast", true);
-                aiFastTrack.setBackground(rounded(on
-                        ? Color.rgb(61, 123, 214)
-                        : Color.rgb(199, 203, 209), dp(999)));
-                android.widget.FrameLayout.LayoutParams lp =
-                        (android.widget.FrameLayout.LayoutParams)
-                                aiFastKnob.getLayoutParams();
-                lp.gravity = on
-                        ? (android.view.Gravity.RIGHT
-                                | android.view.Gravity.CENTER_VERTICAL)
-                        : (android.view.Gravity.LEFT
-                                | android.view.Gravity.CENTER_VERTICAL);
-                lp.leftMargin = on ? 0 : dp(2);
-                lp.rightMargin = on ? dp(2) : 0;
-                aiFastKnob.setLayoutParams(lp);
-            }
-        };
-        paintAiFast.run();
-        aiFastRow.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                boolean on = aiPrefsCh.getBoolean(
-                        "aiAicyFast", true);
-                aiPrefsCh.edit().putBoolean("aiAicyFast", !on)
-                        .apply();
-                paintAiFast.run();
-            }
-        });
-        aiAicyBox.addView(aiFastRow);
         body.addView(aiAicyBox);
         final Runnable refreshAiChannel = new Runnable() {
             @Override
@@ -8951,6 +8874,12 @@ public class MainActivity extends Activity {
         if ("digestAiFast".equals(key)) return false;
         if ("morningAiFast".equals(key)) return false;
         if ("aiMemory".equals(key)) return false;
+        if ("aiSummaryFast".equals(key)
+                || "aiTagsFast".equals(key)) {
+            return getSharedPreferences("flymebobo_ai",
+                    MODE_PRIVATE).getBoolean("aiAicyFast",
+                            true);
+        }
         for (Feature f : FEATURES) {
             if (f.key.equals(key)) return f.def;
         }
