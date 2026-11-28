@@ -1633,6 +1633,8 @@ public class BubbleWindow {
     // 尸卡清扫用，见 sweepStaleLightDownloads）。
     private final java.util.HashMap<String, Long>
             lightDlSeen = new java.util.HashMap<>();
+    private final java.util.HashSet<String>
+            lightDlDonePending = new java.util.HashSet<>();
     // v600: 轻气泡 AI（摘要+打标）——SystemUI 只管发
     // 请求与渲染：收纳栈变化（签名变）才广播给 App
     // 进程分析，结果回来存这里。标签值 suspect /
@@ -2328,6 +2330,11 @@ public class BubbleWindow {
         }
         lightDlSeen.put(d.key,
                 android.os.SystemClock.uptimeMillis());
+        // v652: 完成通知换 key 直达时也排撤卡。
+        NotifData cur = lightDownloads.get(d.key);
+        if (lightDlLooksComplete(cur)) {
+            scheduleLightDownloadDoneRemove(d.key);
+        }
         refreshLightDot();
         if (lightPanelAdded && !lightPanelRecallMode) {
             if (isNew) {
@@ -2358,21 +2365,57 @@ public class BubbleWindow {
             updateLightDownloadViews(key);
         }
         if (completed) {
-            final String ckey = key;
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (lightDownloads.remove(ckey) != null) {
-                        FileLog.i("Light download done remove");
-                        refreshLightDot();
-                        if (lightPanelAdded
-                                && !lightPanelRecallMode) {
-                            rebuildLightPanelRows();
-                        }
+            scheduleLightDownloadDoneRemove(key);
+        }
+    }
+
+    /** v652: 完成文案判定（与 NS isDownloadComplete
+     * 同口径关键词）。 */
+    private static boolean lightDlLooksComplete(
+            NotifData d) {
+        if (d == null) {
+            return false;
+        }
+        if (d.downloadPct >= 100) {
+            return true;
+        }
+        String[] words = {"下载完成", "安装完成",
+                "已完成", "下载完毕", "已下载", "下载成功"};
+        for (String w : words) {
+            if ((d.title != null && d.title.contains(w))
+                    || (d.text != null
+                            && d.text.contains(w))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** v652: 完成撤卡排期（3 秒后，同经典 v242
+     * 口径）——同一 key 只排一次。完成信号有两条
+     * 路：进度 tick 的 completed，和完成通知换新
+     * key 直达 lightDownloadIn（后者以前没人撤，
+     * 卡在 100% 永驻，wei 报）。 */
+    private void scheduleLightDownloadDoneRemove(
+            final String key) {
+        if (key == null
+                || !lightDlDonePending.add(key)) {
+            return;
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                lightDlDonePending.remove(key);
+                if (lightDownloads.remove(key) != null) {
+                    FileLog.i("Light download done remove");
+                    refreshLightDot();
+                    if (lightPanelAdded
+                            && !lightPanelRecallMode) {
+                        rebuildLightPanelRows();
                     }
                 }
-            }, 3000);
-        }
+            }
+        }, 3000);
     }
 
     /** v576: 面板下载卡原地刷新（标题/状态/进度条/百分比）。
