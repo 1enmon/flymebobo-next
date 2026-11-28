@@ -122,11 +122,6 @@ public class XposedEntry extends XposedModule {
         aicyInitialized = true;
         try {
             new AicyBorrow(this, app, aicyClassLoader).install();
-        try {
-            new ScreenOcrRelay(app).install();
-        } catch (Throwable t) {
-            log(6, TAG, "ScreenOcrRelay install failed", t);
-        }
         } catch (Throwable t) {
             log(6, TAG, "AicyBorrow install failed", t);
         }

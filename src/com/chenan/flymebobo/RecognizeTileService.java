@@ -55,7 +55,13 @@ public class RecognizeTileService extends TileService {
             if (!on) {
                 return;
             }
-            sendBroadcast(new Intent(ACTION_TILE_RECOGNIZE));
+            // v648: 磁贴取字链先停用（v647 实测会
+            // 引发 SystemUI 重启，定位中）——只给个
+            // 提示，不惊动 SystemUI。
+            android.widget.Toast.makeText(this,
+                    "识别功能维护中，马上修",
+                    android.widget.Toast.LENGTH_SHORT)
+                    .show();
         } catch (Throwable ignored) {
         }
     }

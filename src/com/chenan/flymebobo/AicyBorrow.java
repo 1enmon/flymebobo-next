@@ -110,7 +110,8 @@ public class AicyBorrow {
             log("install failed " + t);
         }
         registerAskReceiver();
-        installOcrProbe();
+        // v648: OCR 探针钩子撤下（诊断已完结，
+        // 不留无谓的拦截面）。
     }
 
     /** v646: 识屏 OCR 探针（验证包）——在 Aicy 进程
