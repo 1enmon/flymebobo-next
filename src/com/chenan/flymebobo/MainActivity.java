@@ -329,13 +329,9 @@ public class MainActivity extends Activity {
             new Feature("qqFree", "QQ音乐flyme版免费听", "常开，无需设置",
                     "打开 QQ 音乐 Flyme 版，自动查剩余免费时长，\n低于 2 小时自动领奖励补到 4 小时。\n两次领取间隔不少于 4 小时。\n领满会弹提示；本来就 ≥2 小时也会提示。\n不支持主动领取，免费听一直开着。",
                     Color.rgb(190, 18, 60), "免", true, "music", true),
-            // v609: 网络歌词兜底（wei 定：归音乐管，从
-            // AI 卡移过来）——挂在音乐卡下，经典/轻气泡
-            // 两边都出这一行。默认开（v88 起的老行为）。
-            new Feature("lyricNet", "网络歌词兜底",
-                    "播放器不送歌词时多源找词；找过的自动存本地",
-                    "播放器自己不送歌词行时，按歌名+歌手依次去 LRCLIB、网易云、QQ 音乐找带时间轴的歌词，跟着播放进度显示；三个源都没有时，若 AI 助手里填了 Key，再让 AI 默写兜底（时间按进度估算）。\n找到的歌词自动存一份在本地，同一首歌下次播放直接用、不再联网，断网也能显示。",
-                    Color.rgb(219, 39, 119), "词", true, "music"),
+            // v633: 网络歌词兜底的开关已按 wei 定隐藏
+            // （功能恒开：NS 侧现读 prefs、缺省 true；
+            // onCreate 里会清掉历史上关过的值）。
     };
 
     // v336: 顶层卡片（parent == null 的开关）。嵌套开关不单独占行，
@@ -712,6 +708,10 @@ public class MainActivity extends Activity {
         // 补状态栏高度，不遮内容。只改 App 自己的页面。
         applyEdgeToEdge();
         prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        // v633: 网络歌词兜底恒开——清掉旧开关存过的值。
+        if (prefs.contains("lyricNet")) {
+            prefs.edit().remove("lyricNet").apply();
+        }
         // v564: 当前设计模式（默认关 = 经典）。
         lightUi = prefs.getBoolean("lightMode", false);
         // v464: 先从本地备份文件把设置恢复进 prefs（卸载重装后
@@ -4053,8 +4053,7 @@ public class MainActivity extends Activity {
                 "", Color.rgb(219, 39, 119), "音", true, null)));
         lightMusicSubViews.clear();
         for (String subKey : new String[]{
-                "musicVideo", "musicLed", "qqFree",
-                "lyricNet"}) {
+                "musicVideo", "musicLed", "qqFree"}) {
             Feature sub = featureFor(subKey);
             if (sub != null) {
                 View w = buildSubSwitch(sub);
@@ -7811,12 +7810,6 @@ public class MainActivity extends Activity {
             addSearch("语义打标", "AI 助手 › 语义打标",
                     "ai 打标 标签 诈骗 促销 重要",
                     aiCardView, "ai");
-            addSearch("网络歌词兜底", "音乐 › 网络歌词兜底",
-                    "歌词 网络 兜底 lrclib 不送歌词 本地 缓存",
-                    lightUi
-                            ? lightMusicSubViews.get("lyricNet")
-                            : subRowViews.get("lyricNet"),
-                    lightUi ? "light" : "music");
         }
         // 胶囊类型
         addSearch("通知气泡", "胶囊类型", "通知 气泡 胶囊 贴边 总开关",
