@@ -380,6 +380,7 @@ public class XposedEntry extends XposedModule {
         filter.addAction(
                 NotificationService.ACTION_AI_INFO_RESULT);
         filter.addAction(MorningReceiver.ACTION_REPORT);
+        filter.addAction(MorningReceiver.ACTION_NUDGE);
         filter.addAction(NotificationService.ACTION_LIGHT_OPEN);
         filter.addAction(NotificationService.ACTION_LIGHT_RECALL_OPEN);
         filter.addAction(NotificationService.ACTION_APP_RULES);
@@ -1249,6 +1250,17 @@ public class XposedEntry extends XposedModule {
                                         "digestText"),
                                 intent.getStringExtra(
                                         "digestChips"));
+                    }
+                    return;
+                }
+                // v640: AI 管家傍晚主动提醒——边缘药
+                // 丸闪一句话（优先级低于摘要、高于早报）。
+                if (MorningReceiver.ACTION_NUDGE.equals(
+                        intent.getAction())) {
+                    BubbleWindow bw = BubbleWindow.getInstance();
+                    if (bw != null) {
+                        bw.onButlerNudge(
+                                intent.getStringExtra("text"));
                     }
                     return;
                 }

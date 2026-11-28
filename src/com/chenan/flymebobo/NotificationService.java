@@ -3242,7 +3242,14 @@ public class NotificationService extends NotificationListenerService {
                     new Thread(new Runnable() {
                         @Override
                         public void run() {
-                            handleMorningPrep(intent);
+                            if (MorningReceiver
+                                    .ACTION_NUDGE_PREP
+                                    .equals(intent
+                                            .getAction())) {
+                                handleNudgePrep();
+                            } else {
+                                handleMorningPrep(intent);
+                            }
                         }
                     }, "morning-prep").start();
                 }
@@ -3257,6 +3264,8 @@ public class NotificationService extends NotificationListenerService {
             android.content.IntentFilter filter =
                     new android.content.IntentFilter(
                             MorningReceiver.ACTION_MORNING_PREP);
+            filter.addAction(
+                    MorningReceiver.ACTION_NUDGE_PREP);
             try {
                 java.lang.reflect.Method m = android.content
                         .Context.class.getMethod(
@@ -3294,6 +3303,179 @@ public class NotificationService extends NotificationListenerService {
                     .trim() : "";
         } catch (Throwable t) {
             return "";
+        }
+    }
+
+    /** v640: 傍晚巡检——记忆 + 今天的流水喂给 AI，
+     * 挑一件最该提醒的事，一句话广播给 SystemUI 闪。 */
+    private void handleNudgePrep() {
+        try {
+            android.content.SharedPreferences aiPrefs =
+                    getSharedPreferences("flymebobo_ai",
+                            android.content.Context
+                                    .MODE_PRIVATE);
+            String apiKey = AiKey.decrypt(
+                    aiPrefs.getString("aiKey", ""));
+            boolean useAicy = aiUseAicy();
+            if (!useAicy && (apiKey == null
+                    || apiKey.isEmpty())) {
+                return;
+            }
+            org.json.JSONObject mem = AiMemory.load(this);
+            String memText = AiMemory.promptText(mem);
+            if (memText.isEmpty()) {
+                return;
+            }
+            StringBuilder blob = new StringBuilder();
+            try {
+                String today = new java.text.SimpleDateFormat(
+                        "yyyy-MM-dd", java.util.Locale.US)
+                        .format(new java.util.Date());
+                java.io.File jf = new java.io.File(
+                        SettingsStore.DIR_PUBLIC
+                                + "/journal-" + today
+                                + ".txt");
+                if (jf.exists()) {
+                    java.io.BufferedReader br =
+                            new java.io.BufferedReader(
+                                    new java.io.InputStreamReader(
+                                            new java.io.FileInputStream(
+                                                    jf), "UTF-8"));
+                    java.util.ArrayList<String> lines =
+                            new java.util.ArrayList<>();
+                    String ln;
+                    while ((ln = br.readLine()) != null) {
+                        lines.add(ln);
+                    }
+                    br.close();
+                    int from = Math.max(0,
+                            lines.size() - 40);
+                    for (int i = from; i < lines.size();
+                            i++) {
+                        String[] parts = lines.get(i)
+                                .split("\u0001", -1);
+                        if (parts.length >= 6
+                                && "1".equals(parts[5])) {
+                            continue;
+                        }
+                        if (parts.length >= 5) {
+                            blob.append(parts[2])
+                                    .append("｜")
+                                    .append(parts[3])
+                                    .append("｜")
+                                    .append(parts[4])
+                                    .append("\n");
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
+            String name = morningPersonaName();
+            String who = name.isEmpty()
+                    ? "贴身助理" : "「" + name + "」";
+            aiFastOverride.set(Boolean.FALSE);
+            String prompt = "你的记忆本：\n" + memText
+                    + "\n今天到现在的通知流水：\n"
+                    + blob
+                    + "\n现在是傍晚。请以" + who
+                    + "的身份，从没了结的事里挑今天最该提"
+                    + "醒用户的一件，用一句朋友口吻的话说"
+                    + "出来（30 字以内，带上具体信息）。"
+                    + "如果都没有值得提醒的，只输出空字符"
+                    + "串。只输出这句话或空。";
+            String r = useAicy
+                    ? aicyAsk("你是" + who
+                            + "，只输出正文。", prompt)
+                    : aiChatOnce(
+                            aiPrefs.getString("aiBase",
+                                    "https://api.deepseek.com"),
+                            apiKey,
+                            aiPrefs.getString("aiModel",
+                                    "deepseek-chat"), prompt);
+            if (r != null) {
+                String t = r.trim().replace("\n", " ");
+                if (t.length() >= 4 && t.length() <= 80
+                        && !t.startsWith("{")) {
+                    android.content.Intent out =
+                            new android.content.Intent(
+                                    MorningReceiver
+                                            .ACTION_NUDGE);
+                    out.putExtra("text", t);
+                    sendBroadcast(out);
+                    FileLog.i("Butler nudge sent");
+                }
+            }
+        } catch (Throwable t) {
+            FileLog.i("Butler nudge fail " + t);
+        } finally {
+            aiFastOverride.remove();
+        }
+    }
+
+    /** v640: AI 摘出的待办并进记忆本 pending（去重）。 */
+    private void mergeTodos(org.json.JSONArray todos,
+            String yday) {
+        if (todos == null || todos.length() == 0) {
+            return;
+        }
+        try {
+            org.json.JSONObject mem = AiMemory.load(this);
+            org.json.JSONArray pending =
+                    mem.optJSONArray("pending");
+            if (pending == null) {
+                pending = new org.json.JSONArray();
+                mem.put("pending", pending);
+            }
+            java.util.ArrayList<String> have =
+                    new java.util.ArrayList<>();
+            for (int i = 0; i < pending.length(); i++) {
+                org.json.JSONObject e =
+                        pending.optJSONObject(i);
+                if (e != null) {
+                    have.add(e.optString("text", "")
+                            .replace(" ", ""));
+                }
+            }
+            boolean changed = false;
+            for (int i = 0; i < todos.length(); i++) {
+                org.json.JSONObject t =
+                        todos.optJSONObject(i);
+                if (t == null) {
+                    continue;
+                }
+                String text = t.optString("text", "")
+                        .trim();
+                if (text.isEmpty() || text.length() > 40) {
+                    continue;
+                }
+                String norm = text.replace(" ", "");
+                boolean dup = false;
+                for (String h : have) {
+                    if (!h.isEmpty() && (h.contains(norm)
+                            || norm.contains(h))) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    continue;
+                }
+                org.json.JSONObject e =
+                        new org.json.JSONObject();
+                e.put("text", text);
+                e.put("since", yday == null ? "" : yday);
+                pending.put(e);
+                have.add(norm);
+                changed = true;
+            }
+            while (pending.length() > 8) {
+                pending.remove(0);
+            }
+            if (changed) {
+                AiMemory.save(this, mem);
+                FileLog.i("Morning todos merged");
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3342,6 +3524,8 @@ public class NotificationService extends NotificationListenerService {
                         "wantDigestAi", false);
                 boolean wantMem = in.getBooleanExtra(
                         "wantMemory", false);
+                boolean wantTodo = in.getBooleanExtra(
+                        "wantTodo", false);
                 boolean digestEnabled =
                         in.getStringExtra("digestHead")
                                 != null;
@@ -3395,6 +3579,10 @@ public class NotificationService extends NotificationListenerService {
                                             + "\",\"highlights"
                                             + "\":[\"重点\"]"
                                     : "")
+                            + (wantTodo
+                                    ? ",\"todos\":[{\"text\":"
+                                            + "\"\",\"due\":\"\"}]"
+                                    : "")
                             + "}。规矩：pending 只留还没了"
                             + "结、值得日后提醒的事（有人找"
                             + "没回、快递待取、将到的行程/"
@@ -3416,6 +3604,14 @@ public class NotificationService extends NotificationListenerService {
                                             + "醒；highlights 最多"
                                             + " 3 条，只挑真正重要"
                                             + "的。"
+                                    : "")
+                            + (wantTodo
+                                    ? "todos 把流水里明确要去办"
+                                            + "的事（要回复/要交/"
+                                            + "要取/要处理）摘出来，"
+                                            + "text 一句话说清办什"
+                                            + "么，最多 4 条，没有给"
+                                            + "空数组。"
                                     : "")
                             + "只输出 JSON。";
                     String r = useAicy
@@ -3463,6 +3659,12 @@ public class NotificationService extends NotificationListenerService {
                                     memObj = nm;
                                     FileLog.i("Morning memory updated");
                                 }
+                                if (wantTodo) {
+                                    mergeTodos(o.optJSONArray(
+                                            "todos"),
+                                            in.getStringExtra(
+                                                    "yday"));
+                                }
                                 if (combined) {
                                     String dg = o.optString(
                                             "digest", "");
@@ -3505,6 +3707,41 @@ public class NotificationService extends NotificationListenerService {
                 }
                 String memText = memObj != null
                         ? AiMemory.promptText(memObj) : "";
+                // 1.5) 待办单独摘（没开记忆本时）。
+                if (wantTodo && !wantMem && blob != null
+                        && !blob.isEmpty()) {
+                    aiFastOverride.set(Boolean.FALSE);
+                    String tp = "下面是昨天的通知流水（应"
+                            + "用｜标题｜正文）：\n" + blob
+                            + "\n只输出 JSON：{\"todos\":"
+                            + "[{\"text\":\"要办的事\"}]}"
+                            + "。把明确要去办的事（要回复/"
+                            + "要交/要取/要处理）摘出来，"
+                            + "text 一句话说清办什么，最多 "
+                            + "4 条，没有给空数组。";
+                    String tr = useAicy
+                            ? aicyAsk("你是" + who
+                                    + "，只输出 JSON。", tp)
+                            : aiChatOnce(apiBase, apiKey,
+                                    apiModel, tp);
+                    if (tr != null) {
+                        try {
+                            int l = tr.indexOf('{');
+                            int rr = tr.lastIndexOf('}');
+                            if (l >= 0 && rr > l) {
+                                mergeTodos(
+                                        new org.json.JSONObject(
+                                                tr.substring(l,
+                                                        rr + 1))
+                                                .optJSONArray(
+                                                        "todos"),
+                                        in.getStringExtra(
+                                                "yday"));
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
                 // 2) 回顾单独调用（没合并成时）。
                 if (wantDAi && digestEnabled && !digestDone
                         && blob != null

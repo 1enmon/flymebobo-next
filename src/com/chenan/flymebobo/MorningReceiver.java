@@ -41,6 +41,14 @@ public class MorningReceiver extends BroadcastReceiver {
             "com.chenan.flymebobo.MORNING_REPORT";
     // v634: 托 NS 用当前 AI 通道富化早报（NS 回广播
     // ACTION_REPORT 为正式版；30 秒没回就发规则版）。
+    // v640: AI 管家——傍晚巡检（挑一件没了结的事
+    // 主动提醒）三件套广播。
+    public static final String ACTION_BUTLER_CHECK =
+            "com.chenan.flymebobo.BUTLER_CHECK";
+    public static final String ACTION_NUDGE_PREP =
+            "com.chenan.flymebobo.NUDGE_PREP";
+    public static final String ACTION_NUDGE =
+            "com.chenan.flymebobo.BUTLER_NUDGE";
     public static final String ACTION_MORNING_PREP =
             "com.chenan.flymebobo.MORNING_PREP";
     public static final String PREFS = "flymebobo_morning";
@@ -131,12 +139,27 @@ public class MorningReceiver extends BroadcastReceiver {
         if (Intent.ACTION_BOOT_COMPLETED.equals(
                 intent.getAction())) {
             reschedule(ctx);
+            scheduleNudge(ctx);
+            return;
+        }
+        if (ACTION_BUTLER_CHECK.equals(
+                intent.getAction())) {
+            scheduleNudge(ctx);
+            final Context app2 =
+                    ctx.getApplicationContext();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    butlerCheck(app2);
+                }
+            }, "butler-check").start();
             return;
         }
         if (!ACTION_FIRE.equals(intent.getAction())) {
             return;
         }
         reschedule(ctx);
+        scheduleNudge(ctx);
         final Context app = ctx.getApplicationContext();
         new Thread(new Runnable() {
             @Override
@@ -144,6 +167,77 @@ public class MorningReceiver extends BroadcastReceiver {
                 fire(app);
             }
         }, "morning-report").start();
+    }
+
+    /** v640: 傍晚巡检闹钟（18:30，每天）——只负责
+     * 敲 NS 来挑提醒，自己不说话。 */
+    public static void scheduleNudge(Context ctx) {
+        try {
+            java.util.Calendar c =
+                    java.util.Calendar.getInstance();
+            c.set(java.util.Calendar.HOUR_OF_DAY, 18);
+            c.set(java.util.Calendar.MINUTE, 30);
+            c.set(java.util.Calendar.SECOND, 0);
+            c.set(java.util.Calendar.MILLISECOND, 0);
+            if (c.getTimeInMillis()
+                    <= System.currentTimeMillis()) {
+                c.add(java.util.Calendar.DAY_OF_YEAR, 1);
+            }
+            android.app.AlarmManager am =
+                    (android.app.AlarmManager)
+                            ctx.getSystemService(
+                                    Context.ALARM_SERVICE);
+            if (am == null) {
+                return;
+            }
+            Intent i = new Intent(ctx,
+                    MorningReceiver.class);
+            i.setAction(ACTION_BUTLER_CHECK);
+            android.app.PendingIntent pi =
+                    android.app.PendingIntent.getBroadcast(
+                            ctx, 7718, i,
+                            android.app.PendingIntent
+                                    .FLAG_UPDATE_CURRENT
+                                    | android.app.PendingIntent
+                                            .FLAG_IMMUTABLE);
+            try {
+                am.setExactAndAllowWhileIdle(
+                        android.app.AlarmManager
+                                .RTC_WAKEUP,
+                        c.getTimeInMillis(), pi);
+            } catch (Throwable t) {
+                am.setAndAllowWhileIdle(
+                        android.app.AlarmManager
+                                .RTC_WAKEUP,
+                        c.getTimeInMillis(), pi);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 巡检门槛：AI 开着、主动提醒开着、轻气泡开着、
+     * 记忆里真有没了结的事——才值得敲 NS 问一句。 */
+    private void butlerCheck(Context ctx) {
+        try {
+            android.content.SharedPreferences features =
+                    ctx.getSharedPreferences(
+                            "flymebobo_features",
+                            Context.MODE_PRIVATE);
+            if (!features.getBoolean("aiEnabled", false)
+                    || !features.getBoolean("aiNudge",
+                            false)
+                    || !features.getBoolean("lightMode",
+                            false)) {
+                return;
+            }
+            org.json.JSONObject mem = AiMemory.load(ctx);
+            if (AiMemory.count(mem, "pending") == 0) {
+                return;
+            }
+            ctx.sendBroadcast(new Intent(ACTION_NUDGE_PREP));
+            FileLog.i("Butler check: prep sent");
+        } catch (Throwable ignored) {
+        }
     }
 
     private void fire(Context ctx) {
@@ -290,6 +384,8 @@ public class MorningReceiver extends BroadcastReceiver {
         prep.putExtra("wantMorningAi", wantMAi);
         prep.putExtra("wantDigestAi", wantDAi);
         prep.putExtra("wantMemory", wantMem);
+        prep.putExtra("wantTodo", aiMaster
+                && features.getBoolean("aiTodo", false));
         prep.putExtra("yday", new SimpleDateFormat(
                 "yyyy-MM-dd", Locale.US)
                 .format(new java.util.Date(

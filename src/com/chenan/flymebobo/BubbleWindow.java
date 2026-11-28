@@ -1525,6 +1525,9 @@ public class BubbleWindow {
     // 示——歌词优先，音乐停了/词关了再接着闪）。
     private String lightAiFlashText;
     private boolean lightAiPillShowing;
+    // v640: AI 管家傍晚主动提醒药丸。
+    private String lightNudgeText;
+    private boolean lightNudgeShowing;
     private final Runnable lightPulseEndRunnable = new Runnable() {
         @Override
         public void run() {
@@ -1532,6 +1535,7 @@ public class BubbleWindow {
             lightPulsing = false;
             lightFlashKey = null;
             lightAiPillShowing = false;
+            lightNudgeShowing = false;
             lightMorningPillShowing = false;
             if (lightPill != null) {
                 lightPill.setVisibility(View.GONE);
@@ -1556,6 +1560,8 @@ public class BubbleWindow {
             // v611: AI 摘要续闪——没被到达/歌词占住就
             // 接着闪（放歌跟词时 maybe 里让路、不闪）。
             maybeFlashLightSummary();
+            // v640: 主动提醒续闪（摘要之后、早报之前）。
+            maybeFlashLightNudge();
             // v631: 早报续闪排最后（到达/歌词/摘要优先，
             // 都空了才轮到它，最多 4 轮）。
             maybeFlashMorning();
@@ -3597,6 +3603,7 @@ public class BubbleWindow {
                     lightAiSummary = null;
                     lightAiTags.clear();
                     stopLightSummaryFlash();
+                    stopLightNudgeFlash();
                 }
                 lightAiReqSig = null;
                 if (lightPanelAdded && !lightPanelRecallMode) {
@@ -4448,6 +4455,26 @@ public class BubbleWindow {
                                         return true;
                                     }
                                 }
+                                // v640: 主动提醒闪着时同款横
+                                // 划划掉。
+                                if (e.getAction()
+                                        == android.view.MotionEvent
+                                                .ACTION_UP
+                                        && lightNudgeShowing
+                                        && !dragging) {
+                                    float dx = e.getRawX()
+                                            - downRawX;
+                                    boolean outward =
+                                            FeatureFlags
+                                                    .lightDotRight()
+                                                    ? dx > dp(40)
+                                                    : dx < -dp(40);
+                                    if (outward) {
+                                        dragging = false;
+                                        dismissLightNudgeBySwipe();
+                                        return true;
+                                    }
+                                }
                                 boolean wasDrag = dragging;
                                 dragging = false;
                                 if (wasDrag) {
@@ -4867,6 +4894,8 @@ public class BubbleWindow {
         sweepStaleLightDownloads();
         // v611: 面板打开 = 摘要已经看上了，循环闪停。
         stopLightSummaryFlash();
+        // v640: 主动提醒同理，开面板即停。
+        stopLightNudgeFlash();
         loadLightInfoCards();
         if (lightStack.isEmpty() && lightMusicData == null
                 && lightDownloads.isEmpty()
@@ -7404,6 +7433,89 @@ public class BubbleWindow {
         if (wasShowing) {
             updateLightBadge();
         }
+    }
+
+    /** v640: 管家主动提醒入口（傍晚巡检挑出的那件
+     * 事）——一直闪到打开面板或划掉，优先级低于摘
+     * 要、高于早报。 */
+    public void onButlerNudge(String text) {
+        if (text == null || text.trim().isEmpty()) {
+            return;
+        }
+        lightNudgeText = text.trim();
+        maybeFlashLightNudge();
+    }
+
+    private void maybeFlashLightNudge() {
+        if (lightNudgeText == null || lightPanelAdded
+                || lightFlashKey != null || lightPulsing) {
+            return;
+        }
+        if (lightAiFlashText != null) {
+            return;
+        }
+        if (lightMusicData != null && lightLyricFollow) {
+            return;
+        }
+        flashLightNudgePill();
+    }
+
+    private void flashLightNudgePill() {
+        if (lightNudgeText == null) {
+            return;
+        }
+        if (!lightDotAdded) {
+            refreshLightDot();
+        }
+        if (lightPill == null || lightDotTab == null
+                || !lightDotAdded) {
+            return;
+        }
+        refreshLightPersona();
+        if (lightPersonaBmp != null) {
+            lightPillIcon.setImageBitmap(lightPersonaBmp);
+            lightPillIcon.setVisibility(View.VISIBLE);
+        } else {
+            lightPillIcon.setVisibility(View.GONE);
+        }
+        setLightPillLyricMode(true);
+        lightPillLabel.setText((lightPersonaName.isEmpty()
+                ? "提醒：" : lightPersonaName + "：")
+                + lightNudgeText);
+        lightPill.setVisibility(View.VISIBLE);
+        lightDotTab.setVisibility(View.GONE);
+        lightNudgeShowing = true;
+        updateLightBadge();
+        lightPulsing = true;
+        handler.removeCallbacks(lightPulseEndRunnable);
+        handler.postDelayed(lightPulseEndRunnable, 11200);
+    }
+
+    private void stopLightNudgeFlash() {
+        if (lightNudgeText == null) {
+            return;
+        }
+        boolean wasShowing = lightNudgeShowing;
+        lightNudgeText = null;
+        if (lightNudgeShowing) {
+            lightNudgeShowing = false;
+            handler.removeCallbacks(lightPulseEndRunnable);
+            lightPulsing = false;
+            if (lightPill != null) {
+                lightPill.setVisibility(View.GONE);
+            }
+            if (lightDotTab != null && !lightSubShowing) {
+                lightDotTab.setVisibility(View.VISIBLE);
+            }
+        }
+        if (wasShowing) {
+            updateLightBadge();
+        }
+    }
+
+    private void dismissLightNudgeBySwipe() {
+        stopLightNudgeFlash();
+        refreshLightDot();
     }
 
     /** v566: 药丸文字模式——到达药丸（应用名）保持紧凑

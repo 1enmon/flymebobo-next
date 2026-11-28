@@ -2778,7 +2778,7 @@ public class MainActivity extends Activity {
                         MODE_PRIVATE).getString(
                         "aiChannel", "byok"));
         String aiRiskBody = "一、数据会离开你的手机\n"
-                + "开启后，被收纳通知的标题和正文会发送到你填写的 AI 服务商（默认 DeepSeek）处理，用于生成摘要、标签和信息卡核对；开启早报 / 昨日回顾的 AI 写作后，昨天的通知流水（标题与正文）也会发送给它整理成回顾，范围与剔除规则同上。通知可能包含聊天内容、账单金额、行程信息等个人内容；发送后受服务商隐私政策约束，其留存与使用本模块无法控制。另外，通知的标题与正文会在本机留存一份按日流水（仅本机保存，7 天自动清除），用于昨日回顾的本地统计。\n\n"
+                + "开启后，被收纳通知的标题和正文会发送到你填写的 AI 服务商（默认 DeepSeek）处理，用于生成摘要、标签和信息卡核对；开启早报 / 昨日回顾的 AI 写作后，昨天的通知流水（标题与正文）也会发送给它整理成回顾，范围与剔除规则同上；开启待办提取 / 主动提醒后，通知流水与记忆本内容也会发送给它摘待办、挑提醒。通知可能包含聊天内容、账单金额、行程信息等个人内容；发送后受服务商隐私政策约束，其留存与使用本模块无法控制。另外，通知的标题与正文会在本机留存一份按日流水（仅本机保存，7 天自动清除），用于昨日回顾的本地统计。\n\n"
                 + "二、这些内容永远不会发送\n"
                 + "验证码、校验码类通知，以及带验证码 / 取件码的条目，永不发送给 AI。\n\n"
                 + "三、Key 与费用\n"
@@ -3043,6 +3043,34 @@ public class MainActivity extends Activity {
                     }
                 });
         body.addView(memBtn);
+        // v640: AI 管家一节（wei 定：这批都放进 AI）。
+        TextView butlerLabel = new TextView(this);
+        butlerLabel.setText("AI 管家");
+        butlerLabel.setTextSize(14);
+        butlerLabel.setTextColor(L_INK);
+        butlerLabel.setTypeface(butlerLabel.getTypeface(),
+                android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams bllp =
+                new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+        bllp.topMargin = dp(14);
+        butlerLabel.setLayoutParams(bllp);
+        body.addView(butlerLabel);
+        View nudgeRow = buildSubSwitch(new Feature(
+                "aiNudge", "主动提醒",
+                "傍晚时从没了结的事里挑一件，主动闪你一下",
+                "", Color.rgb(37, 99, 235), "提", false,
+                null));
+        lightAiSubViews.put("aiNudge", nudgeRow);
+        body.addView(nudgeRow);
+        View todoRow = buildSubSwitch(new Feature(
+                "aiTodo", "待办提取",
+                "从昨天的通知里摘出要办的事，记进记忆本盯着",
+                "", Color.rgb(37, 99, 235), "办", false,
+                null));
+        lightAiSubViews.put("aiTodo", todoRow);
+        body.addView(todoRow);
         // v609: 网络歌词兜底已按 wei 的话移去音乐
         // 卡片那边（FEATURES 表 parent=music），AI
         // 卡里不再放这一行。
@@ -8878,6 +8906,8 @@ public class MainActivity extends Activity {
         if ("digestAiFast".equals(key)) return false;
         if ("morningAiFast".equals(key)) return false;
         if ("aiMemory".equals(key)) return false;
+        if ("aiNudge".equals(key)) return false;
+        if ("aiTodo".equals(key)) return false;
         if ("aiSummaryFast".equals(key)
                 || "aiTagsFast".equals(key)) {
             return getSharedPreferences("flymebobo_ai",
