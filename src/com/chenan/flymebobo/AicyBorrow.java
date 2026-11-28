@@ -286,32 +286,32 @@ public class AicyBorrow {
             }
         }
         Class<?> b0 = Class.forName("d7.b0", false, cl);
+        // v621: Aicy 的 kotlin 合成构造没有 DefaultConstructorMarker
+        // （日志 80 实证 NoSuchMethodException）——b0 的合成构造是
+        // (Role, String, List, String, List, String, int mask)。
+        // 按「首参是 Role、末参是 int」定位，mask 位 2..5 置 1
+        //（只给 role 与正文，其余取默认）。
         Constructor<?> ctor = null;
         for (Constructor<?> c : b0.getDeclaredConstructors()) {
             Class<?>[] pt = c.getParameterTypes();
-            if (pt.length >= 2
-                    && pt[pt.length - 1].getName().contains(
-                            "DefaultConstructorMarker")) {
+            if (pt.length >= 3 && pt[0] == roleClass
+                    && pt[pt.length - 1] == int.class) {
                 ctor = c;
                 break;
             }
         }
         if (ctor == null) {
-            throw new NoSuchMethodException("b0 synthetic ctor");
+            throw new NoSuchMethodException("b0 synthetic ctor v621");
         }
         ctor.setAccessible(true);
         Class<?>[] pt = ctor.getParameterTypes();
         Object[] args = new Object[pt.length];
-        // 参数序：(Role, String 正文, List, String, List, String,
-        // int mask, marker)。只给 role 与正文，其余默认：
-        // mask 位 2,3,4,5 置 1 => 0b111100 = 60。
         args[0] = role;
         args[1] = text;
-        for (int i = 2; i < pt.length - 2; i++) {
+        for (int i = 2; i < pt.length - 1; i++) {
             args[i] = defaultFor(pt[i]);
         }
-        args[pt.length - 2] = Integer.valueOf(60);
-        args[pt.length - 1] = null;
+        args[pt.length - 1] = Integer.valueOf(0b111100);
         Object msg = ctor.newInstance(args);
         log("built message role=" + roleName + " -> " + msg);
         return msg;
@@ -323,28 +323,26 @@ public class AicyBorrow {
         messages.add(buildMessage("SYSTEM", system));
         messages.add(buildMessage("USER", user));
         Class<?> reqClass = Class.forName("d7.C2117i", false, cl);
+        // v621: 合成构造为 (int mask, 23 个真实参数)，无 marker。
+        // 真实参数序：0=messages 1=tools 2..4=String 5=ChatCaller
+        // 其余全部默认。mask 只清 bit0 与 bit5，其余置 1。
         Constructor<?> ctor = null;
         for (Constructor<?> c : reqClass.getDeclaredConstructors()) {
             Class<?>[] pt = c.getParameterTypes();
-            if (pt.length >= 2
-                    && pt[pt.length - 1].getName().contains(
-                            "DefaultConstructorMarker")) {
+            if (pt.length >= 2 && pt[0] == int.class) {
                 ctor = c;
                 break;
             }
         }
         if (ctor == null) {
-            throw new NoSuchMethodException("request synthetic ctor");
+            throw new NoSuchMethodException("request synthetic ctor v621");
         }
         ctor.setAccessible(true);
         Class<?>[] pt = ctor.getParameterTypes();
         Object[] args = new Object[pt.length];
-        // 合成构造：(int mask, 24 个真实参数..., marker)。
-        // 真实参数序：0=messages 1=tools 2..4=String 5=ChatCaller
-        // 其余全部默认。mask 只清 bit0 与 bit5，其余置 1。
-        int mask = 0xFFFFFF & ~(1 << 0) & ~(1 << 5);
+        int mask = 0x7FFFFF & ~(1 << 0) & ~(1 << 5);
         args[0] = Integer.valueOf(mask);
-        for (int i = 1; i < pt.length - 1; i++) {
+        for (int i = 1; i < pt.length; i++) {
             args[i] = defaultFor(pt[i]);
         }
         args[1] = messages;
@@ -359,7 +357,6 @@ public class AicyBorrow {
             }
         }
         args[6] = caller;
-        args[pt.length - 1] = null;
         Object req = ctor.newInstance(args);
         log("built request -> " + req);
         return req;
