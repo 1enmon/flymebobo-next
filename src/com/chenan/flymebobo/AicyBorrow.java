@@ -148,10 +148,14 @@ public class AicyBorrow {
                     + "[2] 标题：95588 正文：您的账户涉嫌洗钱，请点击链接验证身份\n"
                     + "[3] 标题：购物App 正文：大促最后一天，全场五折\n"
                     + "输出格式：{\"summary\":\"一句话总结这些通知（中文，30字以内，没有值得总结的就空字符串）\"}";
-            Object request = buildRequest(system, user);
+            Method c = findChatMethod(client.getClass());
+            // v622: 请求类的真实运行时名是 d7.i（jadx 因与 d7.I
+            // 大小写冲突改的名 C2117i/C6336i 在真机不存在）——
+            // 直接从客户端 c 方法的参数类型取 Class，不再写死类名。
+            Object request = buildRequest(system, user,
+                    c.getParameterTypes()[0]);
             log("test ask sending caller=QUICKPASS_SUMMARY");
             Object cont = makeContinuation();
-            Method c = findChatMethod(client.getClass());
             Object ret = c.invoke(client, request, cont);
             Object suspended = coroutineSuspended();
             if (ret != null && ret != suspended) {
@@ -317,12 +321,11 @@ public class AicyBorrow {
         return msg;
     }
 
-    private Object buildRequest(String system, String user)
-            throws Exception {
+    private Object buildRequest(String system, String user,
+            Class<?> reqClass) throws Exception {
         List<Object> messages = new ArrayList<>();
         messages.add(buildMessage("SYSTEM", system));
         messages.add(buildMessage("USER", user));
-        Class<?> reqClass = Class.forName("d7.C2117i", false, cl);
         // v621: 合成构造为 (int mask, 23 个真实参数)，无 marker。
         // 真实参数序：0=messages 1=tools 2..4=String 5=ChatCaller
         // 其余全部默认。mask 只清 bit0 与 bit5，其余置 1。
