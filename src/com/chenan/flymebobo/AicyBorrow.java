@@ -164,7 +164,12 @@ public class AicyBorrow {
                 log("test ask suspended, waiting resume");
             }
         } catch (Throwable t) {
-            log("test ask err " + t);
+            Throwable cause = t;
+            while (cause.getCause() != null
+                    && cause.getCause() != cause) {
+                cause = cause.getCause();
+            }
+            log("test ask err " + t + " cause=" + cause);
         }
     }
 
@@ -327,8 +332,11 @@ public class AicyBorrow {
         messages.add(buildMessage("SYSTEM", system));
         messages.add(buildMessage("USER", user));
         // v621: 合成构造为 (int mask, 23 个真实参数)，无 marker。
-        // 真实参数序：0=messages 1=tools 2..4=String 5=ChatCaller
-        // 其余全部默认。mask 只清 bit0 与 bit5，其余置 1。
+        // v624: mask 语义修正——这是 @Serializable 的序列化构造
+        //（与 b0 的默认参数构造正好相反）：bit 置 1 = 用传入值，
+        // bit 为 0 = 取默认；且 bit0(messages) 必填，不置 1 直接
+        // 抛 MissingFieldException（日志 83 的 InvocationTarget-
+        // Exception 即此）。只给 messages 与 caller：mask=33。
         Constructor<?> ctor = null;
         for (Constructor<?> c : reqClass.getDeclaredConstructors()) {
             Class<?>[] pt = c.getParameterTypes();
@@ -343,7 +351,7 @@ public class AicyBorrow {
         ctor.setAccessible(true);
         Class<?>[] pt = ctor.getParameterTypes();
         Object[] args = new Object[pt.length];
-        int mask = 0x7FFFFF & ~(1 << 0) & ~(1 << 5);
+        int mask = (1 << 0) | (1 << 5);
         args[0] = Integer.valueOf(mask);
         for (int i = 1; i < pt.length; i++) {
             args[i] = defaultFor(pt[i]);
